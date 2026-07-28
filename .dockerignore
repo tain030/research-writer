@@ -1,0 +1,12 @@
+node_modules
+.pnpm-store
+.svelte-kit
+build
+package
+src-tauri/target
+.git
+*.log
+.env
+.env.*
+!.env.example
+artifacts

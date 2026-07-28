@@ -1,0 +1,27 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/research-folders",
+    "headers": {
+      "Authorization": {
+        "equalTo": "Bearer test-token"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "research_folders": [
+        {
+          "slug": "example",
+          "title": "예시 리서치",
+          "stage": "human_review",
+          "source_count": 1
+        }
+      ]
+    }
+  }
+}

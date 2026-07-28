@@ -1,0 +1,40 @@
+services:
+  syncthing-a:
+    image: syncthing/syncthing:2.1.2
+    hostname: writer-sync-a
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      - sync-a:/var/syncthing
+      - ./tests/fixtures/sync-a:/workspace
+
+  syncthing-b:
+    image: syncthing/syncthing:2.1.2
+    hostname: writer-sync-b
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      - sync-b:/var/syncthing
+      - ./tests/fixtures/sync-b:/workspace
+
+  zotero-mock:
+    image: wiremock/wiremock:3.13.1
+    command: ["--global-response-templating", "--verbose"]
+    ports:
+      - "23119:8080"
+    volumes:
+      - ./tests/mocks/zotero:/home/wiremock
+
+  research-agent-mock:
+    image: wiremock/wiremock:3.13.1
+    command: ["--global-response-templating", "--verbose"]
+    ports:
+      - "18000:8080"
+    volumes:
+      - ./tests/mocks/research-agent:/home/wiremock
+
+volumes:
+  sync-a:
+  sync-b:

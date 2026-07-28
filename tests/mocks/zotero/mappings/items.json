@@ -1,0 +1,32 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/api/users/0/items"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": [
+      {
+        "key": "LOCAL1",
+        "data": {
+          "key": "LOCAL1",
+          "itemType": "journalArticle",
+          "title": "Local-first research writing",
+          "date": "2026",
+          "publicationTitle": "Writing Systems",
+          "DOI": "10.1000/local-first",
+          "creators": [
+            {
+              "creatorType": "author",
+              "firstName": "Tain",
+              "lastName": "Kim"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

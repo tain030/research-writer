@@ -1,0 +1,30 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/research-folders/example/sources",
+    "headers": {
+      "Authorization": {
+        "equalTo": "Bearer test-token"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "sources": [
+        {
+          "id": "S001",
+          "title": "Official source",
+          "url": "https://example.com/official",
+          "publisher": "Example Authority",
+          "checkedAt": "2026-07-28",
+          "classification": "primary · A",
+          "citationMarkdown": "Example Authority, “Official source,” 2026, https://example.com/official."
+        }
+      ]
+    }
+  }
+}

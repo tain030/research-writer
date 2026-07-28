@@ -1,0 +1,50 @@
+[package]
+name = "research-writer"
+version = "0.1.1"
+description = "A quiet, local-first research writing editor"
+authors = ["tain"]
+edition = "2024"
+license = "MIT"
+rust-version = "1.97.1"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "research_writer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+atomic-write-file = "=0.3.0"
+base64 = "=0.22.1"
+chardetng = "=1.0.0"
+chrono = { version = "=0.4.45", features = ["serde"] }
+dirs = "=6.0.0"
+diffy = "=0.5.1"
+encoding_rs = "=0.8.35"
+flate2 = "=1.1.9"
+fontdb = "=0.23.0"
+keyring = "=4.1.5"
+notify = "=8.2.0"
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "query", "rustls", "system-proxy"] }
+roxmltree = "=0.21.1"
+rusqlite = { version = "=0.40.1", features = ["bundled-full"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.11.0"
+tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-dialog = "=2.7.2"
+tauri-plugin-opener = "=2.5.4"
+tauri-plugin-window-state = "=2.4.1"
+tempfile = "=3.27.0"
+thiserror = "=2.0.18"
+uuid = { version = "=1.20.0", features = ["v4"] }
+walkdir = "=2.5.0"
+
+[dev-dependencies]
+pretty_assertions = "=1.4.1"

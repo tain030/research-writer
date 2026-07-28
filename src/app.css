@@ -1,0 +1,171 @@
+@font-face {
+  font-family: "Pretendard";
+  src: url("/fonts/Pretendard-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Pretendard";
+  src: url("/fonts/Pretendard-SemiBold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MaruBuri";
+  src: url("/fonts/MaruBuri-Regular.otf") format("opentype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MaruBuri";
+  src: url("/fonts/MaruBuri-SemiBold.otf") format("opentype");
+  font-style: normal;
+  font-weight: 650;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "NanumGothicCoding";
+  src: url("/fonts/NanumGothicCoding-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  font-family:
+    Inter, "Noto Sans KR", "NanumGothicCoding", system-ui, -apple-system,
+    sans-serif;
+  color: #302c28;
+  background: #eae5dc;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --ui-font:
+    Inter, "Noto Sans KR", "NanumGothicCoding", system-ui, sans-serif;
+  --paper: #f7f2e8;
+  --paper-deep: #efe8dc;
+  --paper-raised: #fbf8f1;
+  --ink: #39342e;
+  --ink-strong: #211e1a;
+  --ink-muted: #786f65;
+  --ink-faint: #a49a8e;
+  --ink-ghost: #b7aea3;
+  --accent: #9f4f39;
+  --accent-soft: #ead7cd;
+  --link: #3e6e70;
+  --rule: #d7cec0;
+  --rule-strong: #bfb3a3;
+  --selection: rgba(169, 106, 74, 0.18);
+  --success: #4f7561;
+  --warning: #a06b2c;
+  --danger: #9b443d;
+  --shadow: 0 18px 55px rgba(48, 40, 31, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --paper: #24211d;
+    --paper-deep: #1c1a17;
+    --paper-raised: #2c2823;
+    --ink: #ddd4c8;
+    --ink-strong: #f3eadf;
+    --ink-muted: #a99e91;
+    --ink-faint: #756e65;
+    --ink-ghost: #665f57;
+    --accent: #d4866c;
+    --accent-soft: #4c3128;
+    --link: #83b3b1;
+    --rule: #453f38;
+    --rule-strong: #5e564d;
+    --selection: rgba(210, 134, 105, 0.2);
+    --success: #84ad92;
+    --warning: #d5a566;
+    --danger: #dd8077;
+    --shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper: #24211d;
+  --paper-deep: #1c1a17;
+  --paper-raised: #2c2823;
+  --ink: #ddd4c8;
+  --ink-strong: #f3eadf;
+  --ink-muted: #a99e91;
+  --ink-faint: #756e65;
+  --ink-ghost: #665f57;
+  --accent: #d4866c;
+  --accent-soft: #4c3128;
+  --link: #83b3b1;
+  --rule: #453f38;
+  --rule-strong: #5e564d;
+  --selection: rgba(210, 134, 105, 0.2);
+  --success: #84ad92;
+  --warning: #d5a566;
+  --danger: #dd8077;
+  --shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+body,
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+input,
+select,
+textarea {
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--paper-raised);
+  padding: 0.65rem 0.72rem;
+  outline: none;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+::selection {
+  background: var(--selection);
+}
