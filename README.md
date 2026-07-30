@@ -10,22 +10,27 @@
 [GitHub Releases](https://github.com/tain030/research-writer/releases/latest)에서
 내려받을 수 있습니다.
 
-- Debian/Ubuntu: `research-writer_0.1.3_amd64.deb`
-- 그 밖의 x86_64 Linux: `research-writer_0.1.3_amd64.AppImage`
+- Debian/Ubuntu: `research-writer_amd64.deb`
+- 그 밖의 x86_64 Linux: `research-writer_amd64.AppImage`
 
 두 파일은 공개 배포용 서명을 하지 않은 초기 빌드입니다. 같은 Release의
 `SHA256SUMS`를 함께 내려받으면 설치 전에 무결성을 확인할 수 있습니다.
 
 ### 다른 노트북에서 설치
 
-노트북 브라우저에서
-[최신 Release](https://github.com/tain030/research-writer/releases/latest)를 열고
-`.deb`와 `SHA256SUMS`를 `~/Downloads`에 내려받은 뒤 실행합니다.
+노트북에서 아래 명령으로 최신 `.deb`와 체크섬을 내려받습니다. 이미 이전
+버전이 설치되어 있어도 삭제할 필요가 없습니다. `apt install`이 같은
+`research-writer` 패키지를 새 버전으로 교체하며 원고와 사용자 설정은
+유지됩니다.
 
 ```bash
 cd ~/Downloads
-grep 'research-writer_0.1.3_amd64.deb$' SHA256SUMS | sha256sum -c -
-sudo apt install ./research-writer_0.1.3_amd64.deb
+wget -O research-writer_amd64.deb \
+  https://github.com/tain030/research-writer/releases/latest/download/research-writer_amd64.deb
+wget -O SHA256SUMS \
+  https://github.com/tain030/research-writer/releases/latest/download/SHA256SUMS
+grep 'research-writer_amd64.deb$' SHA256SUMS | sha256sum -c -
+sudo apt install ./research-writer_amd64.deb
 ```
 
 설치 후 애플리케이션 메뉴에서 `Research Writer`를 선택하거나
@@ -36,9 +41,11 @@ Debian/Ubuntu 계열이 아닌 x86_64 Linux에서는 AppImage를 실행할 수 �
 
 ```bash
 cd ~/Downloads
-grep 'research-writer_0.1.3_amd64.AppImage$' SHA256SUMS | sha256sum -c -
-chmod +x research-writer_0.1.3_amd64.AppImage
-./research-writer_0.1.3_amd64.AppImage
+wget -O research-writer_amd64.AppImage \
+  https://github.com/tain030/research-writer/releases/latest/download/research-writer_amd64.AppImage
+grep 'research-writer_amd64.AppImage$' SHA256SUMS | sha256sum -c -
+chmod +x research-writer_amd64.AppImage
+./research-writer_amd64.AppImage
 ```
 
 ## 지금 들어 있는 기능
@@ -89,6 +96,23 @@ sudo apt install \
 ```bash
 ./scripts/test-linux-container.sh
 ```
+
+## 릴리스
+
+안정 버전을 설정하고 해당 커밋에 같은 버전 태그를 푸시하면 GitHub Actions가
+전체 CI, Linux x86_64 패키징, 체크섬 생성과 GitHub Release 공개를 수행합니다.
+
+```bash
+pnpm release:version 0.1.4
+git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git commit -m "Release v0.1.4"
+git tag -a v0.1.4 -m "Research Writer v0.1.4"
+git push origin main v0.1.4
+```
+
+태그는 `v숫자.숫자.숫자` 형식이어야 하며 `main`에 포함된 커밋만 릴리스할 수
+있습니다. macOS와 Windows는 CI에서 계속 검증하지만 코드 서명과 공증을
+준비하기 전까지 공개 설치물에는 포함하지 않습니다.
 
 Docker는 재현 가능한 빌드와 통합 테스트에만 사용합니다. 실제 데스크톱 앱은 호스트의 WebView, 글꼴, OS 보안 저장소, Zotero와 Syncthing에 접근해야 하므로 컨테이너 안에서 실행하지 않습니다.
 
