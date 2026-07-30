@@ -2,6 +2,7 @@ mod codex;
 mod database;
 mod document;
 mod integrations;
+mod manuscript;
 mod platform;
 
 use codex::{AiAccountStatus, AiLoginStart, AiWritingRequest, AiWritingResponse, CodexBridge};
@@ -11,6 +12,7 @@ use integrations::{
     ResearchConnectionStatus, ResearchSource, ResearchWorkspaceStatus, SyncthingStatus, ZoteroItem,
     ZoteroStatus,
 };
+use manuscript::ManuscriptRepositoryStatus;
 use platform::{FontRecord, FontService, PlatformServices, SystemIntegration};
 use serde_json::Value;
 use std::path::Path;
@@ -114,6 +116,28 @@ fn load_version(id: String, state: State<'_, AppState>) -> Result<StoredVersion,
 #[tauri::command]
 fn recent_documents(state: State<'_, AppState>) -> Result<Vec<RecentDocument>, String> {
     state.database.recent_documents()
+}
+
+#[tauri::command]
+fn manuscript_repository_status(
+    state: State<'_, AppState>,
+) -> Result<ManuscriptRepositoryStatus, String> {
+    manuscript::repository_status(&state.database)
+}
+
+#[tauri::command]
+fn configure_manuscript_repository(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ManuscriptRepositoryStatus, String> {
+    manuscript::configure_repository(&state.database, &path)
+}
+
+#[tauri::command]
+fn create_manuscript_document(state: State<'_, AppState>) -> Result<DocumentPayload, String> {
+    let document = manuscript::create_manuscript(&state.database)?;
+    state.database.touch_recent(&document.path)?;
+    Ok(document)
 }
 
 #[tauri::command]
@@ -276,6 +300,9 @@ pub fn run() {
             list_versions,
             load_version,
             recent_documents,
+            manuscript_repository_status,
+            configure_manuscript_repository,
+            create_manuscript_document,
             index_workspace,
             search_workspace,
             ai_account_status,

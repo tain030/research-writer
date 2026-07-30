@@ -23,6 +23,7 @@
     parsePreferences,
     type Preferences,
   } from "$lib/preferences";
+  import { externalSyncProvider } from "$lib/storage";
   import type {
     AiAccountStatus,
     AiLoginStart,
@@ -32,6 +33,7 @@
     DocumentPayload,
     EditorSelection,
     FontRecord,
+    ManuscriptRepositoryStatus,
     RecentDocument,
     ResearchConnectionStatus,
     ResearchFolder,
@@ -90,6 +92,8 @@
   let toast = $state("");
   let toastKind = $state<"info" | "error" | "success">("info");
   let sync = $state<SyncthingStatus | null>(null);
+  let manuscriptRepository = $state<ManuscriptRepositoryStatus | null>(null);
+  let creatingDocument = $state(false);
   let versions = $state<VersionSummary[]>([]);
   let namedVersion = $state("");
   let workspaceRoot = $state("");
@@ -142,6 +146,12 @@
   let minutes = $derived(readingMinutes(editorValue));
   let documentTitle = $derived(
     currentDocument ? basename(currentDocument.path) : "Research Writer",
+  );
+  let currentSyncProvider = $derived(
+    externalSyncProvider(currentDocument?.path ?? ""),
+  );
+  let repositorySyncProvider = $derived(
+    externalSyncProvider(manuscriptRepository?.path ?? ""),
   );
   let sourceContexts = $derived(
     researchSources
@@ -208,16 +218,6 @@
     return saveState === "saved";
   }
 
-  function usesAnotherSyncProvider(path: string): boolean {
-    const normalized = path.replaceAll("\\", "/").toLowerCase();
-    return (
-      normalized.includes("/dropbox/") ||
-      /\/onedrive(?: - [^/]+)?\//u.test(normalized) ||
-      normalized.includes("/google drive/") ||
-      normalized.includes("/mobile documents/com~apple~clouddocs/")
-    );
-  }
-
   function loadPreferences(): void {
     preferences = parsePreferences(
       localStorage.getItem("research-writer.preferences"),
@@ -242,6 +242,66 @@
     }
   }
 
+  async function refreshManuscriptRepository(): Promise<void> {
+    if (!desktop) return;
+    try {
+      manuscriptRepository = await invoke<ManuscriptRepositoryStatus>(
+        "manuscript_repository_status",
+      );
+      if (manuscriptRepository.available && manuscriptRepository.path) {
+        workspaceRoot = manuscriptRepository.path;
+      }
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
+  }
+
+  async function chooseManuscriptRepository(): Promise<boolean> {
+    if (!desktop) return false;
+    const selected = await openDialog({
+      title: "원고 저장소 선택 · OSDN의 3_Write 권장",
+      directory: true,
+      multiple: false,
+      defaultPath:
+        manuscriptRepository?.available && manuscriptRepository.path
+          ? manuscriptRepository.path
+          : undefined,
+    });
+    if (typeof selected !== "string") return false;
+    try {
+      manuscriptRepository = await invoke<ManuscriptRepositoryStatus>(
+        "configure_manuscript_repository",
+        { path: selected },
+      );
+      if (!manuscriptRepository.available || !manuscriptRepository.path) {
+        notify(manuscriptRepository.message, "error");
+        return false;
+      }
+      workspaceRoot = manuscriptRepository.path;
+      searchIndexed = false;
+      searchResults = [];
+      notify(`원고 저장소를 ${basename(manuscriptRepository.path)}로 정했습니다.`, "success");
+      return true;
+    } catch (error) {
+      notify(errorMessage(error), "error");
+      return false;
+    }
+  }
+
+  async function ensureManuscriptRepository(): Promise<boolean> {
+    if (!manuscriptRepository) await refreshManuscriptRepository();
+    if (manuscriptRepository?.available && manuscriptRepository.path) {
+      return true;
+    }
+    notify(
+      manuscriptRepository?.configured
+        ? "설정한 원고 저장소를 찾을 수 없습니다. 폴더를 다시 선택해주세요."
+        : "처음 한 번만 OSDN의 3_Write 폴더를 원고 저장소로 선택해주세요.",
+      "info",
+    );
+    return chooseManuscriptRepository();
+  }
+
   async function setDocument(document: DocumentPayload): Promise<void> {
     if (currentDocument && desktop) {
       await invoke("unwatch_document", {
@@ -261,9 +321,12 @@
       await invoke("watch_document", { path: document.path }).catch((error) =>
         notify(errorMessage(error), "error"),
       );
-      workspaceRoot = await invoke<string>("parent_directory", {
-        path: document.path,
-      }).catch(() => "");
+      workspaceRoot =
+        manuscriptRepository?.available && manuscriptRepository.path
+          ? manuscriptRepository.path
+          : await invoke<string>("parent_directory", {
+              path: document.path,
+            }).catch(() => "");
       await Promise.all([loadRecents(), refreshSync()]);
     }
     await tick();
@@ -315,30 +378,24 @@
       loadWebPreview();
       return;
     }
-    const selected = await saveDialog({
-      title: "새 원고 만들기",
-      defaultPath: "제목 없는 원고.md",
-      filters: [{ name: "Markdown", extensions: ["md"] }],
-    });
-    if (!selected) return;
-    const path = selected.toLowerCase().endsWith(".md")
-      ? selected
-      : `${selected}.md`;
-    const initial = "# 제목 없는 원고\n\n";
+    if (creatingDocument) return;
+    creatingDocument = true;
     try {
-      await invoke<SaveDocumentResult>("save_document", {
-        request: {
-          path,
-          content: initial,
-          expectedHash: null,
-          lineEnding: "LF",
-          bom: false,
-          force: true,
-        },
-      });
-      await openPath(path);
+      if (!(await maybeSaveBeforeSwitch())) return;
+      if (!(await ensureManuscriptRepository())) return;
+      const created = await invoke<DocumentPayload>("create_manuscript_document");
+      await setDocument(created);
+      await tick();
+      const titleEnd = created.content.indexOf("\n");
+      if (created.content.startsWith("# ") && titleEnd > 2) {
+        editorApi?.setSelection(2, titleEnd);
+      }
+      notify("새 원고를 만들었습니다.", "success");
     } catch (error) {
+      await refreshManuscriptRepository();
       notify(errorMessage(error), "error");
+    } finally {
+      creatingDocument = false;
     }
   }
 
@@ -1073,7 +1130,10 @@
       }
       return;
     }
-    if (event.key.toLowerCase() === "o") {
+    if (event.key.toLowerCase() === "n") {
+      event.preventDefault();
+      void createDocument();
+    } else if (event.key.toLowerCase() === "o") {
       event.preventDefault();
       void chooseDocument();
     } else if (event.key.toLowerCase() === "s" && event.shiftKey) {
@@ -1105,7 +1165,7 @@
     }
 
     fonts = await invoke<FontRecord[]>("list_fonts").catch(() => fonts);
-    await loadRecents();
+    await Promise.all([loadRecents(), refreshManuscriptRepository()]);
     const startup = await invoke<string | null>("startup_document").catch(
       () => null,
     );
@@ -1162,6 +1222,15 @@
 >
   <header class="topbar">
     <div class="topbar-side">
+      <button
+        class="icon-button"
+        title="새 원고 (Ctrl+N)"
+        aria-label="새 원고 만들기"
+        disabled={creatingDocument}
+        onclick={() => void createDocument()}
+      >
+        ＋
+      </button>
       <button
         class:active={leftPanel === "outline"}
         class="icon-button"
@@ -1389,7 +1458,7 @@
           <span>{selection.line}행</span>
         </div>
         <div>
-          {#if sync}
+          {#if sync?.folderId}
             <span
               class:warning={sync.conflictFiles.length > 0}
               title={sync.message}
@@ -1398,9 +1467,11 @@
                 ? `동기화 충돌 ${sync.conflictFiles.length}`
                 : sync.state === "idle" && sync.needBytes === 0
                   ? "동기화됨"
-                  : sync.available
-                    ? "동기화 중"
-                    : "로컬 저장"}
+                  : "동기화 중"}
+            </span>
+          {:else if currentSyncProvider}
+            <span title={`실제 동기화는 ${currentSyncProvider} 앱이 담당합니다.`}>
+              {currentSyncProvider} 폴더
             </span>
           {:else}
             <span>로컬 저장</span>
@@ -1425,13 +1496,30 @@
           오래 쓰고 싶은 리서치 에디터.
         </p>
         <div class="welcome-actions">
-          <button class="primary-button" onclick={() => void createDocument()}>
-            새 원고
+          <button
+            class="primary-button"
+            disabled={creatingDocument}
+            onclick={() => void createDocument()}
+          >
+            {creatingDocument ? "만드는 중…" : "새 원고"}
           </button>
           <button class="secondary-button" onclick={() => void chooseDocument()}>
             원고 열기
           </button>
         </div>
+        {#if manuscriptRepository?.available && manuscriptRepository.path}
+          <button
+            class="welcome-repository"
+            title={manuscriptRepository.path}
+            onclick={() => void chooseManuscriptRepository()}
+          >
+            저장 위치 · <strong>{basename(manuscriptRepository.path)}</strong>
+          </button>
+        {:else}
+          <p class="welcome-repository">
+            처음 한 번 OSDN의 3_Write 폴더를 선택합니다.
+          </p>
+        {/if}
         {#if recents.length}
           <div class="recent-block">
             <p>최근 원고</p>
@@ -1443,7 +1531,9 @@
             {/each}
           </div>
         {/if}
-        <p class="welcome-shortcuts">Ctrl+O 열기 · Ctrl+S 저장 · Ctrl+P 검색</p>
+        <p class="welcome-shortcuts">
+          Ctrl+N 새 원고 · Ctrl+O 열기 · Ctrl+S 저장 · Ctrl+P 검색
+        </p>
       </div>
     {/if}
   </section>
@@ -1787,15 +1877,41 @@
 
           <section class="panel-section">
             <p class="eyebrow">저장과 동기화</p>
+            <button
+              class="path-button repository-path"
+              onclick={() => void chooseManuscriptRepository()}
+            >
+              <span title={manuscriptRepository?.path ?? ""}>
+                {manuscriptRepository?.path ?? "원고 저장소 선택"}
+              </span>
+              <small>{manuscriptRepository?.available ? "변경" : "선택"}</small>
+            </button>
+            {#if manuscriptRepository?.configured && !manuscriptRepository.available}
+              <p class="danger-note">{manuscriptRepository.message}</p>
+            {:else}
+              <p class="panel-note">
+                새 원고는 이 폴더에 바로 생성됩니다. 기기마다 OSDN의 3_Write
+                폴더를 한 번 선택하세요.
+              </p>
+            {/if}
             <div class="settings-fact">
               <strong>300ms 자동 저장</strong>
               <span>임시 파일 · fsync · 원자 교체</span>
             </div>
-            <div class="settings-fact">
-              <strong>Syncthing</strong>
-              <span>{sync?.message ?? "로컬 설치를 자동 감지합니다."}</span>
-            </div>
-            {#if currentDocument && usesAnotherSyncProvider(currentDocument.path) && sync?.folderId}
+            {#if repositorySyncProvider}
+              <div class="settings-fact">
+                <strong>{repositorySyncProvider} 관리 폴더</strong>
+                <span>
+                  실제 동기화와 상태 확인은 {repositorySyncProvider} 앱이 담당합니다.
+                </span>
+              </div>
+            {:else}
+              <div class="settings-fact">
+                <strong>Syncthing</strong>
+                <span>{sync?.message ?? "로컬 설치를 자동 감지합니다."}</span>
+              </div>
+            {/if}
+            {#if currentSyncProvider && sync?.folderId}
               <p class="danger-note">
                 이 폴더는 다른 클라우드 동기화 도구와 Syncthing에 동시에 포함된
                 것으로 보입니다. 같은 폴더에는 하나의 동기화 도구만 사용하세요.
@@ -2225,6 +2341,20 @@
     color: var(--accent);
   }
 
+  .repository-path {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .repository-path span {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .repository-path small {
+    flex: 0 0 auto;
+  }
+
   .quiet-line,
   .working-line {
     color: var(--ink-muted);
@@ -2467,6 +2597,27 @@
   .secondary-button {
     border: 1px solid var(--rule-strong);
     background: var(--paper-raised);
+  }
+
+  .welcome-repository {
+    margin: 14px 0 0;
+    color: var(--ink-faint);
+    font-size: var(--type-caption);
+  }
+
+  button.welcome-repository {
+    border: 0;
+    background: transparent;
+    padding: 3px 6px;
+  }
+
+  button.welcome-repository:hover {
+    color: var(--ink-muted);
+  }
+
+  .welcome-repository strong {
+    color: var(--ink-muted);
+    font-weight: 650;
   }
 
   .recent-block {

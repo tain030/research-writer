@@ -51,6 +51,7 @@
     getSelection: () => SelectionInfo;
     replaceRange: (from: number, to: number, text: string) => void;
     insertAtCursor: (text: string) => void;
+    setSelection: (from: number, to: number) => void;
     scrollToOffset: (offset: number) => void;
     scrollToLine: (line: number) => void;
     setGhostText: (text: string) => void;
@@ -495,6 +496,18 @@
           changes: { from: range.from, to: range.to, insert: text },
           selection: EditorSelection.cursor(range.from + text.length),
           userEvent: "input.insert",
+        });
+        current.focus();
+      },
+      setSelection: (from, to) => {
+        const start = Math.max(0, Math.min(from, to, current.state.doc.length));
+        const end = Math.max(
+          0,
+          Math.min(Math.max(from, to), current.state.doc.length),
+        );
+        current.dispatch({
+          selection: EditorSelection.range(start, end),
+          effects: EditorView.scrollIntoView(end, { y: "center" }),
         });
         current.focus();
       },

@@ -10,6 +10,7 @@ Svelte 5 UI + CodeMirror 6
           ▼
 Rust application services
   ├─ document: decode, hash, atomic save, merge
+  ├─ manuscript: repository setting, unique draft creation
   ├─ database: versions, recents, FTS search, settings
   ├─ platform: fonts, keyring, file watch, startup files
   ├─ codex: App Server JSON-RPC bridge
@@ -23,7 +24,11 @@ Rust application services
 
 ### 원고와 메타데이터
 
-`.md` 파일이 항상 원고의 단일 진실입니다. 앱 데이터 폴더의 SQLite에는 압축 버전, 최근 문서, FTS 색인과 비밀이 아닌 설정만 저장합니다. 앱을 제거해도 원고는 다른 Markdown 편집기에서 그대로 열 수 있습니다.
+`.md` 파일이 항상 원고의 단일 진실입니다. 기기별 원고 저장소의 절대경로는
+앱 데이터 폴더의 SQLite에 보관하고 vault 자체에는 기록하지 않습니다. 새
+원고는 저장소 안에 고유한 이름으로 배타 생성합니다. SQLite에는 이 설정과
+압축 버전, 최근 문서, FTS 색인만 저장하므로 앱을 제거해도 원고는 다른
+Markdown 편집기에서 그대로 열 수 있습니다.
 
 ### 저장 프로토콜
 
@@ -53,6 +58,7 @@ AI 연결은 Codex CLI의 App Server 프로토콜을 사용합니다.
 
 - Zotero: 루프백 읽기 전용 Local API만 사용합니다.
 - Syncthing: 로컬 REST API를 읽기만 하며 설정이나 파일을 변경하지 않습니다.
+- Dropbox·OneDrive·Google Drive·iCloud: 관리 경로만 표시하며 실제 동기화는 각 공급자의 데스크톱 앱에 맡깁니다.
 - Research Agent: HTTPS/Bearer API를 사용하고 토큰은 OS 보안 저장소에 둡니다. 출처 API가 없을 때만 사용자가 연결한 로컬 작업 폴더를 읽습니다.
 
 ## 플랫폼 전략

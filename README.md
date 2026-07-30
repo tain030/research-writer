@@ -10,8 +10,8 @@
 [GitHub Releases](https://github.com/tain030/research-writer/releases/latest)에서
 내려받을 수 있습니다.
 
-- Debian/Ubuntu: `research-writer_0.1.2_amd64.deb`
-- 그 밖의 x86_64 Linux: `research-writer_0.1.2_amd64.AppImage`
+- Debian/Ubuntu: `research-writer_0.1.3_amd64.deb`
+- 그 밖의 x86_64 Linux: `research-writer_0.1.3_amd64.AppImage`
 
 두 파일은 공개 배포용 서명을 하지 않은 초기 빌드입니다. 같은 Release의
 `SHA256SUMS`를 함께 내려받으면 설치 전에 무결성을 확인할 수 있습니다.
@@ -24,8 +24,8 @@
 
 ```bash
 cd ~/Downloads
-grep 'research-writer_0.1.2_amd64.deb$' SHA256SUMS | sha256sum -c -
-sudo apt install ./research-writer_0.1.2_amd64.deb
+grep 'research-writer_0.1.3_amd64.deb$' SHA256SUMS | sha256sum -c -
+sudo apt install ./research-writer_0.1.3_amd64.deb
 ```
 
 설치 후 애플리케이션 메뉴에서 `Research Writer`를 선택하거나
@@ -36,15 +36,16 @@ Debian/Ubuntu 계열이 아닌 x86_64 Linux에서는 AppImage를 실행할 수 �
 
 ```bash
 cd ~/Downloads
-grep 'research-writer_0.1.2_amd64.AppImage$' SHA256SUMS | sha256sum -c -
-chmod +x research-writer_0.1.2_amd64.AppImage
-./research-writer_0.1.2_amd64.AppImage
+grep 'research-writer_0.1.3_amd64.AppImage$' SHA256SUMS | sha256sum -c -
+chmod +x research-writer_0.1.3_amd64.AppImage
+./research-writer_0.1.3_amd64.AppImage
 ```
 
 ## 지금 들어 있는 기능
 
 - Pretendard를 원고 기본 글꼴로 제공, MaruBuri·NanumGothicCoding 및 설치된 시스템 글꼴 선택
 - CodeMirror 기반 Markdown 편집, 현재 블록만 문법 기호를 드러내는 하이브리드 표시
+- 기기별 원고 저장소를 한 번 지정하고 탐색기 없이 새 Markdown 원고를 즉시 생성
 - 300ms 자동 저장, 원래 줄바꿈과 UTF-8 BOM 보존, 임시 파일·fsync·원자 교체
 - 외부 변경 감지, 해시 기반 낙관적 잠금, 3-way 병합과 충돌 양쪽 버전 보관
 - 문단·문장 집중 모드, 타자기 스크롤, 선택 가능한 절제된 타건음
@@ -90,6 +91,17 @@ sudo apt install \
 ```
 
 Docker는 재현 가능한 빌드와 통합 테스트에만 사용합니다. 실제 데스크톱 앱은 호스트의 WebView, 글꼴, OS 보안 저장소, Zotero와 Syncthing에 접근해야 하므로 컨테이너 안에서 실행하지 않습니다.
+
+## 원고 저장소와 Obsidian
+
+처음 `새 원고`를 누르면 기기에서 사용할 원고 저장소를 한 번 선택합니다.
+OSDN Obsidian vault를 함께 쓴다면 `OSDN/3_Write`를 선택하세요. 이후에는
+`YYYY-MM-DD HHMMSS 새 원고.md`가 이 폴더에 즉시 만들어지고 제목을 바로
+입력할 수 있습니다. 저장소 경로는 `설정 → 저장과 동기화`에서 변경합니다.
+
+원고는 평범한 Markdown 파일이므로 Obsidian에서도 그대로 보입니다. OSDN이
+Dropbox 폴더에 있다면 실제 업로드와 다른 기기 동기화는 Dropbox 앱이
+담당합니다. 같은 vault를 Syncthing과 동시에 관리하지 마세요.
 
 ## 선택 기능 연결
 

@@ -67,6 +67,13 @@ export interface SyncthingStatus {
   message: string;
 }
 
+export interface ManuscriptRepositoryStatus {
+  configured: boolean;
+  available: boolean;
+  path: string | null;
+  message: string;
+}
+
 export interface AiAccountStatus {
   codexInstalled: boolean;
   codexVersion: string | null;
