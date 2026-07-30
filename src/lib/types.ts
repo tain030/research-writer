@@ -67,11 +67,21 @@ export interface SyncthingStatus {
   message: string;
 }
 
-export interface ManuscriptRepositoryStatus {
-  configured: boolean;
+export interface RepositoryStatus {
+  active: boolean;
   available: boolean;
+  writable: boolean;
   path: string | null;
+  lastDocumentPath: string | null;
   message: string;
+}
+
+export interface RepositoryDocument {
+  path: string;
+  name: string;
+  modifiedAtMs: number;
+  sizeBytes: number;
+  readOnly: boolean;
 }
 
 export interface AiAccountStatus {
@@ -164,8 +174,11 @@ export interface EditorSelection {
   to: number;
   text: string;
   line: number;
+  page?: number;
+  row?: number;
+  column?: number;
 }
 
 export type FocusMode = "off" | "paragraph" | "sentence";
-export type SidePanel = "outline" | "search" | "versions" | null;
+export type SidePanel = "repository" | "outline" | "search" | "versions" | null;
 export type AssistantPanel = "ai" | "sources" | "settings" | null;

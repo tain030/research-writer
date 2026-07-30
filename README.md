@@ -51,8 +51,9 @@ chmod +x research-writer_amd64.AppImage
 ## 지금 들어 있는 기능
 
 - Pretendard를 원고 기본 글꼴로 제공, MaruBuri·NanumGothicCoding 및 설치된 시스템 글꼴 선택
-- CodeMirror 기반 Markdown 편집, 현재 블록만 문법 기호를 드러내는 하이브리드 표시
-- 기기별 원고 저장소를 한 번 지정하고 탐색기 없이 새 Markdown 원고를 즉시 생성
+- Markdown 문자까지 한 칸씩 담는 20×10, 200자 원고지 편집 화면과 페이지 구분
+- 어떤 폴더든 원고 저장소로 열고, 루트의 Markdown 원고를 생성·이름 변경·휴지통 삭제
+- 마지막 저장소와 마지막 원고 자동 복원, 저장소 밖 Markdown 파일의 독립 편집
 - 300ms 자동 저장, 원래 줄바꿈과 UTF-8 BOM 보존, 임시 파일·fsync·원자 교체
 - 외부 변경 감지, 해시 기반 낙관적 잠금, 3-way 병합과 충돌 양쪽 버전 보관
 - 문단·문장 집중 모드, 타자기 스크롤, 선택 가능한 절제된 타건음
@@ -103,11 +104,11 @@ sudo apt install \
 전체 CI, Linux x86_64 패키징, 체크섬 생성과 GitHub Release 공개를 수행합니다.
 
 ```bash
-pnpm release:version 0.1.4
+pnpm release:version 0.1.5
 git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "Release v0.1.4"
-git tag -a v0.1.4 -m "Research Writer v0.1.4"
-git push origin main v0.1.4
+git commit -m "Release v0.1.5"
+git tag -a v0.1.5 -m "Research Writer v0.1.5"
+git push origin main v0.1.5
 ```
 
 태그는 `v숫자.숫자.숫자` 형식이어야 하며 `main`에 포함된 커밋만 릴리스할 수
@@ -118,14 +119,24 @@ Docker는 재현 가능한 빌드와 통합 테스트에만 사용합니다. 실
 
 ## 원고 저장소와 Obsidian
 
-처음 `새 원고`를 누르면 기기에서 사용할 원고 저장소를 한 번 선택합니다.
-OSDN Obsidian vault를 함께 쓴다면 `OSDN/3_Write`를 선택하세요. 이후에는
-`YYYY-MM-DD HHMMSS 새 원고.md`가 이 폴더에 즉시 만들어지고 제목을 바로
-입력할 수 있습니다. 저장소 경로는 `설정 → 저장과 동기화`에서 변경합니다.
+`저장소 열기`로 작업할 폴더를 선택합니다. Obsidian vault, vault 안의 글쓰기
+폴더, 일반 프로젝트 폴더를 모두 열 수 있습니다. 앱은 마지막 저장소와 그
+안에서 마지막으로 열었던 원고를 다음 실행 때 복원합니다.
 
-원고는 평범한 Markdown 파일이므로 Obsidian에서도 그대로 보입니다. OSDN이
-Dropbox 폴더에 있다면 실제 업로드와 다른 기기 동기화는 Dropbox 앱이
-담당합니다. 같은 vault를 Syncthing과 동시에 관리하지 마세요.
+저장소를 연 뒤 `새 원고`를 누르면 탐색기 없이 루트에
+`제목 없는 원고.md`가 만들어지고 곧바로 이름을 입력할 수 있습니다. 같은
+이름이 있으면 번호가 붙습니다. 저장소 목록에서는 이름 변경과 OS 휴지통
+이동도 할 수 있습니다. 목록과 저장소 검색은 의도적으로 루트의 `.md`와
+`.markdown` 파일만 다루며, 하위 폴더 파일은 `파일 열기`로 독립적으로 열 수
+있습니다.
+
+원고는 평범한 Markdown 파일이므로 Obsidian에서도 그대로 보입니다. 저장소가
+Dropbox·OneDrive·Google Drive·iCloud 폴더에 있다면 실제 업로드와 다른 기기
+동기화는 해당 데스크톱 앱이 담당합니다. 같은 폴더를 여러 동기화 도구로
+동시에 관리하지 마세요.
+
+주요 단축키는 `Ctrl/Cmd+Shift+O` 저장소 열기, `Ctrl/Cmd+O` 파일 열기,
+`Ctrl/Cmd+N` 새 원고, `Ctrl/Cmd+W` 현재 원고 닫기입니다.
 
 ## 선택 기능 연결
 

@@ -12,7 +12,7 @@ use integrations::{
     ResearchConnectionStatus, ResearchSource, ResearchWorkspaceStatus, SyncthingStatus, ZoteroItem,
     ZoteroStatus,
 };
-use manuscript::ManuscriptRepositoryStatus;
+use manuscript::{RepositoryDocument, RepositoryStatus};
 use platform::{FontRecord, FontService, PlatformServices, SystemIntegration};
 use serde_json::Value;
 use std::path::Path;
@@ -29,6 +29,7 @@ struct AppState {
 fn read_document(path: String, state: State<'_, AppState>) -> Result<DocumentPayload, String> {
     let document = document::read_document(Path::new(&path))?;
     state.database.touch_recent(&document.path)?;
+    manuscript::remember_document_if_in_repository(&state.database, &document.path)?;
     Ok(document)
 }
 
@@ -62,11 +63,6 @@ fn merge_three_way(base: String, local: String, remote: String) -> MergeResult {
 }
 
 #[tauri::command]
-fn parent_directory(path: String) -> Result<String, String> {
-    database::parent_directory(&path)
-}
-
-#[tauri::command]
 fn startup_document(state: State<'_, AppState>) -> Option<String> {
     state.platform.system.startup_markdown_path()
 }
@@ -88,6 +84,20 @@ fn watch_document(
 #[tauri::command]
 fn unwatch_document(path: String, state: State<'_, AppState>) -> Result<(), String> {
     state.platform.watchers.unwatch(&path)
+}
+
+#[tauri::command]
+fn watch_repository(
+    app: tauri::AppHandle,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.platform.watchers.watch_repository(app, &path)
+}
+
+#[tauri::command]
+fn unwatch_repository(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.platform.watchers.unwatch_repository(&path)
 }
 
 #[tauri::command]
@@ -119,25 +129,49 @@ fn recent_documents(state: State<'_, AppState>) -> Result<Vec<RecentDocument>, S
 }
 
 #[tauri::command]
-fn manuscript_repository_status(
-    state: State<'_, AppState>,
-) -> Result<ManuscriptRepositoryStatus, String> {
+fn repository_status(state: State<'_, AppState>) -> Result<RepositoryStatus, String> {
     manuscript::repository_status(&state.database)
 }
 
 #[tauri::command]
-fn configure_manuscript_repository(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<ManuscriptRepositoryStatus, String> {
-    manuscript::configure_repository(&state.database, &path)
+fn open_repository(path: String, state: State<'_, AppState>) -> Result<RepositoryStatus, String> {
+    manuscript::open_repository(&state.database, &path)
 }
 
 #[tauri::command]
-fn create_manuscript_document(state: State<'_, AppState>) -> Result<DocumentPayload, String> {
-    let document = manuscript::create_manuscript(&state.database)?;
-    state.database.touch_recent(&document.path)?;
-    Ok(document)
+fn close_repository(state: State<'_, AppState>) -> Result<RepositoryStatus, String> {
+    manuscript::close_repository(&state.database)
+}
+
+#[tauri::command]
+fn list_repository_documents(
+    state: State<'_, AppState>,
+) -> Result<Vec<RepositoryDocument>, String> {
+    manuscript::list_documents(&state.database)
+}
+
+#[tauri::command]
+fn create_repository_document(state: State<'_, AppState>) -> Result<DocumentPayload, String> {
+    manuscript::create_document(&state.database)
+}
+
+#[tauri::command]
+fn rename_repository_document(
+    path: String,
+    new_name: String,
+    state: State<'_, AppState>,
+) -> Result<DocumentPayload, String> {
+    manuscript::rename_document(&state.database, &path, &new_name)
+}
+
+#[tauri::command]
+fn trash_repository_document(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    manuscript::trash_document(&state.database, &path)
+}
+
+#[tauri::command]
+fn clear_repository_last_document(state: State<'_, AppState>) -> Result<(), String> {
+    manuscript::clear_last_document(&state.database)
 }
 
 #[tauri::command]
@@ -291,18 +325,24 @@ pub fn run() {
             save_document,
             convert_document_to_utf8,
             merge_three_way,
-            parent_directory,
             startup_document,
             list_fonts,
             watch_document,
             unwatch_document,
+            watch_repository,
+            unwatch_repository,
             create_version,
             list_versions,
             load_version,
             recent_documents,
-            manuscript_repository_status,
-            configure_manuscript_repository,
-            create_manuscript_document,
+            repository_status,
+            open_repository,
+            close_repository,
+            list_repository_documents,
+            create_repository_document,
+            rename_repository_document,
+            trash_repository_document,
+            clear_repository_last_document,
             index_workspace,
             search_workspace,
             ai_account_status,

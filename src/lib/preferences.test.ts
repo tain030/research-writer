@@ -15,9 +15,9 @@ describe("writing preferences", () => {
 
     expect(parsePreferences(stored)).toMatchObject({
       fontFamily: "MaruBuri",
-      measure: 72,
       typewriterMode: true,
     });
+    expect("measure" in parsePreferences(stored)).toBe(false);
   });
 
   it("falls back safely when stored preferences are invalid", () => {

@@ -155,8 +155,9 @@ impl FileWatcherService {
         let canonical = PathBuf::from(path)
             .canonicalize()
             .map_err(|error| format!("감시할 문서를 찾을 수 없습니다: {error}"))?;
-        let key = canonical.to_string_lossy().to_string();
-        let event_path = key.clone();
+        let canonical_path = canonical.to_string_lossy().to_string();
+        let key = format!("document:{canonical_path}");
+        let event_path = canonical_path.clone();
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
             let Ok(event) = event else {
                 return;
@@ -185,11 +186,64 @@ impl FileWatcherService {
 
     pub fn unwatch(&self, path: &str) -> Result<(), String> {
         let path = PathBuf::from(path);
-        let key = path
+        let canonical = path
             .canonicalize()
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
+        let key = format!("document:{canonical}");
+        let mut watchers = self
+            .watchers
+            .lock()
+            .map_err(|_| "파일 감시기 잠금에 실패했습니다.")?;
+        watchers.remove(&key);
+        Ok(())
+    }
+
+    pub fn watch_repository(&self, app: AppHandle, path: &str) -> Result<(), String> {
+        let canonical = PathBuf::from(path)
+            .canonicalize()
+            .map_err(|error| format!("감시할 저장소를 찾을 수 없습니다: {error}"))?;
+        if !canonical.is_dir() {
+            return Err("감시할 저장소는 폴더여야 합니다.".to_string());
+        }
+        let canonical_path = canonical.to_string_lossy().to_string();
+        let key = format!("repository:{canonical_path}");
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+            let Ok(event) = event else {
+                return;
+            };
+            let Some(changed) = event.paths.first() else {
+                return;
+            };
+            let _ = app.emit(
+                "repository-change",
+                FileChangeEvent {
+                    path: changed.to_string_lossy().to_string(),
+                    kind: format!("{:?}", event.kind),
+                },
+            );
+        })
+        .map_err(|error| format!("저장소 감시기를 시작할 수 없습니다: {error}"))?;
+        watcher
+            .watch(&canonical, RecursiveMode::NonRecursive)
+            .map_err(|error| format!("저장소를 감시할 수 없습니다: {error}"))?;
+        let mut watchers = self
+            .watchers
+            .lock()
+            .map_err(|_| "파일 감시기 잠금에 실패했습니다.")?;
+        watchers.insert(key, watcher);
+        Ok(())
+    }
+
+    pub fn unwatch_repository(&self, path: &str) -> Result<(), String> {
+        let path = PathBuf::from(path);
+        let canonical = path
+            .canonicalize()
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let key = format!("repository:{canonical}");
         let mut watchers = self
             .watchers
             .lock()

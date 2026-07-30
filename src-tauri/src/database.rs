@@ -9,7 +9,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
-use walkdir::{DirEntry, WalkDir};
 
 pub struct MetadataDb {
     connection: Mutex<Connection>,
@@ -317,23 +316,128 @@ impl MetadataDb {
             .map_err(|error| format!("설정을 읽을 수 없습니다: {error}"))
     }
 
+    pub fn delete_setting(&self, key: &str) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        connection
+            .execute("DELETE FROM settings WHERE key = ?1", params![key])
+            .map_err(|error| format!("설정을 지울 수 없습니다: {error}"))?;
+        Ok(())
+    }
+
+    pub fn most_recent_document_in(&self, root: &Path) -> Result<Option<String>, String> {
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|error| format!("저장소 경로를 확인할 수 없습니다: {error}"))?;
+        for recent in self.recent_documents()? {
+            let path = PathBuf::from(&recent.path);
+            let Some(parent) = path.parent() else {
+                continue;
+            };
+            let Ok(canonical_parent) = parent.canonicalize() else {
+                continue;
+            };
+            let Ok(file_type) =
+                std::fs::symlink_metadata(&path).map(|metadata| metadata.file_type())
+            else {
+                continue;
+            };
+            if canonical_parent == canonical_root
+                && file_type.is_file()
+                && !file_type.is_symlink()
+                && is_markdown(&path)
+            {
+                return Ok(Some(recent.path));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn rename_document_metadata(&self, from: &str, to: &str) -> Result<(), String> {
+        let title = Path::new(to)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("원고");
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("원고 메타데이터 이동을 시작할 수 없습니다: {error}"))?;
+        transaction
+            .execute("DELETE FROM recent_documents WHERE path = ?1", params![to])
+            .map_err(|error| format!("기존 최근 원고 항목을 정리할 수 없습니다: {error}"))?;
+        transaction
+            .execute(
+                "UPDATE recent_documents SET path = ?1, title = ?2 WHERE path = ?3",
+                params![to, title, from],
+            )
+            .map_err(|error| format!("최근 원고 경로를 바꿀 수 없습니다: {error}"))?;
+        transaction
+            .execute(
+                "UPDATE versions SET document_path = ?1 WHERE document_path = ?2",
+                params![to, from],
+            )
+            .map_err(|error| format!("버전 기록 경로를 바꿀 수 없습니다: {error}"))?;
+        transaction
+            .execute(
+                "UPDATE documents_fts SET path = ?1 WHERE path = ?2",
+                params![to, from],
+            )
+            .map_err(|error| format!("검색 색인 경로를 바꿀 수 없습니다: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("원고 메타데이터 이동을 확정할 수 없습니다: {error}"))
+    }
+
+    pub fn delete_document_metadata(&self, path: &str) -> Result<(), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("원고 메타데이터 정리를 시작할 수 없습니다: {error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM recent_documents WHERE path = ?1",
+                params![path],
+            )
+            .map_err(|error| format!("최근 원고 기록을 지울 수 없습니다: {error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM versions WHERE document_path = ?1",
+                params![path],
+            )
+            .map_err(|error| format!("원고 버전 기록을 지울 수 없습니다: {error}"))?;
+        transaction
+            .execute("DELETE FROM documents_fts WHERE path = ?1", params![path])
+            .map_err(|error| format!("원고 검색 색인을 지울 수 없습니다: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("원고 메타데이터 정리를 확정할 수 없습니다: {error}"))
+    }
+
     pub fn index_workspace(&self, root: &Path) -> Result<usize, String> {
         if !root.is_absolute() || !root.is_dir() {
             return Err("검색할 작업 폴더는 존재하는 절대경로여야 합니다.".to_string());
         }
         let workspace = root.to_string_lossy().to_string();
         let mut documents = Vec::new();
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(indexable_entry)
-            .filter_map(Result::ok)
-            .take(10_001)
-        {
-            if !entry.file_type().is_file() || !is_markdown(entry.path()) {
+        let entries = std::fs::read_dir(root)
+            .map_err(|error| format!("검색할 저장소를 읽을 수 없습니다: {error}"))?;
+        for entry in entries.take(10_001).filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() || file_type.is_symlink() || !is_markdown(&path) {
                 continue;
             }
-            let Ok(document) = read_document(entry.path()) else {
+            let Ok(document) = read_document(&path) else {
                 continue;
             };
             if document.content.len() > 10 * 1024 * 1024 {
@@ -346,9 +450,7 @@ impl MetadataDb {
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned)
                 .or_else(|| {
-                    entry
-                        .path()
-                        .file_stem()
+                    path.file_stem()
                         .and_then(|value| value.to_str())
                         .map(ToOwned::to_owned)
                 })
@@ -488,20 +590,6 @@ fn decompress(content: &[u8]) -> Result<String, String> {
     Ok(value)
 }
 
-fn indexable_entry(entry: &DirEntry) -> bool {
-    let ignored = [
-        ".git",
-        "node_modules",
-        "target",
-        ".research-writer",
-        ".syncthing",
-    ];
-    !entry
-        .path()
-        .components()
-        .any(|part| ignored.iter().any(|value| part.as_os_str() == *value))
-}
-
 fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
@@ -539,13 +627,6 @@ fn locate_first_line(path: &str, query: &str) -> usize {
         .unwrap_or(1)
 }
 
-pub fn parent_directory(path: &str) -> Result<String, String> {
-    let path = PathBuf::from(path);
-    path.parent()
-        .map(|parent| parent.to_string_lossy().to_string())
-        .ok_or_else(|| "문서의 상위 폴더를 찾을 수 없습니다.".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +661,12 @@ mod tests {
         std::fs::write(
             workspace.join("draft.md"),
             "# 동기화 연구\n\n충돌 없는 자동 저장을 분석한다.\n",
+        )
+        .unwrap();
+        std::fs::create_dir(workspace.join("nested")).unwrap();
+        std::fs::write(
+            workspace.join("nested").join("hidden.md"),
+            "# 숨은 원고\n\n자동 저장",
         )
         .unwrap();
 

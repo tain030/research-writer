@@ -33,8 +33,9 @@
     DocumentPayload,
     EditorSelection,
     FontRecord,
-    ManuscriptRepositoryStatus,
     RecentDocument,
+    RepositoryDocument,
+    RepositoryStatus,
     ResearchConnectionStatus,
     ResearchFolder,
     ResearchSource,
@@ -92,8 +93,13 @@
   let toast = $state("");
   let toastKind = $state<"info" | "error" | "success">("info");
   let sync = $state<SyncthingStatus | null>(null);
-  let manuscriptRepository = $state<ManuscriptRepositoryStatus | null>(null);
+  let repository = $state<RepositoryStatus | null>(null);
+  let repositoryDocuments = $state<RepositoryDocument[]>([]);
   let creatingDocument = $state(false);
+  let repositoryBusy = $state(false);
+  let renamingPath = $state("");
+  let renameValue = $state("");
+  let watchedRepositoryPath = "";
   let versions = $state<VersionSummary[]>([]);
   let namedVersion = $state("");
   let workspaceRoot = $state("");
@@ -136,6 +142,7 @@
   let completionTimer: ReturnType<typeof setTimeout> | null = null;
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let externalTimer: ReturnType<typeof setTimeout> | null = null;
+  let repositoryTimer: ReturnType<typeof setTimeout> | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
   let unlisteners: UnlistenFn[] = [];
   let lastSnapshotAt = 0;
@@ -151,7 +158,16 @@
     externalSyncProvider(currentDocument?.path ?? ""),
   );
   let repositorySyncProvider = $derived(
-    externalSyncProvider(manuscriptRepository?.path ?? ""),
+    externalSyncProvider(repository?.path ?? ""),
+  );
+  let currentDocumentInRepository = $derived(
+    currentDocument !== null &&
+      repositoryDocuments.some((document) => document.path === currentDocument?.path),
+  );
+  let currentDocumentIsStandalone = $derived(
+    currentDocument !== null &&
+      repository?.available === true &&
+      !currentDocumentInRepository,
   );
   let sourceContexts = $derived(
     researchSources
@@ -242,64 +258,149 @@
     }
   }
 
-  async function refreshManuscriptRepository(): Promise<void> {
-    if (!desktop) return;
+  async function refreshRepositoryDocuments(): Promise<void> {
+    if (!desktop || !repository?.available) {
+      repositoryDocuments = [];
+      return;
+    }
     try {
-      manuscriptRepository = await invoke<ManuscriptRepositoryStatus>(
-        "manuscript_repository_status",
+      repositoryDocuments = await invoke<RepositoryDocument[]>(
+        "list_repository_documents",
       );
-      if (manuscriptRepository.available && manuscriptRepository.path) {
-        workspaceRoot = manuscriptRepository.path;
-      }
     } catch (error) {
+      repositoryDocuments = [];
       notify(errorMessage(error), "error");
     }
   }
 
-  async function chooseManuscriptRepository(): Promise<boolean> {
-    if (!desktop) return false;
-    const selected = await openDialog({
-      title: "원고 저장소 선택 · OSDN의 3_Write 권장",
-      directory: true,
-      multiple: false,
-      defaultPath:
-        manuscriptRepository?.available && manuscriptRepository.path
-          ? manuscriptRepository.path
-          : undefined,
-    });
-    if (typeof selected !== "string") return false;
+  async function refreshRepository(): Promise<RepositoryStatus | null> {
+    if (!desktop) return null;
     try {
-      manuscriptRepository = await invoke<ManuscriptRepositoryStatus>(
-        "configure_manuscript_repository",
-        { path: selected },
-      );
-      if (!manuscriptRepository.available || !manuscriptRepository.path) {
-        notify(manuscriptRepository.message, "error");
+      repository = await invoke<RepositoryStatus>("repository_status");
+      if (repository.available && repository.path) {
+        workspaceRoot = repository.path;
+        await refreshRepositoryDocuments();
+      } else {
+        workspaceRoot = "";
+        repositoryDocuments = [];
+      }
+      return repository;
+    } catch (error) {
+      notify(errorMessage(error), "error");
+      return null;
+    }
+  }
+
+  async function watchActiveRepository(): Promise<void> {
+    if (!desktop) return;
+    if (watchedRepositoryPath && watchedRepositoryPath !== repository?.path) {
+      await invoke("unwatch_repository", {
+        path: watchedRepositoryPath,
+      }).catch(() => undefined);
+      watchedRepositoryPath = "";
+    }
+    if (!repository?.available || !repository.path) return;
+    if (watchedRepositoryPath === repository.path) return;
+    await invoke("watch_repository", { path: repository.path }).catch((error) =>
+      notify(errorMessage(error), "error"),
+    );
+    watchedRepositoryPath = repository.path;
+  }
+
+  async function clearDocumentState(): Promise<void> {
+    if (currentDocument && desktop) {
+      await invoke("unwatch_document", {
+        path: currentDocument.path,
+      }).catch(() => undefined);
+    }
+    currentDocument = null;
+    editorValue = "";
+    baseContent = "";
+    saveState = "saved";
+    saveError = "";
+    conflict = null;
+    sync = null;
+    selection = { from: 0, to: 0, text: "", line: 1 };
+  }
+
+  async function openRepositoryPath(path: string): Promise<boolean> {
+    if (!desktop || repositoryBusy) return false;
+    if (!(await maybeSaveBeforeSwitch())) return false;
+    repositoryBusy = true;
+    try {
+      const opened = await invoke<RepositoryStatus>("open_repository", { path });
+      if (!opened.available || !opened.path) {
+        notify(opened.message, "error");
         return false;
       }
-      workspaceRoot = manuscriptRepository.path;
+      const openedPath = opened.path;
+      const previousRepository = watchedRepositoryPath;
+      if (previousRepository) {
+        await invoke("unwatch_repository", {
+          path: previousRepository,
+        }).catch(() => undefined);
+        watchedRepositoryPath = "";
+      }
+      await clearDocumentState();
+      repository = opened;
+      workspaceRoot = openedPath;
       searchIndexed = false;
       searchResults = [];
-      notify(`원고 저장소를 ${basename(manuscriptRepository.path)}로 정했습니다.`, "success");
+      await Promise.all([refreshRepositoryDocuments(), watchActiveRepository()]);
+      leftPanel = "repository";
+      if (repository.lastDocumentPath) {
+        await openPath(repository.lastDocumentPath);
+      }
+      notify(`${basename(openedPath)} 저장소를 열었습니다.`, "success");
       return true;
     } catch (error) {
+      await refreshRepository();
       notify(errorMessage(error), "error");
       return false;
+    } finally {
+      repositoryBusy = false;
     }
   }
 
-  async function ensureManuscriptRepository(): Promise<boolean> {
-    if (!manuscriptRepository) await refreshManuscriptRepository();
-    if (manuscriptRepository?.available && manuscriptRepository.path) {
-      return true;
+  async function chooseRepository(): Promise<boolean> {
+    if (!desktop) return false;
+    const selected = await openDialog({
+      title: "원고 저장소 열기",
+      directory: true,
+      multiple: false,
+      defaultPath: repository?.available ? repository.path ?? undefined : undefined,
+    });
+    return typeof selected === "string"
+      ? openRepositoryPath(selected)
+      : false;
+  }
+
+  async function closeRepository(): Promise<void> {
+    if (!desktop || !repository?.active || repositoryBusy) return;
+    if (!(await maybeSaveBeforeSwitch())) return;
+    repositoryBusy = true;
+    try {
+      const closed = await invoke<RepositoryStatus>("close_repository");
+      if (watchedRepositoryPath) {
+        await invoke("unwatch_repository", {
+          path: watchedRepositoryPath,
+        }).catch(() => undefined);
+        watchedRepositoryPath = "";
+      }
+      await clearDocumentState();
+      repository = closed;
+      repositoryDocuments = [];
+      workspaceRoot = "";
+      searchResults = [];
+      searchIndexed = false;
+      renamingPath = "";
+      leftPanel = null;
+      notify("원고 저장소를 닫았습니다.", "success");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    } finally {
+      repositoryBusy = false;
     }
-    notify(
-      manuscriptRepository?.configured
-        ? "설정한 원고 저장소를 찾을 수 없습니다. 폴더를 다시 선택해주세요."
-        : "처음 한 번만 OSDN의 3_Write 폴더를 원고 저장소로 선택해주세요.",
-      "info",
-    );
-    return chooseManuscriptRepository();
   }
 
   async function setDocument(document: DocumentPayload): Promise<void> {
@@ -321,12 +422,10 @@
       await invoke("watch_document", { path: document.path }).catch((error) =>
         notify(errorMessage(error), "error"),
       );
-      workspaceRoot =
-        manuscriptRepository?.available && manuscriptRepository.path
-          ? manuscriptRepository.path
-          : await invoke<string>("parent_directory", {
-              path: document.path,
-            }).catch(() => "");
+      workspaceRoot = repository?.available ? repository.path ?? "" : "";
+      if (repositoryDocuments.some((entry) => entry.path === document.path) && repository) {
+        repository.lastDocumentPath = document.path;
+      }
       await Promise.all([loadRecents(), refreshSync()]);
     }
     await tick();
@@ -379,23 +478,127 @@
       return;
     }
     if (creatingDocument) return;
+    if (!repository?.available || !repository.path) {
+      notify("새 원고를 만들려면 먼저 저장소를 열어주세요.", "info");
+      return;
+    }
+    if (!repository.writable) {
+      notify("읽기 전용 저장소에서는 새 원고를 만들 수 없습니다.", "error");
+      return;
+    }
     creatingDocument = true;
     try {
       if (!(await maybeSaveBeforeSwitch())) return;
-      if (!(await ensureManuscriptRepository())) return;
-      const created = await invoke<DocumentPayload>("create_manuscript_document");
+      const created = await invoke<DocumentPayload>("create_repository_document");
+      await refreshRepositoryDocuments();
       await setDocument(created);
       await tick();
-      const titleEnd = created.content.indexOf("\n");
-      if (created.content.startsWith("# ") && titleEnd > 2) {
-        editorApi?.setSelection(2, titleEnd);
-      }
+      renamingPath = created.path;
+      renameValue = basename(created.path);
+      await tick();
+      const renameInput = document.querySelector<HTMLInputElement>(
+        `[data-rename-path="${CSS.escape(created.path)}"]`,
+      );
+      renameInput?.focus();
+      renameInput?.select();
       notify("새 원고를 만들었습니다.", "success");
     } catch (error) {
-      await refreshManuscriptRepository();
+      await refreshRepository();
       notify(errorMessage(error), "error");
     } finally {
       creatingDocument = false;
+    }
+  }
+
+  async function closeCurrentDocument(): Promise<void> {
+    if (!currentDocument || !(await maybeSaveBeforeSwitch())) return;
+    if (
+      currentDocumentIsStandalone &&
+      repository?.lastDocumentPath &&
+      repository.lastDocumentPath !== currentDocument.path
+    ) {
+      const repositoryPath = repository.lastDocumentPath;
+      await clearDocumentState();
+      await openPath(repositoryPath);
+      return;
+    }
+    if (currentDocumentInRepository && desktop) {
+      await invoke("clear_repository_last_document").catch(() => undefined);
+      if (repository) repository.lastDocumentPath = null;
+    }
+    await clearDocumentState();
+  }
+
+  async function beginRename(document: RepositoryDocument): Promise<void> {
+    if (!repository?.writable) return;
+    renamingPath = document.path;
+    renameValue = document.name;
+    await tick();
+    const renameInput = window.document.querySelector<HTMLInputElement>(
+      `[data-rename-path="${CSS.escape(document.path)}"]`,
+    );
+    renameInput?.focus();
+    renameInput?.select();
+  }
+
+  async function commitRename(document: RepositoryDocument): Promise<void> {
+    if (renamingPath !== document.path) return;
+    const requested = renameValue.trim();
+    if (!requested || requested === document.name) {
+      renamingPath = "";
+      return;
+    }
+    if (!(await maybeSaveBeforeSwitch())) return;
+    try {
+      const renamed = await invoke<DocumentPayload>(
+        "rename_repository_document",
+        { path: document.path, newName: requested },
+      );
+      const wasCurrent = currentDocument?.path === document.path;
+      renamingPath = "";
+      await refreshRepositoryDocuments();
+      if (wasCurrent) await setDocument(renamed);
+      notify(`원고 이름을 ${basename(renamed.path)}로 바꿨습니다.`, "success");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+      await tick();
+      window.document
+        .querySelector<HTMLInputElement>(
+          `[data-rename-path="${CSS.escape(document.path)}"]`,
+        )
+        ?.focus();
+    }
+  }
+
+  async function trashDocument(document: RepositoryDocument): Promise<void> {
+    if (!repository?.writable) return;
+    if (
+      !window.confirm(
+        `"${document.name}"을 운영체제 휴지통으로 옮길까요?`,
+      )
+    ) {
+      return;
+    }
+    if (currentDocument?.path === document.path && !(await maybeSaveBeforeSwitch())) {
+      return;
+    }
+    try {
+      if (currentDocument?.path === document.path) {
+        await invoke("unwatch_document", { path: document.path }).catch(
+          () => undefined,
+        );
+      }
+      await invoke("trash_repository_document", { path: document.path });
+      if (currentDocument?.path === document.path) {
+        await clearDocumentState();
+        if (repository) repository.lastDocumentPath = null;
+      }
+      renamingPath = "";
+      await Promise.all([refreshRepositoryDocuments(), loadRecents()]);
+      searchIndexed = false;
+      notify("원고를 휴지통으로 옮겼습니다.", "success");
+    } catch (error) {
+      notify(errorMessage(error), "error");
     }
   }
 
@@ -682,18 +885,16 @@
     }
   }
 
-  async function chooseWorkspace(): Promise<void> {
-    if (!desktop) return;
-    const selected = await openDialog({ directory: true, multiple: false });
-    if (typeof selected === "string") {
-      workspaceRoot = selected;
-      searchIndexed = false;
-      await prepareSearch();
-    }
-  }
-
   async function prepareSearch(): Promise<void> {
-    if (!desktop || !workspaceRoot || searchBusy || searchIndexed) return;
+    if (
+      !desktop ||
+      !repository?.available ||
+      !workspaceRoot ||
+      searchBusy ||
+      searchIndexed
+    ) {
+      return;
+    }
     searchBusy = true;
     try {
       await invoke<number>("index_workspace", { root: workspaceRoot });
@@ -1097,7 +1298,7 @@
       "",
       "## 원고가 먼저다",
       "",
-      "화면 가운데에는 한 줄에 약 예순여덟 글자가 놓인다. 현재 문단의 Markdown 표시는 그대로 보이고, 손을 떼면 나머지 문단은 조판된 원고처럼 차분해진다.",
+      "화면 가운데에는 스무 칸 열 줄의 원고지가 놓인다. Markdown 기호까지 한 칸씩 자리를 잡고, 이백 자가 차면 다음 장으로 자연스럽게 넘어간다.",
       "",
       "## 리서치는 글 옆에 머문다",
       "",
@@ -1121,7 +1322,37 @@
   function keyboardHandler(event: KeyboardEvent): void {
     const command = event.metaKey || event.ctrlKey;
     if (!command) {
+      const focusedPath =
+        event.target instanceof HTMLElement
+          ? event.target.closest<HTMLElement>("[data-repository-path]")?.dataset
+              .repositoryPath
+          : undefined;
+      const focusedDocument = repositoryDocuments.find(
+        (document) => document.path === focusedPath,
+      );
+      if (
+        focusedDocument &&
+        event.key === "F2" &&
+        !(event.target instanceof HTMLInputElement)
+      ) {
+        event.preventDefault();
+        void beginRename(focusedDocument);
+        return;
+      }
+      if (
+        focusedDocument &&
+        event.key === "Delete" &&
+        !(event.target instanceof HTMLInputElement)
+      ) {
+        event.preventDefault();
+        void trashDocument(focusedDocument);
+        return;
+      }
       if (event.key === "Escape") {
+        if (renamingPath) {
+          renamingPath = "";
+          return;
+        }
         suggestion = null;
         if (!conflict) {
           leftPanel = null;
@@ -1133,9 +1364,15 @@
     if (event.key.toLowerCase() === "n") {
       event.preventDefault();
       void createDocument();
+    } else if (event.key.toLowerCase() === "o" && event.shiftKey) {
+      event.preventDefault();
+      void chooseRepository();
     } else if (event.key.toLowerCase() === "o") {
       event.preventDefault();
       void chooseDocument();
+    } else if (event.key.toLowerCase() === "w") {
+      event.preventDefault();
+      void closeCurrentDocument();
     } else if (event.key.toLowerCase() === "s" && event.shiftKey) {
       event.preventDefault();
       void saveAs();
@@ -1165,11 +1402,21 @@
     }
 
     fonts = await invoke<FontRecord[]>("list_fonts").catch(() => fonts);
-    await Promise.all([loadRecents(), refreshManuscriptRepository()]);
+    await loadRecents();
+    const restoredRepository = await refreshRepository();
+    await watchActiveRepository();
     const startup = await invoke<string | null>("startup_document").catch(
       () => null,
     );
-    if (startup) await openPath(startup);
+    if (startup) {
+      await openPath(startup);
+    } else if (
+      restoredRepository?.available &&
+      restoredRepository.lastDocumentPath
+    ) {
+      await openPath(restoredRepository.lastDocumentPath);
+    }
+    if (restoredRepository?.available) leftPanel = "repository";
 
     unlisteners.push(
       await listen<{ path: string }>("external-file-change", (event) => {
@@ -1177,12 +1424,26 @@
       }),
     );
     unlisteners.push(
+      await listen<{ path: string }>("repository-change", () => {
+        if (repositoryTimer) clearTimeout(repositoryTimer);
+        repositoryTimer = setTimeout(() => {
+          searchIndexed = false;
+          void refreshRepositoryDocuments();
+        }, 180);
+      }),
+    );
+    unlisteners.push(
       await getCurrentWebviewWindow().onDragDropEvent((event) => {
         if (event.payload.type !== "drop") return;
-        const path = event.payload.paths.find((value) =>
+        const markdownPath = event.payload.paths.find((value) =>
           /\.(?:md|markdown)$/i.test(value),
         );
-        if (path) void openPath(path);
+        if (markdownPath) {
+          void openPath(markdownPath);
+          return;
+        }
+        const folderPath = event.payload.paths[0];
+        if (folderPath) void openRepositoryPath(folderPath);
       }),
     );
     unlisteners.push(
@@ -1207,6 +1468,7 @@
     if (completionTimer) clearTimeout(completionTimer);
     if (toastTimer) clearTimeout(toastTimer);
     if (externalTimer) clearTimeout(externalTimer);
+    if (repositoryTimer) clearTimeout(repositoryTimer);
     if (syncTimer) clearInterval(syncTimer);
   });
 </script>
@@ -1223,10 +1485,19 @@
   <header class="topbar">
     <div class="topbar-side">
       <button
+        class:active={leftPanel === "repository"}
+        class="icon-button"
+        title="원고 저장소"
+        onclick={() => void toggleLeft("repository")}
+        aria-label="원고 저장소 열기"
+      >
+        ▱
+      </button>
+      <button
         class="icon-button"
         title="새 원고 (Ctrl+N)"
         aria-label="새 원고 만들기"
-        disabled={creatingDocument}
+        disabled={creatingDocument || !repository?.available || !repository.writable}
         onclick={() => void createDocument()}
       >
         ＋
@@ -1262,6 +1533,9 @@
 
     <div class="document-name" title={currentDocument?.path ?? ""}>
       <span>{documentTitle}</span>
+      {#if currentDocumentIsStandalone}
+        <span class="standalone-badge">저장소 밖</span>
+      {/if}
       {#if currentDocument}
         <span
           class:error={saveState === "error"}
@@ -1269,6 +1543,12 @@
           class="save-dot"
           aria-label={saveState}
         ></span>
+        <button
+          class="document-close"
+          title="현재 원고 닫기 (Ctrl+W)"
+          aria-label="현재 원고 닫기"
+          onclick={() => void closeCurrentDocument()}
+        >×</button>
       {/if}
     </div>
 
@@ -1306,6 +1586,10 @@
       <div class="panel-heading">
         <div class="panel-tabs">
           <button
+            class:active={leftPanel === "repository"}
+            onclick={() => (leftPanel = "repository")}>원고</button
+          >
+          <button
             class:active={leftPanel === "outline"}
             onclick={() => (leftPanel = "outline")}>개요</button
           >
@@ -1323,8 +1607,113 @@
         >
       </div>
 
-      <div class="panel-content">
-        {#if leftPanel === "outline"}
+      <div
+        class:repository-content={leftPanel === "repository"}
+        class="panel-content"
+      >
+        {#if leftPanel === "repository"}
+          <div class="repository-panel">
+            {#if repository?.available && repository.path}
+              <div class="repository-heading">
+                <div>
+                  <strong>{basename(repository.path)}</strong>
+                  <small title={repository.path}>{repository.path}</small>
+                </div>
+                <div class="repository-heading-actions">
+                  <button title="다른 저장소 열기" onclick={() => void chooseRepository()}
+                    >열기</button
+                  >
+                  <button title="저장소 닫기" onclick={() => void closeRepository()}
+                    >닫기</button
+                  >
+                </div>
+              </div>
+              <div class="repository-toolbar">
+                <button
+                  disabled={!repository.writable || creatingDocument}
+                  onclick={() => void createDocument()}
+                >
+                  ＋ 새 원고
+                </button>
+                {#if !repository.writable}
+                  <span>읽기 전용</span>
+                {/if}
+              </div>
+              {#if repositoryDocuments.length}
+                <nav class="repository-list" aria-label="저장소 원고 목록">
+                  {#each repositoryDocuments as document (document.path)}
+                    <div
+                      class:current={currentDocument?.path === document.path}
+                      class="repository-row"
+                      data-repository-path={document.path}
+                    >
+                      {#if renamingPath === document.path}
+                        <input
+                          class="repository-rename"
+                          data-rename-path={document.path}
+                          aria-label={`${document.name} 이름 변경`}
+                          bind:value={renameValue}
+                          onkeydown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void commitRename(document);
+                            } else if (event.key === "Escape") {
+                              event.preventDefault();
+                              renamingPath = "";
+                            }
+                          }}
+                          onblur={() => void commitRename(document)}
+                        />
+                      {:else}
+                        <button
+                          class="repository-document"
+                          data-repository-path={document.path}
+                          title={document.path}
+                          onclick={() => void openPath(document.path)}
+                        >
+                          <span>{document.name}</span>
+                          <small>
+                            {document.readOnly ? "읽기 전용" : displayDate(new Date(document.modifiedAtMs).toISOString())}
+                          </small>
+                        </button>
+                        <div class="repository-row-actions">
+                          <button
+                            disabled={!repository.writable}
+                            title="이름 변경 (F2)"
+                            aria-label={`${document.name} 이름 변경`}
+                            onclick={() => void beginRename(document)}
+                          >✎</button>
+                          <button
+                            disabled={!repository.writable}
+                            title="휴지통으로 이동 (Delete)"
+                            aria-label={`${document.name} 휴지통으로 이동`}
+                            onclick={() => void trashDocument(document)}
+                          >⌫</button>
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </nav>
+              {:else}
+                <div class="empty-state small repository-empty">
+                  <p>이 저장소에는 아직 원고가 없습니다.</p>
+                  <button
+                    disabled={!repository.writable}
+                    onclick={() => void createDocument()}
+                  >첫 원고 만들기</button>
+                </div>
+              {/if}
+            {:else}
+              <div class="empty-state repository-empty">
+                <p>{repository?.message ?? "원고 저장소를 열어주세요."}</p>
+                <button onclick={() => void chooseRepository()}>저장소 열기</button>
+                {#if repository?.active}
+                  <button onclick={() => void closeRepository()}>기록 닫기</button>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {:else if leftPanel === "outline"}
           <p class="eyebrow">문서 구조</p>
           {#if outline.length}
             <nav class="outline-list" aria-label="문서 개요">
@@ -1354,10 +1743,11 @@
               oninput={scheduleSearch}
             />
           </div>
-          <button class="path-button" onclick={chooseWorkspace}>
-            <span>{workspaceRoot ? basename(workspaceRoot) : "검색 폴더 선택"}</span>
-            <small>변경</small>
-          </button>
+          <div class="search-scope">
+            {repository?.available && repository.path
+              ? `${basename(repository.path)} · 루트 원고`
+              : "검색하려면 저장소를 열어주세요."}
+          </div>
           {#if searchBusy}
             <p class="quiet-line">색인과 검색 중…</p>
           {:else if searchQuery && !searchResults.length}
@@ -1427,7 +1817,6 @@
         value={editorValue}
         readOnly={currentDocument.readOnly}
         fontFamily={preferences.fontFamily}
-        measure={preferences.measure}
         focusMode={preferences.focusMode}
         typewriterMode={preferences.typewriterMode}
         soundEnabled={preferences.soundEnabled}
@@ -1455,7 +1844,9 @@
         <div>
           <span>{words.toLocaleString("ko-KR")}단어</span>
           <span>약 {minutes}분</span>
-          <span>{selection.line}행</span>
+          <span>
+            {selection.page ?? 1}쪽 · {selection.row ?? 1}행 · {selection.column ?? 1}칸
+          </span>
         </div>
         <div>
           {#if sync?.folderId}
@@ -1487,38 +1878,60 @@
           </span>
         </div>
       </footer>
-    {:else}
-      <div class="welcome">
-        <p class="welcome-kicker">LOCAL · MARKDOWN · QUIET</p>
-        <h1>원고</h1>
-        <p class="welcome-copy">
-          파일은 그대로, 화면에는 글만.<br />
-          오래 쓰고 싶은 리서치 에디터.
+    {:else if repository?.available && repository.path}
+      <div class="repository-home">
+        <div class="repository-home-paper" aria-hidden="true">
+          <span>20 × 10</span>
+          <strong>NO. 1</strong>
+        </div>
+        <p class="welcome-kicker">OPEN REPOSITORY</p>
+        <h1>{basename(repository.path)}</h1>
+        <p>
+          왼쪽 원고 목록에서 파일을 열거나<br />
+          이 저장소에 새 원고를 만드세요.
         </p>
         <div class="welcome-actions">
           <button
             class="primary-button"
-            disabled={creatingDocument}
+            disabled={!repository.writable || creatingDocument}
             onclick={() => void createDocument()}
           >
             {creatingDocument ? "만드는 중…" : "새 원고"}
           </button>
           <button class="secondary-button" onclick={() => void chooseDocument()}>
-            원고 열기
+            파일 열기
           </button>
         </div>
-        {#if manuscriptRepository?.available && manuscriptRepository.path}
+        <button class="welcome-repository" onclick={() => void chooseRepository()}>
+          다른 저장소 열기
+        </button>
+      </div>
+    {:else}
+      <div class="welcome">
+        <p class="welcome-kicker">LOCAL · MARKDOWN · MANUSCRIPT</p>
+        <h1>원고지</h1>
+        <p class="welcome-copy">
+          폴더를 저장소로 열고,<br />
+          한 글자씩 원고지 위에 써 내려갑니다.
+        </p>
+        <div class="welcome-actions">
           <button
-            class="welcome-repository"
-            title={manuscriptRepository.path}
-            onclick={() => void chooseManuscriptRepository()}
+            class="primary-button"
+            disabled={repositoryBusy}
+            onclick={() => void chooseRepository()}
           >
-            저장 위치 · <strong>{basename(manuscriptRepository.path)}</strong>
+            {repositoryBusy ? "여는 중…" : "저장소 열기"}
           </button>
-        {:else}
-          <p class="welcome-repository">
-            처음 한 번 OSDN의 3_Write 폴더를 선택합니다.
-          </p>
+          <button class="secondary-button" onclick={() => void chooseDocument()}>
+            파일 열기
+          </button>
+        </div>
+        {#if repository?.active && !repository.available}
+          <div class="missing-repository">
+            <strong>마지막 저장소를 찾을 수 없습니다.</strong>
+            <span title={repository.path ?? ""}>{repository.path}</span>
+            <button onclick={() => void closeRepository()}>저장소 기록 닫기</button>
+          </div>
         {/if}
         {#if recents.length}
           <div class="recent-block">
@@ -1532,7 +1945,7 @@
           </div>
         {/if}
         <p class="welcome-shortcuts">
-          Ctrl+N 새 원고 · Ctrl+O 열기 · Ctrl+S 저장 · Ctrl+P 검색
+          Ctrl+Shift+O 저장소 · Ctrl+O 파일 · Ctrl+N 새 원고 · Ctrl+W 닫기
         </p>
       </div>
     {/if}
@@ -1830,17 +2243,10 @@
                 {/each}
               </select>
             </label>
-            <label class="field">
-              <span>한 줄 너비 <small>{preferences.measure}자</small></span>
-              <input
-                type="range"
-                min="48"
-                max="92"
-                step="1"
-                bind:value={preferences.measure}
-                onchange={savePreferences}
-              />
-            </label>
+            <div class="settings-fact">
+              <strong>200자 원고지</strong>
+              <span>20칸 × 10줄 · 한 글자 한 칸</span>
+            </div>
             <label class="field">
               <span>집중 모드</span>
               <select bind:value={preferences.focusMode} onchange={savePreferences}>
@@ -1869,8 +2275,8 @@
               <span>화면</span>
               <select bind:value={preferences.theme} onchange={savePreferences}>
                 <option value="system">시스템 설정</option>
-                <option value="light">밝은 종이</option>
-                <option value="dark">어두운 종이</option>
+                <option value="light">밝은 작업대</option>
+                <option value="dark">어두운 작업대</option>
               </select>
             </label>
           </section>
@@ -1879,20 +2285,25 @@
             <p class="eyebrow">저장과 동기화</p>
             <button
               class="path-button repository-path"
-              onclick={() => void chooseManuscriptRepository()}
+              onclick={() => void chooseRepository()}
             >
-              <span title={manuscriptRepository?.path ?? ""}>
-                {manuscriptRepository?.path ?? "원고 저장소 선택"}
+              <span title={repository?.path ?? ""}>
+                {repository?.path ?? "원고 저장소 열기"}
               </span>
-              <small>{manuscriptRepository?.available ? "변경" : "선택"}</small>
+              <small>{repository?.available ? "변경" : "열기"}</small>
             </button>
-            {#if manuscriptRepository?.configured && !manuscriptRepository.available}
-              <p class="danger-note">{manuscriptRepository.message}</p>
+            {#if repository?.active && !repository.available}
+              <p class="danger-note">{repository.message}</p>
             {:else}
               <p class="panel-note">
-                새 원고는 이 폴더에 바로 생성됩니다. 기기마다 OSDN의 3_Write
-                폴더를 한 번 선택하세요.
+                어떤 폴더든 저장소로 열 수 있습니다. 새 원고와 검색은 열린
+                저장소의 루트에서 동작합니다.
               </p>
+            {/if}
+            {#if repository?.active}
+              <button class="wide-button" onclick={() => void closeRepository()}>
+                저장소 닫기
+              </button>
             {/if}
             <div class="settings-fact">
               <strong>300ms 자동 저장</strong>
@@ -2154,6 +2565,32 @@
     white-space: nowrap;
   }
 
+  .standalone-badge {
+    flex: 0 0 auto;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: 2px 6px;
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+  }
+
+  .document-close {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--ink-faint);
+    font-size: 16px;
+  }
+
+  .document-close:hover {
+    background: var(--paper-deep);
+    color: var(--ink-strong);
+  }
+
   .save-dot {
     width: 5px;
     height: 5px;
@@ -2250,6 +2687,181 @@
     overflow: auto;
   }
 
+  .panel-content.repository-content {
+    padding: 0;
+  }
+
+  .repository-panel {
+    min-height: 100%;
+  }
+
+  .repository-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 16px 12px 12px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .repository-heading > div:first-child {
+    min-width: 0;
+  }
+
+  .repository-heading strong,
+  .repository-heading small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .repository-heading strong {
+    color: var(--ink-strong);
+    font-size: var(--type-body);
+  }
+
+  .repository-heading small {
+    margin-top: 3px;
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+  }
+
+  .repository-heading-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 2px;
+  }
+
+  .repository-heading-actions button,
+  .repository-toolbar button,
+  .repository-row-actions button,
+  .repository-empty button {
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  .repository-heading-actions button:hover,
+  .repository-toolbar button:hover,
+  .repository-row-actions button:hover,
+  .repository-empty button:hover {
+    background: var(--paper);
+    color: var(--ink-strong);
+  }
+
+  .repository-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .repository-toolbar button {
+    padding: 6px 8px;
+  }
+
+  .repository-toolbar span {
+    padding-right: 6px;
+    color: var(--warning);
+    font-size: var(--type-micro);
+  }
+
+  .repository-list {
+    display: flex;
+    flex-direction: column;
+    padding: 7px;
+  }
+
+  .repository-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    min-height: 42px;
+    border-radius: 6px;
+  }
+
+  .repository-row:hover,
+  .repository-row.current {
+    background: var(--paper);
+  }
+
+  .repository-row.current {
+    box-shadow: inset 2px 0 var(--accent);
+  }
+
+  .repository-document {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    padding: 7px 8px 7px 10px;
+    color: var(--ink);
+    text-align: left;
+  }
+
+  .repository-document span,
+  .repository-document small {
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .repository-document span {
+    font-size: var(--type-control);
+  }
+
+  .repository-document small {
+    margin-top: 2px;
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+  }
+
+  .repository-row-actions {
+    display: flex;
+    padding-right: 4px;
+    opacity: 0;
+  }
+
+  .repository-row:hover .repository-row-actions,
+  .repository-row:focus-within .repository-row-actions {
+    opacity: 1;
+  }
+
+  .repository-row-actions button {
+    display: grid;
+    place-items: center;
+    width: 27px;
+    height: 27px;
+    padding: 0;
+  }
+
+  .repository-rename {
+    grid-column: 1 / -1;
+    min-width: 0;
+    margin: 5px 6px;
+    padding: 6px 7px;
+    font-size: var(--type-control);
+  }
+
+  .repository-empty {
+    align-content: center;
+    gap: 8px;
+    padding: 18px;
+  }
+
+  .repository-empty button {
+    border: 1px solid var(--rule);
+    background: var(--paper-raised);
+    padding: 7px 10px;
+  }
+
   .right-content {
     padding-left: 18px;
     padding-right: 18px;
@@ -2315,6 +2927,16 @@
   .search-row input,
   .source-search input {
     width: 100%;
+  }
+
+  .search-scope {
+    margin-top: 8px;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    background: var(--paper-raised);
+    padding: 9px 10px;
+    color: var(--ink-faint);
+    font-size: var(--type-caption);
   }
 
   .path-button {
@@ -2537,7 +3159,8 @@
     color: var(--danger);
   }
 
-  .welcome {
+  .welcome,
+  .repository-home {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -2546,6 +3169,73 @@
     height: 100%;
     padding: 40px;
     text-align: center;
+  }
+
+  .repository-home {
+    color: var(--ink-muted);
+  }
+
+  .repository-home h1 {
+    max-width: min(620px, 84vw);
+    margin: 8px 0 0;
+    overflow: hidden;
+    color: var(--ink-strong);
+    font-family: MaruBuri, Georgia, serif;
+    font-size: 34px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .repository-home > p:not(.welcome-kicker) {
+    margin: 13px 0 22px;
+    font-size: var(--type-body);
+    line-height: 1.75;
+  }
+
+  .repository-home-paper {
+    position: relative;
+    width: 232px;
+    height: 142px;
+    margin-bottom: 23px;
+    border: 1px solid rgba(151, 61, 52, 0.52);
+    background-color: #fffdf7;
+    background-image:
+      linear-gradient(to right, rgba(174, 79, 69, 0.34) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(174, 79, 69, 0.34) 1px, transparent 1px);
+    background-position: 15px 43px;
+    background-size: 10px 10px;
+    box-shadow: 0 14px 34px rgba(49, 39, 29, 0.15);
+    color: rgba(135, 64, 57, 0.7);
+  }
+
+  .repository-home-paper::after {
+    position: absolute;
+    top: 42px;
+    right: 15px;
+    bottom: 19px;
+    left: 15px;
+    border: 1px solid rgba(151, 61, 52, 0.58);
+    content: "";
+  }
+
+  .repository-home-paper span,
+  .repository-home-paper strong {
+    position: absolute;
+    top: 19px;
+    z-index: 2;
+    font-family: var(--ui-font);
+    font-size: 8px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+  }
+
+  .repository-home-paper span {
+    left: 16px;
+  }
+
+  .repository-home-paper strong {
+    right: 16px;
   }
 
   .welcome-kicker {
@@ -2615,9 +3305,32 @@
     color: var(--ink-muted);
   }
 
-  .welcome-repository strong {
+  .missing-repository {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    width: min(440px, 80vw);
+    margin-top: 18px;
+    border: 1px solid var(--rule);
+    border-radius: 9px;
+    background: var(--paper-raised);
+    padding: 12px;
     color: var(--ink-muted);
-    font-weight: 650;
+    font-size: var(--type-caption);
+  }
+
+  .missing-repository span {
+    overflow: hidden;
+    color: var(--ink-faint);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .missing-repository button {
+    align-self: center;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
   }
 
   .recent-block {
@@ -2859,8 +3572,7 @@
     font-size: var(--type-control);
   }
 
-  .switch-row small,
-  .field small {
+  .switch-row small {
     color: var(--ink-faint);
     font-size: var(--type-caption);
     line-height: 1.5;
@@ -2979,11 +3691,6 @@
     width: 100%;
     min-width: 0;
     font-size: var(--type-control);
-  }
-
-  .field input[type="range"] {
-    padding: 0;
-    accent-color: var(--accent);
   }
 
   .settings-fact {
@@ -3163,17 +3870,31 @@
     }
   }
 
-  @media (max-width: 900px) {
+  @media (max-width: 1280px) {
     .app-shell.panel-left,
     .app-shell.panel-right,
     .app-shell.panel-left.panel-right {
-      grid-template-columns: min(82vw, 310px) minmax(0, 1fr) 0;
+      grid-template-columns: 0 minmax(0, 1fr) 0;
     }
 
-    .app-shell.panel-right:not(.panel-left) {
-      grid-template-columns: 0 minmax(0, 1fr) min(88vw, 342px);
+    .panel {
+      position: fixed;
+      top: 46px;
+      bottom: 0;
+      width: min(86vw, 342px);
+      box-shadow: 0 20px 48px color-mix(in srgb, var(--ink-strong) 22%, transparent);
     }
 
+    .left-panel {
+      left: 0;
+    }
+
+    .right-panel {
+      right: 0;
+    }
+  }
+
+  @media (max-width: 900px) {
     .app-shell.panel-left.panel-right .right-panel {
       display: none;
     }

@@ -5,14 +5,15 @@
 Research Writer는 “작은 데스크톱 셸 안의 로컬 Markdown 편집기”로 유지합니다. 파일 형식과 동기화 공급자를 소유하지 않고, OS가 이미 잘하는 일은 OS에 맡깁니다.
 
 ```text
-Svelte 5 UI + CodeMirror 6
+Svelte 5 UI + native textarea input
+  └─ 20×10 manuscript-grid projection
           │ Tauri invoke/event
           ▼
 Rust application services
   ├─ document: decode, hash, atomic save, merge
-  ├─ manuscript: repository setting, unique draft creation
+  ├─ manuscript: repository lifecycle, create, rename, OS trash
   ├─ database: versions, recents, FTS search, settings
-  ├─ platform: fonts, keyring, file watch, startup files
+  ├─ platform: fonts, keyring, document/repository watch, startup files
   ├─ codex: App Server JSON-RPC bridge
   └─ integrations: Zotero, Syncthing, Research Agent
           │
@@ -25,10 +26,25 @@ Rust application services
 ### 원고와 메타데이터
 
 `.md` 파일이 항상 원고의 단일 진실입니다. 기기별 원고 저장소의 절대경로는
-앱 데이터 폴더의 SQLite에 보관하고 vault 자체에는 기록하지 않습니다. 새
-원고는 저장소 안에 고유한 이름으로 배타 생성합니다. SQLite에는 이 설정과
-압축 버전, 최근 문서, FTS 색인만 저장하므로 앱을 제거해도 원고는 다른
-Markdown 편집기에서 그대로 열 수 있습니다.
+앱 데이터 폴더의 SQLite에 보관하고 vault 자체에는 기록하지 않습니다. 한
+번에 하나의 저장소를 열며 마지막 저장소와 마지막 저장소 원고를 복원합니다.
+저장소 밖에서 연 파일은 독립 문서로 취급하므로 저장소 상태를 바꾸지 않습니다.
+
+새 원고는 저장소 루트에 `제목 없는 원고.md`라는 고유한 이름으로 배타
+생성합니다. 이름 변경은 같은 루트 안에서만 허용하고 삭제는 즉시 제거하지
+않고 OS 휴지통으로 보냅니다. 저장소 목록과 FTS 색인은 루트의 일반 Markdown
+파일만 대상으로 하며 심볼릭 링크와 하위 폴더는 따라가지 않습니다. SQLite에는
+이 설정과 압축 버전, 최근 문서, FTS 색인만 저장하므로 앱을 제거해도 원고는
+다른 Markdown 편집기에서 그대로 열 수 있습니다.
+
+### 원고지 편집 모델
+
+숨겨진 네이티브 `textarea`가 IME, 선택, 클립보드와 브라우저 undo 입력을
+담당하고, 화면에는 그 값을 Unicode grapheme 단위로 20열×10행 종이에
+투영합니다. Markdown 문법 문자도 내용과 똑같이 한 칸을 차지합니다. 줄바꿈은
+다음 행으로, 탭은 4칸 탭 정지점으로 이동하며 200칸을 넘으면 새 페이지를
+만듭니다. 원고의 진실은 여전히 하나의 문자열뿐이어서 리치 텍스트와 Markdown
+사이의 왕복 변환이 없습니다.
 
 ### 저장 프로토콜
 
