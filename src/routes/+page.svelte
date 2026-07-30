@@ -6,8 +6,19 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { diffWords } from "diff";
+  import { diffChars, diffWords } from "diff";
   import Editor, { type EditorApi } from "$lib/Editor.svelte";
+  import MarkdownSourceEditor from "$lib/MarkdownSourceEditor.svelte";
+  import {
+    applyQuickFixes,
+    parseManuscript,
+    updateManuscriptMetadata,
+    type ManuscriptMetadata,
+    type ParsedManuscript,
+    type QuickFix,
+    type WritingDiagnostic,
+  } from "$lib/manuscript-document";
+  import type { ManuscriptBlockPlacement } from "$lib/manuscript-layout";
   import {
     basename,
     countWords,
@@ -27,13 +38,16 @@
   import { externalSyncProvider } from "$lib/storage";
   import type {
     AiAccountStatus,
+    AiGrammarResponse,
     AiLoginStart,
     AiSourceContext,
     AiWritingResponse,
     AssistantPanel,
     DocumentPayload,
+    DocumentViewMode,
     EditorSelection,
     FontRecord,
+    ImportedAsset,
     RecentDocument,
     RepositoryDocument,
     RepositoryStatus,
@@ -53,6 +67,16 @@
 
   type SaveState = "saved" | "dirty" | "saving" | "error";
   type ContextMode = "selection" | "section" | "document";
+  type GrammarScope = "selection" | "paragraph" | "document";
+  type PreviewComponent = typeof import("$lib/DocumentPreview.svelte").default;
+  type DocumentDialog =
+    | "metadata"
+    | "figure"
+    | "table"
+    | "math"
+    | "footnote"
+    | "block"
+    | null;
 
   interface ConflictState {
     remote: DocumentPayload;
@@ -73,11 +97,27 @@
     conflict: boolean;
   }
 
+  interface GrammarSuggestion {
+    response: AiGrammarResponse;
+    from: number;
+    to: number;
+    original: string;
+  }
+
+  interface GrammarEdit {
+    from: number;
+    to: number;
+    expected: string;
+    replacement: string;
+  }
+
   let desktop = $state(false);
   let currentDocument = $state<DocumentPayload | null>(null);
   let editorValue = $state("");
   let baseContent = $state("");
   let editorApi = $state<EditorApi | null>(null);
+  let Preview = $state<PreviewComponent | null>(null);
+  let viewMode = $state<DocumentViewMode>("manuscript");
   let selection = $state<EditorSelection>({
     from: 0,
     to: 0,
@@ -120,11 +160,37 @@
   let aiInstructions = $state("");
   let contextMode = $state<ContextMode>("section");
   let suggestion = $state<Suggestion | null>(null);
+  let grammarSuggestion = $state<GrammarSuggestion | null>(null);
+  let grammarBusy = $state(false);
+  let grammarScope = $state<GrammarScope>("paragraph");
   let exitPrompt = $state<ExitPrompt | null>(null);
   let login = $state<AiLoginStart | null>(null);
   let styleReference = $state("");
   let styleReferenceName = $state("");
   let selectedSourceIds = $state<string[]>([]);
+
+  let documentDialog = $state<DocumentDialog>(null);
+  let metadataDraft = $state<ManuscriptMetadata>({
+    title: "",
+    subtitle: "",
+    author: "",
+    affiliation: "",
+    genre: "",
+    schema: 1,
+    layout: "traditional-ko",
+  });
+  let figureSourcePath = $state("");
+  let figureAlt = $state("");
+  let figureCaption = $state("");
+  let tableRows = $state(3);
+  let tableColumns = $state(3);
+  let tableCells = $state<string[][]>([]);
+  let mathDisplay = $state(true);
+  let mathValue = $state("");
+  let footnoteValue = $state("");
+  let activeBlock = $state<ManuscriptBlockPlacement | null>(null);
+  let blockSource = $state("");
+  let blockOriginal = $state("");
 
   let zotero = $state<ZoteroStatus | null>(null);
   let zoteroQuery = $state("");
@@ -162,6 +228,28 @@
   let minutes = $derived(readingMinutes(editorValue));
   let documentTitle = $derived(
     currentDocument ? basename(currentDocument.path) : "Research Writer",
+  );
+  let manuscriptFallbackTitle = $derived(
+    currentDocument
+      ? basename(currentDocument.path).replace(/\.(?:md|markdown)$/i, "")
+      : "제목 없는 원고",
+  );
+  let parsedManuscript = $state<ParsedManuscript>(
+    parseManuscript("", "제목 없는 원고"),
+  );
+  let diagnostics = $derived(
+    preferences.manuscriptGuidance ? parsedManuscript.diagnostics : [],
+  );
+  let safeDiagnosticCount = $derived(
+    diagnostics.filter((item) => item.fix?.safe).length,
+  );
+  let grammarEdits = $derived(
+    grammarSuggestion
+      ? grammarDiffEdits(
+          grammarSuggestion.original,
+          grammarSuggestion.response.correctedText,
+        )
+      : [],
   );
   let currentSyncProvider = $derived(
     externalSyncProvider(currentDocument?.path ?? ""),
@@ -266,6 +354,389 @@
     savePreferences();
   }
 
+  function receiveParsedManuscript(document: ParsedManuscript): void {
+    parsedManuscript = document;
+  }
+
+  async function switchDocumentView(mode: DocumentViewMode): Promise<void> {
+    if (mode === "preview" && !Preview) {
+      try {
+        Preview = (await import("$lib/DocumentPreview.svelte")).default;
+      } catch (error) {
+        notify(`완성본 보기를 불러오지 못했습니다: ${errorMessage(error)}`, "error");
+        return;
+      }
+    }
+    viewMode = mode;
+    await tick();
+    if (mode !== "preview") editorApi?.focus();
+  }
+
+  async function editableApi(): Promise<EditorApi | null> {
+    if (!currentDocument || currentDocument.readOnly) return null;
+    if (viewMode === "preview") {
+      viewMode = "manuscript";
+      await tick();
+    }
+    return editorApi;
+  }
+
+  async function replaceWholeDocument(
+    next: string,
+    message?: string,
+  ): Promise<boolean> {
+    if (next === editorValue) return true;
+    const api = await editableApi();
+    if (!api) {
+      notify("읽기 전용 원고는 수정할 수 없습니다.", "error");
+      return false;
+    }
+    api.replaceRange(0, api.getContent().length, next);
+    if (message) notify(message, "success");
+    return true;
+  }
+
+  function openMetadataDialog(): void {
+    metadataDraft = { ...parsedManuscript.metadata };
+    documentDialog = "metadata";
+  }
+
+  async function saveMetadata(): Promise<void> {
+    if (!metadataDraft.title.trim()) {
+      notify("원고 제목을 입력해주세요.", "error");
+      return;
+    }
+    const next = updateManuscriptMetadata(
+      editorValue,
+      metadataDraft,
+      manuscriptFallbackTitle,
+    );
+    if (await replaceWholeDocument(next, "원고 정보를 반영했습니다.")) {
+      documentDialog = null;
+    }
+  }
+
+  async function moveToDiagnostic(item: WritingDiagnostic): Promise<void> {
+    if (item.category === "metadata" && !item.fix) {
+      openMetadataDialog();
+      return;
+    }
+    await switchDocumentView("manuscript");
+    editorApi?.setSelection(item.from, item.to);
+  }
+
+  async function applyDiagnosticFix(item: WritingDiagnostic): Promise<void> {
+    if (!item.fix) {
+      await moveToDiagnostic(item);
+      return;
+    }
+    const fix = item.fix;
+    if (editorValue.slice(fix.from, fix.to) !== fix.expected) {
+      notify("원고가 바뀌어 이 안내를 바로 적용할 수 없습니다.", "error");
+      return;
+    }
+    const api = await editableApi();
+    api?.replaceRange(fix.from, fix.to, fix.replacement);
+    notify("원고지 규칙에 맞게 고쳤습니다.", "success");
+  }
+
+  async function applyAllSafeDiagnostics(): Promise<void> {
+    const next = applyQuickFixes(editorValue, diagnostics, true);
+    if (next === editorValue) {
+      notify("자동으로 고칠 안전한 항목이 없습니다.", "info");
+      return;
+    }
+    await replaceWholeDocument(next, "안전한 원고지 수정 사항을 모두 반영했습니다.");
+  }
+
+  function grammarRange(): { from: number; to: number } | null {
+    const selected = editorApi?.getSelection() ?? selection;
+    if (grammarScope === "selection") {
+      return selected.text.trim()
+        ? { from: selected.from, to: selected.to }
+        : null;
+    }
+    if (grammarScope === "document") {
+      return { from: 0, to: editorValue.length };
+    }
+    const fromMarker = editorValue.lastIndexOf(
+      "\n\n",
+      Math.max(0, selected.from - 1),
+    );
+    const toMarker = editorValue.indexOf("\n\n", selected.to);
+    return {
+      from: fromMarker < 0 ? 0 : fromMarker + 2,
+      to: toMarker < 0 ? editorValue.length : toMarker,
+    };
+  }
+
+  async function runGrammarCheck(): Promise<void> {
+    if (!desktop || !currentDocument || grammarBusy) return;
+    const range = grammarRange();
+    if (!range) {
+      notify("문법 검사를 실행할 문장을 먼저 선택해주세요.", "info");
+      return;
+    }
+    const original = editorValue.slice(range.from, range.to);
+    if (!original.trim()) {
+      notify("검사할 문장을 먼저 작성하거나 선택해주세요.", "info");
+      return;
+    }
+    grammarBusy = true;
+    try {
+      const response = await invoke<AiGrammarResponse>(
+        "run_ai_grammar_check",
+        {
+          request: {
+            text: original,
+            documentContext: currentSection(editorValue, range.from),
+          },
+        },
+      );
+      grammarSuggestion = {
+        response,
+        from: range.from,
+        to: range.to,
+        original,
+      };
+      if (response.correctedText === original) {
+        notify("AI가 고칠 문법 문제를 찾지 못했습니다.", "success");
+      }
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    } finally {
+      grammarBusy = false;
+    }
+  }
+
+  function grammarDiffEdits(
+    original: string,
+    corrected: string,
+  ): GrammarEdit[] {
+    const edits: GrammarEdit[] = [];
+    let sourceOffset = 0;
+    let pending: GrammarEdit | null = null;
+    const flush = () => {
+      if (!pending) return;
+      if (pending.expected !== pending.replacement) edits.push(pending);
+      pending = null;
+    };
+    for (const part of diffChars(original, corrected)) {
+      if (!part.added && !part.removed) {
+        flush();
+        sourceOffset += part.value.length;
+        continue;
+      }
+      if (!pending) {
+        pending = {
+          from: sourceOffset,
+          to: sourceOffset,
+          expected: "",
+          replacement: "",
+        };
+      }
+      if (part.removed) {
+        pending.expected += part.value;
+        pending.to += part.value.length;
+        sourceOffset += part.value.length;
+      } else {
+        pending.replacement += part.value;
+      }
+    }
+    flush();
+    return edits;
+  }
+
+  async function applyGrammarReplacement(replacement: string): Promise<void> {
+    if (!grammarSuggestion) return;
+    const pending = grammarSuggestion;
+    if (
+      editorValue.slice(pending.from, pending.to) !== pending.original
+    ) {
+      notify("검사 뒤 원고가 바뀌었습니다. 다시 문법 검사를 실행해주세요.", "error");
+      grammarSuggestion = null;
+      return;
+    }
+    try {
+      await createSnapshot("ai");
+      const api = await editableApi();
+      api?.replaceRange(pending.from, pending.to, replacement);
+      grammarSuggestion = null;
+      notify("AI 문법 제안을 반영했습니다. 적용 전 버전을 보관했습니다.", "success");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
+  }
+
+  async function applyGrammarEdit(edit: GrammarEdit): Promise<void> {
+    if (!grammarSuggestion) return;
+    const next =
+      grammarSuggestion.original.slice(0, edit.from) +
+      edit.replacement +
+      grammarSuggestion.original.slice(edit.to);
+    await applyGrammarReplacement(next);
+  }
+
+  async function insertBlockMarkdown(markdown: string): Promise<void> {
+    const api = await editableApi();
+    if (!api) return;
+    const current = api.getContent();
+    const selected = api.getSelection();
+    const before = current.slice(0, selected.from);
+    const after = current.slice(selected.to);
+    const prefix = before.length === 0 || before.endsWith("\n\n") ? "" : before.endsWith("\n") ? "\n" : "\n\n";
+    const suffix = after.length === 0 || after.startsWith("\n\n") ? "" : after.startsWith("\n") ? "\n" : "\n\n";
+    api.replaceRange(selected.from, selected.to, `${prefix}${markdown.trim()}${suffix}`);
+  }
+
+  function openFigureDialog(): void {
+    figureSourcePath = "";
+    figureAlt = selection.text.trim();
+    figureCaption = "";
+    documentDialog = "figure";
+  }
+
+  async function chooseFigureSource(): Promise<void> {
+    if (!desktop) return;
+    const selected = await openDialog({
+      title: "원고에 넣을 그림 선택",
+      multiple: false,
+      directory: false,
+      filters: [
+        {
+          name: "그림",
+          extensions: ["png", "jpg", "jpeg", "webp", "gif"],
+        },
+      ],
+    });
+    if (typeof selected === "string") figureSourcePath = selected;
+  }
+
+  async function insertFigure(): Promise<void> {
+    if (!desktop || !currentDocument || !figureSourcePath) return;
+    try {
+      const imported = await invoke<ImportedAsset>(
+        "import_manuscript_asset",
+        {
+          documentPath: currentDocument.path,
+          sourcePath: figureSourcePath,
+        },
+      );
+      const alt = (figureAlt.trim() || "그림").replaceAll("]", "\\]");
+      const caption = figureCaption.trim();
+      const markdown = [
+        `![${alt}](${imported.relativePath})`,
+        caption ? `*${caption}*` : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      await insertBlockMarkdown(markdown);
+      documentDialog = null;
+      notify("그림을 assets 폴더에 복사해 원고에 넣었습니다.", "success");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
+  }
+
+  function openTableDialog(): void {
+    tableRows = 3;
+    tableColumns = 3;
+    tableCells = Array.from({ length: tableRows }, (_, row) =>
+      Array.from(
+        { length: tableColumns },
+        (_, column) => (row === 0 ? `열 ${column + 1}` : ""),
+      ),
+    );
+    documentDialog = "table";
+  }
+
+  function resizeTable(rows: number, columns: number): void {
+    tableRows = Math.min(12, Math.max(2, rows));
+    tableColumns = Math.min(8, Math.max(1, columns));
+    tableCells = Array.from({ length: tableRows }, (_, row) =>
+      Array.from(
+        { length: tableColumns },
+        (_, column) => tableCells[row]?.[column] ?? (row === 0 ? `열 ${column + 1}` : ""),
+      ),
+    );
+  }
+
+  function tableMarkdown(): string {
+    const escape = (value: string) =>
+      value.replaceAll("|", "\\|").replace(/\r?\n/g, " ").trim();
+    const lines = [
+      `| ${tableCells[0].map(escape).join(" | ")} |`,
+      `| ${Array.from({ length: tableColumns }, () => "---").join(" | ")} |`,
+      ...tableCells
+        .slice(1)
+        .map((row) => `| ${row.map(escape).join(" | ")} |`),
+    ];
+    return lines.join("\n");
+  }
+
+  async function insertTable(): Promise<void> {
+    await insertBlockMarkdown(tableMarkdown());
+    documentDialog = null;
+    notify("표를 Markdown으로 원고에 넣었습니다.", "success");
+  }
+
+  function openMathDialog(): void {
+    mathDisplay = true;
+    mathValue = selection.text.trim();
+    documentDialog = "math";
+  }
+
+  async function insertMath(): Promise<void> {
+    if (!mathValue.trim()) return;
+    const api = await editableApi();
+    if (!api) return;
+    if (mathDisplay) {
+      await insertBlockMarkdown(`$$\n${mathValue.trim()}\n$$`);
+    } else {
+      api.insertAtCursor(`$${mathValue.trim()}$`);
+    }
+    documentDialog = null;
+    notify("수식을 원고에 넣었습니다.", "success");
+  }
+
+  function openFootnoteDialog(): void {
+    footnoteValue = "";
+    documentDialog = "footnote";
+  }
+
+  async function insertFootnoteFromDialog(): Promise<void> {
+    if (!footnoteValue.trim()) return;
+    await insertFootnote(footnoteValue.trim());
+    documentDialog = null;
+    footnoteValue = "";
+  }
+
+  function editDocumentBlock(block: ManuscriptBlockPlacement): void {
+    activeBlock = block;
+    blockSource = editorValue.slice(block.from, block.to);
+    blockOriginal = blockSource;
+    documentDialog = "block";
+  }
+
+  async function saveDocumentBlock(): Promise<void> {
+    if (!activeBlock) return;
+    const current = editorValue.slice(activeBlock.from, activeBlock.to);
+    if (current !== blockOriginal) {
+      notify("문서 요소가 바뀌었습니다. 다시 열어주세요.", "error");
+      return;
+    }
+    const api = await editableApi();
+    api?.replaceRange(activeBlock.from, activeBlock.to, blockSource.trim());
+    documentDialog = null;
+    activeBlock = null;
+    notify("문서 요소를 수정했습니다.", "success");
+  }
+
+  function printCompletedDocument(): void {
+    if (viewMode !== "preview") return;
+    window.print();
+  }
+
   async function loadRecents(): Promise<void> {
     if (!desktop) return;
     try {
@@ -333,9 +804,13 @@
     currentDocument = null;
     editorValue = "";
     baseContent = "";
+    parsedManuscript = parseManuscript("", "제목 없는 원고");
     saveState = "saved";
     saveError = "";
     conflict = null;
+    viewMode = "manuscript";
+    documentDialog = null;
+    grammarSuggestion = null;
     sync = null;
     selection = { from: 0, to: 0, text: "", line: 1 };
   }
@@ -429,9 +904,16 @@
     currentDocument = document;
     editorValue = document.content;
     baseContent = document.content;
+    parsedManuscript = parseManuscript(
+      document.content,
+      basename(document.path).replace(/\.(?:md|markdown)$/i, ""),
+    );
     saveState = "saved";
     saveError = "";
     conflict = null;
+    viewMode = "manuscript";
+    documentDialog = null;
+    grammarSuggestion = null;
     selection = { from: 0, to: 0, text: "", line: 1 };
     searchIndexed = false;
     lastSnapshotAt = Date.now();
@@ -650,6 +1132,9 @@
 
   function onEditorChange(value: string): void {
     editorValue = value;
+    if (viewMode === "source") {
+      parsedManuscript = parseManuscript(value, manuscriptFallbackTitle);
+    }
     if (!currentDocument || currentDocument.readOnly) return;
     saveState = "dirty";
     saveError = "";
@@ -897,7 +1382,9 @@
       leftPanel = null;
     }
     rightPanel = nextPanel;
-    if (rightPanel === "ai") await refreshAiAccount();
+    if (rightPanel === "ai" || rightPanel === "proofreading") {
+      await refreshAiAccount();
+    }
     if (rightPanel === "sources") await refreshSources();
     if (rightPanel === "settings") {
       await Promise.all([
@@ -1181,7 +1668,7 @@
   }
 
   async function insertZoteroCitation(item: ZoteroItem): Promise<void> {
-    if (!editorApi || !currentDocument) return;
+    if (!currentDocument || !(await editableApi())) return;
     try {
       const citation = await invoke<string>("format_zotero_citation", {
         item,
@@ -1190,32 +1677,36 @@
         prefix: null,
         suffix: null,
       });
-      insertFootnote(citation, [item.doi, item.url]);
+      await insertFootnote(citation, [item.doi, item.url]);
       citationLocator = "";
     } catch (error) {
       notify(errorMessage(error), "error");
     }
   }
 
-  function insertFootnote(citation: string, identities: string[] = []): void {
-    if (!editorApi || !citation.trim()) return;
-    const content = editorApi.getContent();
+  async function insertFootnote(
+    citation: string,
+    identities: string[] = [],
+  ): Promise<void> {
+    const api = await editableApi();
+    if (!api || !citation.trim()) return;
+    const content = api.getContent();
     const existing = findFootnoteByIdentity(content, identities);
     const id = existing ?? nextFootnoteId(content);
-    const selected = editorApi.getSelection();
+    const selected = api.getSelection();
     if (!existing) {
       const separator = content.endsWith("\n\n")
         ? ""
         : content.endsWith("\n")
           ? "\n"
           : "\n\n";
-      editorApi.replaceRange(
+      api.replaceRange(
         content.length,
         content.length,
         `${separator}[^${id}]: ${citation.trim()}\n`,
       );
     }
-    editorApi.replaceRange(selected.from, selected.to, `[^${id}]`);
+    api.replaceRange(selected.from, selected.to, `[^${id}]`);
     notify(
       existing
         ? `기존 각주 ${id}번을 다시 사용했습니다.`
@@ -1224,9 +1715,9 @@
     );
   }
 
-  function insertManualCitation(): void {
+  async function insertManualCitation(): Promise<void> {
     if (!manualCitation.trim()) return;
-    insertFootnote(manualCitation.trim());
+    await insertFootnote(manualCitation.trim());
     manualCitation = "";
   }
 
@@ -1360,7 +1851,7 @@
       "",
       "## 원고가 먼저다",
       "",
-      "화면 가운데에는 스무 칸 스무 줄의 행간 원고지가 놓인다. Markdown 기호까지 한 칸씩 자리를 잡고, 사백 자가 차면 다음 장으로 자연스럽게 넘어간다.",
+      "화면 가운데에는 스무 칸 스무 줄의 행간 원고지가 놓인다. Markdown 기호는 감추고 완성될 글만 조판하며, 문단 첫 칸과 줄 끝 문장 부호도 원고지 관행에 맞춰 자동으로 배치한다.",
       "",
       "## 리서치는 글 옆에 머문다",
       "",
@@ -1411,6 +1902,14 @@
         return;
       }
       if (event.key === "Escape") {
+        if (documentDialog) {
+          documentDialog = null;
+          return;
+        }
+        if (grammarSuggestion) {
+          grammarSuggestion = null;
+          return;
+        }
         if (exitPrompt) {
           exitPrompt = null;
           return;
@@ -1633,6 +2132,13 @@
     </div>
 
     <div class="topbar-side topbar-right">
+      <button
+        class:active={rightPanel === "proofreading"}
+        class="text-button proof-button"
+        onclick={() => void toggleRight("proofreading")}
+      >
+        교정{diagnostics.length ? ` ${diagnostics.length}` : ""}
+      </button>
       <button
         class:active={rightPanel === "ai"}
         class="text-button"
@@ -1893,25 +2399,91 @@
         </div>
       {/if}
 
-      <Editor
-        value={editorValue}
-        readOnly={currentDocument.readOnly}
-        fontFamily={preferences.fontFamily}
-        manuscriptZoom={preferences.manuscriptZoom}
-        focusMode={preferences.focusMode}
-        typewriterMode={preferences.typewriterMode}
-        soundEnabled={preferences.soundEnabled}
-        onready={(api) => (editorApi = api)}
-        onchange={onEditorChange}
-        onselection={(value) => {
-          selection = value;
-          scheduleCompletion();
-        }}
-        onactivity={scheduleCompletion}
-        onghostaccept={() => notify("자동 완성을 반영했습니다.", "success")}
-      />
+      <div class="document-toolbar">
+        <div class="insert-tools">
+          <button onclick={openMetadataDialog}>원고 정보</button>
+          <button disabled={currentDocument.readOnly} onclick={openFigureDialog}
+            >그림</button
+          >
+          <button disabled={currentDocument.readOnly} onclick={openTableDialog}
+            >표</button
+          >
+          <button disabled={currentDocument.readOnly} onclick={openMathDialog}
+            >수식</button
+          >
+          <button disabled={currentDocument.readOnly} onclick={openFootnoteDialog}
+            >각주</button
+          >
+        </div>
+        <div class="view-switcher" aria-label="문서 보기">
+          <button
+            class:active={viewMode === "manuscript"}
+            onclick={() => void switchDocumentView("manuscript")}>원고지</button
+          >
+          <button
+            class:active={viewMode === "source"}
+            onclick={() => void switchDocumentView("source")}>원문</button
+          >
+          <button
+            class:active={viewMode === "preview"}
+            onclick={() => void switchDocumentView("preview")}>완성본</button
+          >
+          {#if viewMode === "preview"}
+            <button class="print-button" onclick={printCompletedDocument}
+              >인쇄·PDF</button
+            >
+          {/if}
+        </div>
+      </div>
 
-      {#if selection.text && !suggestion && !conflict}
+      {#if viewMode === "manuscript"}
+        <Editor
+          value={editorValue}
+          readOnly={currentDocument.readOnly}
+          fallbackTitle={manuscriptFallbackTitle}
+          fontFamily={preferences.fontFamily}
+          manuscriptZoom={preferences.manuscriptZoom}
+          focusMode={preferences.focusMode}
+          typewriterMode={preferences.typewriterMode}
+          soundEnabled={preferences.soundEnabled}
+          showDiagnostics={preferences.manuscriptGuidance}
+          onready={(api) => (editorApi = api)}
+          onchange={onEditorChange}
+          onselection={(value) => {
+            selection = value;
+            scheduleCompletion();
+          }}
+          onactivity={scheduleCompletion}
+          onghostaccept={() => notify("자동 완성을 반영했습니다.", "success")}
+          ondocument={receiveParsedManuscript}
+          onblockactivate={editDocumentBlock}
+        />
+      {:else if viewMode === "source"}
+        <MarkdownSourceEditor
+          value={editorValue}
+          readOnly={currentDocument.readOnly}
+          onready={(api) => (editorApi = api)}
+          onchange={onEditorChange}
+          onselection={(value) => {
+            selection = value;
+            scheduleCompletion();
+          }}
+          onactivity={scheduleCompletion}
+        />
+      {:else}
+        {#if Preview}
+          <Preview
+            content={editorValue}
+            documentPath={currentDocument.path}
+            fallbackTitle={manuscriptFallbackTitle}
+            fontFamily={preferences.fontFamily}
+            {desktop}
+            onlink={(url) => void openExternalUrl(url)}
+          />
+        {/if}
+      {/if}
+
+      {#if viewMode !== "preview" && selection.text && !suggestion && !conflict}
         <div class="selection-tools">
           <button onclick={() => void runAi("rewrite")}>다듬기</button>
           <button onclick={() => void runAi("shorten")}>줄이기</button>
@@ -1925,12 +2497,25 @@
         <div>
           <span>{words.toLocaleString("ko-KR")}단어</span>
           <span>약 {minutes}분</span>
-          <span>
-            {selection.page ?? 1}쪽 · {selection.row ?? 1}행 · {selection.column ?? 1}칸
-          </span>
+          {#if viewMode === "manuscript"}
+            <span>
+              {selection.page ?? 1}쪽 · {selection.row ?? 1}행 · {selection.column ?? 1}칸
+            </span>
+          {:else if viewMode === "source"}
+            <span>{selection.line}행 · Markdown 원문</span>
+          {:else}
+            <span>완성본 미리보기</span>
+          {/if}
+          {#if diagnostics.length}
+            <button
+              class="status-diagnostics"
+              onclick={() => void toggleRight("proofreading")}
+            >규칙 문제 {diagnostics.length}개</button>
+          {/if}
         </div>
         <div>
-          <span class="zoom-controls" aria-label="원고지 확대 및 축소">
+          {#if viewMode === "manuscript"}
+            <span class="zoom-controls" aria-label="원고지 확대 및 축소">
             <button
               title="축소 (Ctrl+-)"
               aria-label="원고지 축소"
@@ -1948,7 +2533,8 @@
               disabled={preferences.manuscriptZoom >= 140}
               onclick={() => setManuscriptZoom(preferences.manuscriptZoom + 10)}
             >＋</button>
-          </span>
+            </span>
+          {/if}
           {#if sync?.folderId}
             <span
               class:warning={sync.conflictFiles.length > 0}
@@ -2056,6 +2642,10 @@
       <div class="panel-heading">
         <div class="panel-tabs">
           <button
+            class:active={rightPanel === "proofreading"}
+            onclick={() => (rightPanel = "proofreading")}>교정</button
+          >
+          <button
             class:active={rightPanel === "ai"}
             onclick={() => (rightPanel = "ai")}>AI</button
           >
@@ -2074,7 +2664,118 @@
       </div>
 
       <div class="panel-content right-content">
-        {#if rightPanel === "ai"}
+        {#if rightPanel === "proofreading"}
+          <section class="panel-section guidance-intro">
+            <p class="eyebrow">원고지 작성 안내</p>
+            <h3>규칙을 외우지 않아도 됩니다</h3>
+            <p>
+              문단 첫 칸, 숫자·영문 칸쓰기와 줄 끝 문장 부호는 원문을
+              손상하지 않고 자동 배치합니다. 판단이 필요한 부분만 아래에
+              설명합니다.
+            </p>
+            <div class="guidance-checklist">
+              <span><b>1</b> Enter는 새 문단, Shift+Enter는 줄바꿈</span>
+              <span><b>2</b> 문단과 인용문의 들여쓰기는 자동</span>
+              <span><b>3</b> 표·그림·수식은 상단 삽입 도구 사용</span>
+            </div>
+            <button class="wide-button" onclick={openMetadataDialog}
+              >제목·작성자 원고 정보</button
+            >
+          </section>
+
+          <section class="panel-section">
+            <div class="proof-heading">
+              <div>
+                <p class="eyebrow">현재 원고</p>
+                <strong>
+                  {diagnostics.length
+                    ? `${diagnostics.length}개 확인 필요`
+                    : "원고지 규칙에 맞습니다"}
+                </strong>
+              </div>
+              {#if safeDiagnosticCount}
+                <button onclick={() => void applyAllSafeDiagnostics()}>
+                  안전 수정 {safeDiagnosticCount}
+                </button>
+              {/if}
+            </div>
+            {#if diagnostics.length}
+              <div class="diagnostic-list">
+                {#each diagnostics as item (item.id)}
+                  <article class={`diagnostic-card ${item.severity}`}>
+                    <button
+                      class="diagnostic-main"
+                      onclick={() => void moveToDiagnostic(item)}
+                    >
+                      <span class="diagnostic-label">
+                        {item.severity === "error"
+                          ? "오류"
+                          : item.severity === "warning"
+                            ? "확인"
+                            : "안내"}
+                      </span>
+                      <strong>{item.title}</strong>
+                      <p>{item.message}</p>
+                      {#if item.example}<code>{item.example}</code>{/if}
+                      <small>{item.source}</small>
+                    </button>
+                    <div class="diagnostic-actions">
+                      <button onclick={() => void moveToDiagnostic(item)}>이동</button>
+                      {#if item.fix}
+                        <button
+                          class="accent"
+                          onclick={() => void applyDiagnosticFix(item)}
+                        >{item.fix.label}</button>
+                      {/if}
+                    </div>
+                  </article>
+                {/each}
+              </div>
+            {:else}
+              <div class="empty-state small proof-empty">
+                <p>확정적인 원고지 문제를 찾지 못했습니다.</p>
+              </div>
+            {/if}
+          </section>
+
+          <section class="panel-section">
+            <p class="eyebrow">AI 맞춤법·문법 검사</p>
+            <p class="panel-note">
+              아래 버튼을 누를 때만 선택한 범위가 Codex로 전송됩니다.
+              자동 백그라운드 검사는 하지 않습니다.
+            </p>
+            <div class="segmented grammar-scope">
+              <button
+                class:active={grammarScope === "selection"}
+                onclick={() => (grammarScope = "selection")}>선택</button
+              >
+              <button
+                class:active={grammarScope === "paragraph"}
+                onclick={() => (grammarScope = "paragraph")}>현재 문단</button
+              >
+              <button
+                class:active={grammarScope === "document"}
+                onclick={() => (grammarScope = "document")}>전체</button
+              >
+            </div>
+            <button
+              class="wide-button accent"
+              disabled={grammarBusy || !currentDocument}
+              onclick={() => void runGrammarCheck()}
+            >
+              {grammarBusy ? "문법을 살피는 중…" : "문법 검사 실행"}
+            </button>
+            {#if !aiAccount?.authenticated}
+              <p class="panel-note">
+                AI 검사는 ChatGPT 연결이 필요하지만 위의 원고지 규칙 검사는
+                로그인 없이 항상 동작합니다.
+              </p>
+              <button class="wide-button" onclick={() => void startAiLogin(false)}
+                >ChatGPT로 연결</button
+              >
+            {/if}
+          </section>
+        {:else if rightPanel === "ai"}
           <section class="panel-section">
             <p class="eyebrow">작문 보조</p>
             {#if aiAccount?.authenticated}
@@ -2275,7 +2976,7 @@
                       <button
                         disabled={!source.citationMarkdown}
                         onclick={() =>
-                          insertFootnote(source.citationMarkdown, [source.url])}
+                          void insertFootnote(source.citationMarkdown, [source.url])}
                       >
                         각주
                       </button>
@@ -2365,6 +3066,17 @@
                 <option value="paragraph">현재 문단</option>
                 <option value="sentence">현재 문장</option>
               </select>
+            </label>
+            <label class="switch-row">
+              <div>
+                <strong>원고지 작성 안내</strong>
+                <small>규칙 문제를 칸과 교정 패널에 표시</small>
+              </div>
+              <input
+                type="checkbox"
+                bind:checked={preferences.manuscriptGuidance}
+                onchange={savePreferences}
+              />
             </label>
             <label class="switch-row">
               <div><strong>타자기 스크롤</strong><small>커서를 화면 42% 부근에 유지</small></div>
@@ -2502,6 +3214,314 @@
     </aside>
   {/if}
 </main>
+
+{#if documentDialog}
+  <div class="modal-backdrop" role="presentation">
+    {#if documentDialog === "metadata"}
+      <form
+        class="modal document-element-modal"
+        aria-label="원고 정보"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void saveMetadata();
+        }}
+      >
+        <header>
+          <div>
+            <p class="eyebrow">첫 장 배치</p>
+            <h2>원고 정보</h2>
+          </div>
+          <button type="button" class="close-button" onclick={() => (documentDialog = null)}
+            >×</button
+          >
+        </header>
+        <div class="metadata-form">
+          <label class="field">
+            <span>제목</span>
+            <input required bind:value={metadataDraft.title} />
+          </label>
+          <label class="field">
+            <span>부제</span>
+            <input bind:value={metadataDraft.subtitle} />
+          </label>
+          <label class="field">
+            <span>글의 종류</span>
+            <input placeholder="논문, 수필, 평론…" bind:value={metadataDraft.genre} />
+          </label>
+          <label class="field">
+            <span>소속</span>
+            <input bind:value={metadataDraft.affiliation} />
+          </label>
+          <label class="field">
+            <span>이름</span>
+            <input bind:value={metadataDraft.author} />
+          </label>
+        </div>
+        <p class="panel-note">
+          정보는 호환 가능한 YAML 속성으로 저장되고 원고지 첫 장에서는
+          전통 배치로 표시됩니다.
+        </p>
+        <footer>
+          <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
+            >취소</button
+          >
+          <button class="primary-button" disabled={currentDocument?.readOnly}
+            >반영</button
+          >
+        </footer>
+      </form>
+    {:else if documentDialog === "figure"}
+      <form
+        class="modal document-element-modal"
+        aria-label="그림 삽입"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void insertFigure();
+        }}
+      >
+        <header>
+          <div><p class="eyebrow">문서 요소</p><h2>그림 넣기</h2></div>
+          <button type="button" class="close-button" onclick={() => (documentDialog = null)}
+            >×</button
+          >
+        </header>
+        <button type="button" class="asset-picker" onclick={() => void chooseFigureSource()}>
+          <span>{figureSourcePath ? basename(figureSourcePath) : "PNG·JPEG·WebP·GIF 선택"}</span>
+          <small>{figureSourcePath ? "다른 파일" : "최대 20MiB"}</small>
+        </button>
+        <label class="field">
+          <span>대체 텍스트</span>
+          <input placeholder="그림이 보이지 않을 때 전달할 설명" bind:value={figureAlt} />
+        </label>
+        <label class="field">
+          <span>캡션</span>
+          <input placeholder="그림 1. 연구 흐름" bind:value={figureCaption} />
+        </label>
+        <p class="panel-note">
+          원본은 건드리지 않고 원고 옆 assets 폴더에 안전한 이름으로
+          복사합니다.
+        </p>
+        <footer>
+          <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
+            >취소</button
+          >
+          <button class="primary-button" disabled={!figureSourcePath}>그림 넣기</button>
+        </footer>
+      </form>
+    {:else if documentDialog === "table"}
+      <form
+        class="modal document-element-modal table-modal"
+        aria-label="표 삽입"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void insertTable();
+        }}
+      >
+        <header>
+          <div><p class="eyebrow">문서 요소</p><h2>표 만들기</h2></div>
+          <button type="button" class="close-button" onclick={() => (documentDialog = null)}
+            >×</button
+          >
+        </header>
+        <div class="table-size-controls">
+          <span>{tableRows}행 × {tableColumns}열</span>
+          <div>
+            <button type="button" onclick={() => resizeTable(tableRows + 1, tableColumns)}
+              >＋행</button
+            >
+            <button type="button" onclick={() => resizeTable(tableRows - 1, tableColumns)}
+              >−행</button
+            >
+            <button type="button" onclick={() => resizeTable(tableRows, tableColumns + 1)}
+              >＋열</button
+            >
+            <button type="button" onclick={() => resizeTable(tableRows, tableColumns - 1)}
+              >−열</button
+            >
+          </div>
+        </div>
+        <div
+          class="table-cell-editor"
+          style={`--table-columns: ${tableColumns}`}
+        >
+          {#each tableCells as row, rowIndex}
+            {#each row as _, columnIndex}
+              <input
+                aria-label={`${rowIndex + 1}행 ${columnIndex + 1}열`}
+                class:header-cell={rowIndex === 0}
+                bind:value={tableCells[rowIndex][columnIndex]}
+              />
+            {/each}
+          {/each}
+        </div>
+        <footer>
+          <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
+            >취소</button
+          >
+          <button class="primary-button">표 넣기</button>
+        </footer>
+      </form>
+    {:else if documentDialog === "math"}
+      <form
+        class="modal document-element-modal"
+        aria-label="수식 삽입"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void insertMath();
+        }}
+      >
+        <header>
+          <div><p class="eyebrow">KaTeX</p><h2>수식 넣기</h2></div>
+          <button type="button" class="close-button" onclick={() => (documentDialog = null)}
+            >×</button
+          >
+        </header>
+        <div class="segmented math-kind">
+          <button type="button" class:active={!mathDisplay} onclick={() => (mathDisplay = false)}
+            >문장 안</button
+          >
+          <button type="button" class:active={mathDisplay} onclick={() => (mathDisplay = true)}
+            >별도 블록</button
+          >
+        </div>
+        <label class="field">
+          <span>LaTeX 수식</span>
+          <textarea rows="6" placeholder="E = mc^2" bind:value={mathValue}></textarea>
+        </label>
+        <footer>
+          <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
+            >취소</button
+          >
+          <button class="primary-button" disabled={!mathValue.trim()}>수식 넣기</button>
+        </footer>
+      </form>
+    {:else if documentDialog === "footnote"}
+      <form
+        class="modal document-element-modal"
+        aria-label="각주 삽입"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void insertFootnoteFromDialog();
+        }}
+      >
+        <header>
+          <div><p class="eyebrow">문서 요소</p><h2>각주 넣기</h2></div>
+          <button type="button" class="close-button" onclick={() => (documentDialog = null)}
+            >×</button
+          >
+        </header>
+        <label class="field">
+          <span>각주 내용</span>
+          <textarea
+            rows="6"
+            placeholder="저자, 제목, 발행처, 쪽수 또는 설명"
+            bind:value={footnoteValue}
+          ></textarea>
+        </label>
+        <p class="panel-note">
+          커서 위치에는 각주 번호를, 원고 끝에는 표준 Markdown 각주 정의를
+          넣습니다.
+        </p>
+        <footer>
+          <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
+            >취소</button
+          >
+          <button class="primary-button" disabled={!footnoteValue.trim()}>각주 넣기</button>
+        </footer>
+      </form>
+    {:else}
+      <form
+        class="modal document-element-modal"
+        aria-label="문서 요소 편집"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void saveDocumentBlock();
+        }}
+      >
+        <header>
+          <div>
+            <p class="eyebrow">{activeBlock?.kind ?? "문서 요소"}</p>
+            <h2>{activeBlock?.label ?? "문서 요소 편집"}</h2>
+          </div>
+          <button type="button" class="close-button" onclick={() => (documentDialog = null)}
+            >×</button
+          >
+        </header>
+        <label class="field">
+          <span>Markdown 원문</span>
+          <textarea rows="12" spellcheck="false" bind:value={blockSource}></textarea>
+        </label>
+        <p class="panel-note">
+          표와 그림의 휴대성을 위해 이 대화상자에서는 해당 블록의 표준
+          Markdown만 편집합니다.
+        </p>
+        <footer>
+          <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
+            >취소</button
+          >
+          <button class="primary-button">반영</button>
+        </footer>
+      </form>
+    {/if}
+  </div>
+{/if}
+
+{#if grammarSuggestion}
+  <div class="modal-backdrop" role="presentation">
+    <section class="modal grammar-modal" role="dialog" aria-modal="true">
+      <header>
+        <div>
+          <p class="eyebrow">AI 문법 검사 · {grammarSuggestion.response.model}</p>
+          <h2>원문은 아직 바뀌지 않았습니다</h2>
+        </div>
+        <button class="close-button" onclick={() => (grammarSuggestion = null)}>×</button>
+      </header>
+      <div class="diff-view">
+        {#each diffWords(grammarSuggestion.original, grammarSuggestion.response.correctedText) as part}
+          <span class:added={part.added} class:removed={part.removed}>
+            {part.value}
+          </span>
+        {/each}
+      </div>
+      {#if grammarSuggestion.response.rationale}
+        <p class="rationale">{grammarSuggestion.response.rationale}</p>
+      {/if}
+      {#if grammarSuggestion.response.warnings.length}
+        <div class="grammar-warnings">
+          {#each grammarSuggestion.response.warnings as warning}
+            <p>{warning}</p>
+          {/each}
+        </div>
+      {/if}
+      {#if grammarEdits.length}
+        <div class="grammar-edit-list">
+          {#each grammarEdits as edit, index}
+            <article>
+              <span>{index + 1}</span>
+              <div>
+                <del>{edit.expected || "삽입"}</del>
+                <ins>{edit.replacement || "삭제"}</ins>
+              </div>
+              <button onclick={() => void applyGrammarEdit(edit)}>이 변경만</button>
+            </article>
+          {/each}
+        </div>
+      {/if}
+      <footer>
+        <button class="secondary-button" onclick={() => (grammarSuggestion = null)}
+          >닫기</button
+        >
+        {#if grammarSuggestion.response.correctedText !== grammarSuggestion.original}
+          <button
+            class="primary-button"
+            onclick={() =>
+              void applyGrammarReplacement(grammarSuggestion?.response.correctedText ?? "")}
+          >모두 반영</button>
+        {/if}
+      </footer>
+    </section>
+  </div>
+{/if}
 
 {#if suggestion}
   <div class="modal-backdrop" role="presentation">
@@ -2770,6 +3790,61 @@
       var(--paper);
   }
 
+  .document-toolbar {
+    position: absolute;
+    z-index: 14;
+    top: 9px;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transform: translateX(-50%);
+    border: 1px solid color-mix(in srgb, var(--rule) 80%, transparent);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--paper-raised) 94%, transparent);
+    padding: 3px;
+    box-shadow: 0 5px 18px color-mix(in srgb, var(--ink-strong) 9%, transparent);
+    backdrop-filter: blur(10px);
+  }
+
+  .insert-tools,
+  .view-switcher {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+  }
+
+  .view-switcher {
+    border-left: 1px solid var(--rule);
+    padding-left: 4px;
+  }
+
+  .document-toolbar button {
+    height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    padding: 0 8px;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+    white-space: nowrap;
+  }
+
+  .document-toolbar button:hover:not(:disabled),
+  .document-toolbar button.active {
+    background: var(--paper-deep);
+    color: var(--ink-strong);
+  }
+
+  .document-toolbar .print-button {
+    color: var(--accent);
+    font-weight: 720;
+  }
+
+  .document-toolbar button:disabled {
+    opacity: 0.42;
+  }
+
   .panel {
     z-index: 10;
     min-width: 0;
@@ -3013,6 +4088,184 @@
   .right-content {
     padding-left: 18px;
     padding-right: 18px;
+  }
+
+  .proof-button {
+    letter-spacing: 0.02em;
+  }
+
+  .guidance-intro h3 {
+    margin: 0 0 8px;
+    color: var(--ink-strong);
+    font-family: MaruBuri, Georgia, serif;
+    font-size: var(--type-reading);
+    font-weight: 600;
+  }
+
+  .guidance-intro > p:not(.eyebrow) {
+    margin: 0;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+    line-height: 1.65;
+  }
+
+  .guidance-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin: 13px 0;
+  }
+
+  .guidance-checklist span {
+    display: grid;
+    grid-template-columns: 20px 1fr;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  .guidance-checklist b {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: var(--type-micro);
+  }
+
+  .proof-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .proof-heading .eyebrow {
+    margin-bottom: 4px;
+  }
+
+  .proof-heading strong {
+    color: var(--ink-strong);
+    font-size: var(--type-control);
+  }
+
+  .proof-heading > button {
+    flex: 0 0 auto;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: transparent;
+    padding: 5px 7px;
+    color: var(--accent);
+    font-size: var(--type-micro);
+  }
+
+  .diagnostic-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 13px;
+  }
+
+  .diagnostic-card {
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-left-width: 3px;
+    border-radius: 8px;
+    background: var(--paper-raised);
+  }
+
+  .diagnostic-card.error {
+    border-left-color: var(--danger);
+  }
+
+  .diagnostic-card.warning {
+    border-left-color: var(--warning);
+  }
+
+  .diagnostic-card.suggestion {
+    border-left-color: #658489;
+  }
+
+  .diagnostic-main {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    padding: 10px 10px 8px;
+    color: var(--ink);
+    text-align: left;
+  }
+
+  .diagnostic-main:hover {
+    background: var(--paper);
+  }
+
+  .diagnostic-label {
+    margin-bottom: 5px;
+    border-radius: 8px;
+    background: var(--paper-deep);
+    padding: 2px 6px;
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+  }
+
+  .diagnostic-main strong {
+    font-size: var(--type-control);
+    line-height: 1.45;
+  }
+
+  .diagnostic-main p {
+    margin: 4px 0;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+    line-height: 1.55;
+  }
+
+  .diagnostic-main code {
+    margin: 3px 0;
+    color: var(--accent);
+    font-size: var(--type-micro);
+    white-space: normal;
+  }
+
+  .diagnostic-main small {
+    margin-top: 4px;
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+  }
+
+  .diagnostic-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    border-top: 1px solid var(--rule);
+    padding: 5px 7px;
+  }
+
+  .diagnostic-actions button {
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    padding: 4px 6px;
+    color: var(--ink-muted);
+    font-size: var(--type-micro);
+  }
+
+  .diagnostic-actions button.accent {
+    color: var(--accent);
+  }
+
+  .proof-empty {
+    min-height: 90px;
+  }
+
+  .grammar-scope {
+    margin: 10px 0 7px;
   }
 
   .eyebrow {
@@ -3305,6 +4558,19 @@
 
   .statusbar .warning {
     color: var(--danger);
+  }
+
+  .status-diagnostics {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: var(--warning);
+    font-size: var(--type-micro);
+    pointer-events: auto;
+  }
+
+  .status-diagnostics:hover {
+    color: var(--accent);
   }
 
   .zoom-controls {
@@ -3939,6 +5205,186 @@
     font-weight: 500;
   }
 
+  .document-element-modal {
+    width: min(720px, 94vw);
+  }
+
+  .metadata-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 12px;
+  }
+
+  .metadata-form .field:first-child,
+  .metadata-form .field:nth-child(2) {
+    grid-column: 1 / -1;
+  }
+
+  .asset-picker {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin: 8px 0 15px;
+    border: 1px dashed var(--rule-strong);
+    border-radius: 9px;
+    background: var(--paper);
+    padding: 18px;
+    color: var(--ink-muted);
+    text-align: left;
+  }
+
+  .asset-picker:hover {
+    border-color: var(--accent);
+  }
+
+  .asset-picker small {
+    color: var(--accent);
+    font-size: var(--type-caption);
+  }
+
+  .table-modal {
+    width: min(880px, 96vw);
+  }
+
+  .table-size-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 5px 0 10px;
+    color: var(--ink-muted);
+    font-size: var(--type-control);
+  }
+
+  .table-size-controls div {
+    display: flex;
+    gap: 3px;
+  }
+
+  .table-size-controls button {
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    background: var(--paper);
+    padding: 5px 7px;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  .table-cell-editor {
+    display: grid;
+    grid-template-columns: repeat(var(--table-columns), minmax(100px, 1fr));
+    max-height: 52vh;
+    overflow: auto;
+    border: 1px solid var(--rule);
+    background: var(--rule);
+    gap: 1px;
+  }
+
+  .table-cell-editor input {
+    min-width: 100px;
+    border: 0;
+    border-radius: 0;
+    background: var(--paper-raised);
+    padding: 8px;
+    font-size: var(--type-control);
+  }
+
+  .table-cell-editor input.header-cell {
+    background: var(--paper-deep);
+    font-weight: 700;
+  }
+
+  .math-kind {
+    grid-template-columns: 1fr 1fr;
+    margin: 6px 0 14px;
+  }
+
+  .document-element-modal textarea {
+    width: 100%;
+    resize: vertical;
+    font-family: NanumGothicCoding, monospace;
+    line-height: 1.6;
+  }
+
+  .grammar-modal {
+    width: min(760px, 94vw);
+  }
+
+  .grammar-warnings {
+    margin-top: 10px;
+    border-left: 2px solid var(--warning);
+    padding-left: 10px;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  .grammar-warnings p {
+    margin: 4px 0;
+  }
+
+  .grammar-edit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-height: 220px;
+    margin-top: 12px;
+    overflow: auto;
+  }
+
+  .grammar-edit-list article {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    background: var(--paper);
+    padding: 7px 8px;
+  }
+
+  .grammar-edit-list article > span {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--paper-deep);
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+  }
+
+  .grammar-edit-list article div {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    font-size: var(--type-caption);
+  }
+
+  .grammar-edit-list del,
+  .grammar-edit-list ins {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .grammar-edit-list del {
+    color: var(--danger);
+  }
+
+  .grammar-edit-list ins {
+    color: var(--success);
+    text-decoration: none;
+  }
+
+  .grammar-edit-list button {
+    border: 0;
+    background: transparent;
+    padding: 5px;
+    color: var(--accent);
+    font-size: var(--type-caption);
+  }
+
   .diff-view {
     max-height: 42vh;
     overflow: auto;
@@ -4111,6 +5557,65 @@
   @media (max-width: 900px) {
     .app-shell.panel-left.panel-right .right-panel {
       display: none;
+    }
+
+    .document-toolbar {
+      max-width: calc(100vw - 24px);
+      overflow-x: auto;
+    }
+
+    .insert-tools button {
+      padding-right: 6px;
+      padding-left: 6px;
+    }
+  }
+
+  @media (max-width: 680px) {
+    .insert-tools {
+      display: none;
+    }
+
+    .metadata-form {
+      grid-template-columns: 1fr;
+    }
+
+    .metadata-form .field {
+      grid-column: 1;
+    }
+  }
+
+  @media print {
+    :global(html),
+    :global(body) {
+      width: auto;
+      height: auto;
+      overflow: visible;
+      background: #fff;
+    }
+
+    .app-shell {
+      display: block;
+      width: auto;
+      height: auto;
+      overflow: visible;
+      background: #fff;
+    }
+
+    .topbar,
+    .panel,
+    .document-toolbar,
+    .encoding-banner,
+    .selection-tools,
+    .statusbar {
+      display: none !important;
+    }
+
+    .writing-stage {
+      width: auto;
+      height: auto;
+      min-height: 0;
+      overflow: visible;
+      background: #fff;
     }
   }
 </style>

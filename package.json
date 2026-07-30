@@ -1,6 +1,6 @@
 {
   "name": "research-writer",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "A quiet, local-first research writing editor.",
   "type": "module",
   "private": true,
@@ -21,7 +21,19 @@
     "@tauri-apps/plugin-dialog": "2.7.2",
     "@tauri-apps/plugin-opener": "2.5.4",
     "@tauri-apps/plugin-window-state": "2.4.1",
-    "diff": "9.0.0"
+    "diff": "9.0.0",
+    "katex": "0.18.1",
+    "rehype-katex": "7.0.1",
+    "rehype-sanitize": "6.0.0",
+    "rehype-stringify": "10.0.1",
+    "remark-frontmatter": "5.0.0",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "remark-parse": "11.0.0",
+    "remark-rehype": "11.1.2",
+    "unified": "11.0.5",
+    "unist-util-visit": "5.1.0",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "3.0.10",

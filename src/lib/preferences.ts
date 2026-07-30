@@ -7,6 +7,7 @@ export interface Preferences {
   typewriterMode: boolean;
   soundEnabled: boolean;
   autoComplete: boolean;
+  manuscriptGuidance: boolean;
   theme: "system" | "light" | "dark";
 }
 
@@ -17,6 +18,7 @@ export const defaultPreferences: Preferences = {
   typewriterMode: true,
   soundEnabled: false,
   autoComplete: false,
+  manuscriptGuidance: true,
   theme: "system",
 };
 
@@ -56,6 +58,10 @@ export function parsePreferences(stored: string | null): Preferences {
         typeof candidate.autoComplete === "boolean"
           ? candidate.autoComplete
           : defaultPreferences.autoComplete,
+      manuscriptGuidance:
+        typeof candidate.manuscriptGuidance === "boolean"
+          ? candidate.manuscriptGuidance
+          : defaultPreferences.manuscriptGuidance,
       theme: ["system", "light", "dark"].includes(candidate.theme ?? "")
         ? (candidate.theme as Preferences["theme"])
         : defaultPreferences.theme,

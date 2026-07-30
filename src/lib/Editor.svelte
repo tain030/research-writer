@@ -2,11 +2,13 @@
   import { onDestroy, onMount, tick } from "svelte";
   import {
     cellIndexForOffset,
+    layoutManuscript,
     MANUSCRIPT_CELLS_PER_PAGE,
     pageIndexForOffset,
-    paginateManuscript,
+    type ManuscriptBlockPlacement,
     type ManuscriptCell,
   } from "./manuscript-layout";
+  import type { ParsedManuscript } from "./manuscript-document";
   import { sentenceRange } from "./markdown";
   import type {
     EditorSelection as SelectionInfo,
@@ -29,39 +31,39 @@
   interface Props {
     value: string;
     readOnly?: boolean;
+    fallbackTitle?: string;
     fontFamily?: string;
     manuscriptZoom?: number;
     focusMode?: FocusMode;
     typewriterMode?: boolean;
     soundEnabled?: boolean;
+    showDiagnostics?: boolean;
     onready?: (api: EditorApi | null) => void;
     onchange?: (value: string) => void;
     onselection?: (selection: SelectionInfo) => void;
     onactivity?: () => void;
     onghostaccept?: (text: string) => void;
-  }
-
-  interface MarkdownDecorations {
-    syntax: Set<number>;
-    headings: Array<[number, number]>;
-    links: Array<[number, number]>;
-    quotes: Array<[number, number]>;
-    footnotes: Array<[number, number]>;
+    ondocument?: (document: ParsedManuscript) => void;
+    onblockactivate?: (block: ManuscriptBlockPlacement) => void;
   }
 
   let {
     value,
     readOnly = false,
+    fallbackTitle = "제목 없는 원고",
     fontFamily = "Pretendard",
     manuscriptZoom = 100,
     focusMode = "off",
     typewriterMode = true,
     soundEnabled = false,
+    showDiagnostics = true,
     onready,
     onchange,
     onselection,
     onactivity,
     onghostaccept,
+    ondocument,
+    onblockactivate,
   }: Props = $props();
 
   let host: HTMLDivElement;
@@ -84,7 +86,8 @@
   let manuscriptScale = $derived(
     Math.min(140, Math.max(80, manuscriptZoom)) / 100,
   );
-  let pages = $derived(paginateManuscript(internalValue));
+  let manuscript = $derived(layoutManuscript(internalValue, fallbackTitle));
+  let pages = $derived(manuscript.pages);
   let activePageIndex = $derived(
     pageIndexForOffset(pages, selectionDirection === "backward" ? selectionFrom : selectionTo),
   );
@@ -94,7 +97,6 @@
       selectionDirection === "backward" ? selectionFrom : selectionTo,
     ),
   );
-  let markdown = $derived(markdownDecorations(internalValue));
   let activeFocusRange = $derived(
     focusRange(internalValue, selectionFrom, selectionTo, focusMode),
   );
@@ -202,6 +204,50 @@
       clearGhostText();
       return;
     }
+    if (
+      event.key === "Enter" &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !readOnly
+    ) {
+      event.preventDefault();
+      const insertion = event.shiftKey
+        ? "\n"
+        : paragraphBreakAt(selectionFrom, selectionTo);
+      applyReplacement(selectionFrom, selectionTo, insertion);
+      return;
+    }
+    if (
+      !readOnly &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      selectionFrom === selectionTo
+    ) {
+      if (
+        [")", "]", "”", "’", '"'].includes(event.key) &&
+        internalValue.slice(selectionFrom, selectionFrom + 1) === event.key
+      ) {
+        event.preventDefault();
+        setSelection(selectionFrom + 1, selectionFrom + 1);
+        return;
+      }
+      const pairs: Record<string, string> = {
+        "(": ")",
+        "[": "]",
+        "“": "”",
+        "‘": "’",
+        '"': '"',
+      };
+      const closing = pairs[event.key];
+      if (closing) {
+        event.preventDefault();
+        applyReplacement(selectionFrom, selectionTo, `${event.key}${closing}`);
+        setSelection(selectionFrom - 1, selectionFrom - 1, false);
+        return;
+      }
+    }
     if (event.key !== "Tab" || readOnly) return;
     event.preventDefault();
     if (!event.shiftKey && ghostText) {
@@ -222,6 +268,13 @@
     applyReplacement(selectionFrom, selectionTo, "    ");
   }
 
+  function paragraphBreakAt(from: number, to: number): string {
+    const before = internalValue.slice(0, from);
+    const after = internalValue.slice(to);
+    if (before.endsWith("\n") || after.startsWith("\n")) return "\n";
+    return "\n\n";
+  }
+
   function clearGhostText(): void {
     ghostText = "";
   }
@@ -237,6 +290,16 @@
     setNativeSelection(dragAnchor, offset);
   }
 
+  function activateBlock(
+    event: MouseEvent,
+    block: ManuscriptBlockPlacement,
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+    setNativeSelection(block.from, block.to);
+    onblockactivate?.(block);
+  }
+
   function extendCellSelection(
     event: PointerEvent,
     cell: ManuscriptCell,
@@ -247,7 +310,14 @@
   }
 
   function pointerOffset(event: PointerEvent, cell: ManuscriptCell): number {
-    if (!cell.filled || cell.tabContinuation) return cell.caretOffset;
+    if (
+      !cell.filled ||
+      cell.virtual ||
+      cell.tabContinuation ||
+      cell.blockContinuation
+    ) {
+      return cell.caretOffset;
+    }
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     return event.clientX - rect.left > rect.width / 2 ? cell.to : cell.from;
   }
@@ -299,11 +369,10 @@
     return cell.to <= activeFocusRange[0] || cell.from >= activeFocusRange[1];
   }
 
-  function inRanges(cell: ManuscriptCell, ranges: Array<[number, number]>): boolean {
-    return (
-      cell.filled &&
-      ranges.some(([from, to]) => cell.from < to && cell.to > from)
-    );
+  function blockIsActive(block: ManuscriptBlockPlacement): boolean {
+    const head =
+      selectionDirection === "backward" ? selectionFrom : selectionTo;
+    return head >= block.from && head <= block.to;
   }
 
   function isActiveCell(pageIndex: number, cellIndex: number): boolean {
@@ -327,6 +396,8 @@
     ) {
       return "";
     }
+    const targetCell = pages[pageIndex]?.cells[cellIndex];
+    if (targetCell?.virtual || targetCell?.blockContinuation) return "";
     let startCell = activeCellIndex;
     const activeCell = pages[activePageIndex]?.cells[activeCellIndex];
     if (activeCell?.filled) startCell += 1;
@@ -423,63 +494,6 @@
     ];
   }
 
-  function markdownDecorations(content: string): MarkdownDecorations {
-    const result: MarkdownDecorations = {
-      syntax: new Set<number>(),
-      headings: [],
-      links: [],
-      quotes: [],
-      footnotes: [],
-    };
-    let lineStart = 0;
-    for (const line of content.split("\n")) {
-      const lineEnd = lineStart + line.length;
-      const heading = line.match(/^(#{1,6})(\s+)/);
-      if (heading) {
-        result.headings.push([lineStart, lineEnd]);
-        mark(result.syntax, lineStart, heading[1].length + heading[2].length);
-      }
-      const quote = line.match(/^(\s*>\s?)/);
-      if (quote) {
-        result.quotes.push([lineStart, lineEnd]);
-        mark(result.syntax, lineStart, quote[1].length);
-      }
-      const list = line.match(/^(\s*)(?:[-+*]|\d+\.)\s+/);
-      if (list) {
-        const markerStart = lineStart + list[1].length;
-        mark(result.syntax, markerStart, list[0].length - list[1].length);
-      }
-      if (/^\[\^[^\]]+\]:/.test(line)) {
-        result.footnotes.push([lineStart, lineEnd]);
-      }
-      for (const marker of line.matchAll(/\*\*|__|~~|`+/g)) {
-        mark(
-          result.syntax,
-          lineStart + (marker.index ?? 0),
-          marker[0].length,
-        );
-      }
-      for (const link of line.matchAll(/(!?)\[([^\]]+)\]\(([^)]+)\)/g)) {
-        const start = lineStart + (link.index ?? 0);
-        const labelStart = start + link[1].length + 1;
-        const labelEnd = labelStart + link[2].length;
-        result.links.push([labelStart, labelEnd]);
-        mark(result.syntax, start, link[1].length + 1);
-        result.syntax.add(labelEnd);
-        result.syntax.add(labelEnd + 1);
-        result.syntax.add(start + link[0].length - 1);
-      }
-      lineStart = lineEnd + 1;
-    }
-    return result;
-  }
-
-  function mark(target: Set<number>, start: number, length: number): void {
-    for (let offset = start; offset < start + length; offset += 1) {
-      target.add(offset);
-    }
-  }
-
   onMount(() => {
     mounted = true;
     internalValue = value;
@@ -502,6 +516,11 @@
     input.value = value;
     input.setSelectionRange(head, head);
     syncSelection();
+  });
+
+  $effect(() => {
+    if (!mounted) return;
+    ondocument?.(manuscript.document);
   });
 
   $effect(() => {
@@ -579,11 +598,22 @@
                   class:active-cell={isActiveCell(pageIndex, cellIndex)}
                   class:caret-after={isActiveCell(pageIndex, cellIndex) && caretAfterCell(cell)}
                   class:selected={cellIsSelected(cell)}
-                  class:markdown-syntax={cell.filled && markdown.syntax.has(cell.from)}
-                  class:markdown-heading={inRanges(cell, markdown.headings)}
-                  class:markdown-link={inRanges(cell, markdown.links)}
-                  class:markdown-quote={inRanges(cell, markdown.quotes)}
-                  class:markdown-footnote={inRanges(cell, markdown.footnotes)}
+                  class:style-title={cell.style === "title"}
+                  class:style-subtitle={cell.style === "subtitle"}
+                  class:style-metadata={cell.style === "metadata"}
+                  class:style-heading={cell.style === "heading"}
+                  class:style-strong={cell.style === "strong"}
+                  class:style-emphasis={cell.style === "emphasis"}
+                  class:style-link={cell.style === "link"}
+                  class:style-code={cell.style === "code"}
+                  class:style-quote={cell.style === "quote"}
+                  class:style-footnote={cell.style === "footnote"}
+                  class:compact-cell={cell.compact}
+                  class:virtual-cell={cell.virtual}
+                  class:block-reserved={cell.blockContinuation}
+                  class:diagnostic-error={showDiagnostics && cell.diagnosticSeverity === "error"}
+                  class:diagnostic-warning={showDiagnostics && cell.diagnosticSeverity === "warning"}
+                  class:diagnostic-suggestion={showDiagnostics && cell.diagnosticSeverity === "suggestion"}
                   class:focus-dim={cellIsDimmed(cell)}
                   class:tab-cell={cell.text === "⇥" || cell.tabContinuation}
                   class="manuscript-cell"
@@ -598,6 +628,36 @@
                     <span class="ghost-text">{ghost}</span>
                   {/if}
                 </span>
+              {/each}
+              {#each page.blocks as block (block.id)}
+                <button
+                  class:active={blockIsActive(block)}
+                  class={`manuscript-block block-${block.kind}`}
+                  style={`grid-row: ${block.row + 1} / span ${block.rows}; grid-column: 1 / -1;`}
+                  title="클릭해서 문서 요소 편집"
+                  onclick={(event) => activateBlock(event, block)}
+                >
+                  <span class="block-kind">
+                    {block.kind === "figure"
+                      ? "그림"
+                      : block.kind === "table"
+                        ? "표"
+                        : block.kind === "math"
+                          ? "수식"
+                          : block.kind === "footnote"
+                            ? "각주"
+                            : block.kind === "code"
+                              ? "코드"
+                              : block.kind === "divider"
+                                ? "구분"
+                                : "확인"}
+                  </span>
+                  <span class="block-copy">
+                    <strong>{block.label}</strong>
+                    {#if block.detail}<small>{block.detail}</small>{/if}
+                  </span>
+                  <span class="block-edit">편집</span>
+                </button>
               {/each}
             {/if}
           </div>
@@ -790,29 +850,166 @@
     left: auto;
   }
 
-  .markdown-syntax {
-    color: #b47a70;
-  }
-
-  .markdown-heading {
+  .style-title {
     color: #27211e;
-    font-weight: 650;
+    font-size: calc(var(--writing-font-size) * 1.05);
+    font-weight: 700;
   }
 
-  .markdown-link {
+  .style-subtitle,
+  .style-metadata {
+    color: #725e55;
+    font-size: calc(var(--writing-font-size) * 0.78);
+  }
+
+  .style-heading,
+  .style-strong {
+    color: #27211e;
+    font-weight: 680;
+  }
+
+  .style-link {
     color: #356d70;
     text-decoration: underline;
     text-decoration-color: rgba(53, 109, 112, 0.42);
     text-underline-offset: 3px;
   }
 
-  .markdown-quote {
+  .style-quote,
+  .style-emphasis {
     color: #6f625a;
     font-style: italic;
   }
 
-  .markdown-footnote {
+  .style-footnote {
     color: #80675f;
+    font-size: calc(var(--writing-font-size) * 0.58);
+  }
+
+  .style-code {
+    color: #466267;
+    font-family: NanumGothicCoding, monospace;
+    font-size: calc(var(--writing-font-size) * 0.66);
+  }
+
+  .compact-cell {
+    font-size: calc(var(--writing-font-size) * 0.62);
+    letter-spacing: -0.04em;
+  }
+
+  .virtual-cell {
+    cursor: default;
+  }
+
+  .block-reserved .cell-text {
+    display: none;
+  }
+
+  .diagnostic-error::after,
+  .diagnostic-warning::after,
+  .diagnostic-suggestion::after {
+    position: absolute;
+    z-index: 3;
+    right: 4px;
+    bottom: 3px;
+    left: 4px;
+    height: 2px;
+    border-radius: 2px;
+    content: "";
+  }
+
+  .diagnostic-error::after {
+    background: #b84b43;
+  }
+
+  .diagnostic-warning::after {
+    background: #c07b35;
+  }
+
+  .diagnostic-suggestion::after {
+    background: rgba(82, 110, 112, 0.58);
+  }
+
+  .manuscript-cell.active-cell.diagnostic-error::after,
+  .manuscript-cell.active-cell.diagnostic-warning::after,
+  .manuscript-cell.active-cell.diagnostic-suggestion::after {
+    right: auto;
+    bottom: 4px;
+    left: 3px;
+    width: 2px;
+    height: auto;
+    background: #a34839;
+  }
+
+  .manuscript-block {
+    z-index: 8;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    align-self: stretch;
+    gap: 11px;
+    margin: 4px 5px;
+    border: 1px solid rgba(151, 61, 52, 0.42);
+    border-radius: 7px;
+    background:
+      linear-gradient(
+        135deg,
+        rgba(255, 253, 247, 0.96),
+        rgba(246, 238, 226, 0.94)
+      );
+    padding: 10px 13px;
+    box-shadow: 0 5px 16px rgba(72, 48, 34, 0.1);
+    color: #4c4039;
+    text-align: left;
+  }
+
+  .manuscript-block:hover,
+  .manuscript-block.active {
+    border-color: rgba(151, 61, 52, 0.72);
+    box-shadow: 0 7px 19px rgba(72, 48, 34, 0.15);
+  }
+
+  .block-kind {
+    display: grid;
+    place-items: center;
+    min-width: 42px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgba(151, 61, 52, 0.1);
+    color: #97453d;
+    font-family: var(--ui-font);
+    font-size: calc(var(--tab-font-size) * 0.86);
+    font-weight: 750;
+  }
+
+  .block-copy {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 3px;
+  }
+
+  .block-copy strong,
+  .block-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .block-copy strong {
+    font-family: var(--manuscript-font);
+    font-size: calc(var(--writing-font-size) * 0.7);
+  }
+
+  .block-copy small,
+  .block-edit {
+    color: #8a756a;
+    font-family: var(--ui-font);
+    font-size: calc(var(--tab-font-size) * 0.82);
+  }
+
+  .block-edit {
+    color: #9c4b42;
   }
 
   .tab-cell {

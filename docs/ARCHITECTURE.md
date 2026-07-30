@@ -6,12 +6,16 @@ Research Writer는 “작은 데스크톱 셸 안의 로컬 Markdown 편집기�
 
 ```text
 Svelte 5 UI + native textarea input
-  └─ 20×20 manuscript-grid projection with correction spacing
+  ├─ mdast semantic document model + writing diagnostics
+  ├─ 20×20 manuscript-grid projection with correction spacing
+  ├─ raw Markdown source view
+  └─ sanitized, lazy-loaded completed-document preview
           │ Tauri invoke/event
           ▼
 Rust application services
   ├─ document: decode, hash, atomic save, merge
   ├─ manuscript: repository lifecycle, create, rename, OS trash
+  ├─ assets: scoped image import and offline preview
   ├─ database: versions, recents, FTS search, settings
   ├─ platform: fonts, keyring, document/repository watch, startup files
   ├─ codex: App Server JSON-RPC bridge
@@ -40,12 +44,33 @@ Rust application services
 ### 원고지 편집 모델
 
 숨겨진 네이티브 `textarea`가 IME, 선택, 클립보드와 브라우저 undo 입력을
-담당하고, 화면에는 그 값을 Unicode grapheme 단위로 20열×20행 종이에
-투영합니다. Markdown 문법 문자도 내용과 똑같이 한 칸을 차지합니다. 줄바꿈은
-다음 행으로, 탭은 4칸 탭 정지점으로 이동하며 400칸을 넘으면 새 페이지를
-만듭니다. 쓰기 행 사이의 행간은 교정용 시각 공간일 뿐 글자 수나 커서 위치에
-포함하지 않습니다. 원고의 진실은 여전히 하나의 문자열뿐이어서 리치 텍스트와
-Markdown 사이의 왕복 변환이 없습니다.
+담당합니다. 같은 원문을 `remark` 기반 mdast로 해석하여 YAML 원고 정보,
+문단·제목·인용·목록과 그림·표·수식·코드·각주 블록을 구분한 뒤 화면에는
+완성될 내용만 Unicode grapheme 단위로 20열×20행 종이에 투영합니다.
+Markdown 문법 문자는 칸을 차지하지 않습니다.
+
+첫 장에는 제목과 작성자 정보를 배치하고, 본문 문단 첫 칸과 인용·목록
+들여쓰기는 가상 칸으로 만듭니다. 영문 소문자와 숫자는 두 자까지 한 칸에
+모으고, 닫는 문장 부호는 줄 끝 칸에 함께 둘 수 있으며 여는 문장 부호는
+줄 마지막 칸을 피합니다. 표·그림·블록 수식처럼 한 칸으로 표현할 수 없는
+요소는 원문 범위를 가리키는 두 줄 카드가 됩니다. 쓰기 행 사이의 행간은
+교정용 시각 공간일 뿐 글자 수나 커서 위치에 포함하지 않습니다.
+
+확정적인 공백·문장 부호·원고지 관행은 로컬 진단으로 설명하고, 안전한
+수정만 일괄 적용할 수 있습니다. 완성본 보기는 별도 지연 로딩 청크에서
+Markdown을 HTML로 바꾼 뒤 allowlist로 정화합니다. 원시 HTML은 버리고,
+원격 그림은 네트워크로 가져오지 않으며, 로컬 그림만 Rust가 검증해 넘긴
+data URL로 치환합니다. 원고의 진실은 여전히 하나의 Markdown 문자열뿐이어서
+리치 텍스트와 Markdown 사이의 왕복 변환이 없습니다.
+
+### 문서 요소와 그림
+
+표·수식·각주 삽입기는 표준 GFM, `$...$`/`$$...$$`, Markdown 각주 문법을
+문자열에 직접 기록합니다. 그림을 넣을 때 Rust 계층은 PNG·JPEG·WebP·GIF
+중 20MiB 이하인 실제 래스터 파일인지 시그니처까지 확인하고 원고 옆
+`assets/`에 UUID 이름으로 원자 복사합니다. 미리보기 읽기는 정규화한
+상대경로만 허용하고, 심볼릭 링크를 포함한 최종 경로가 열린 저장소 또는
+원고 폴더를 벗어나지 않는지 canonical path로 다시 확인합니다.
 
 ### 저장 프로토콜
 
@@ -73,6 +98,9 @@ AI 연결은 Codex CLI의 App Server 프로토콜을 사용합니다.
 - 도구 요청이 오면 클라이언트가 명시적으로 거절합니다.
 - 편집 범위와 문맥은 UI에서 선택한 텍스트만 요청에 직렬화합니다.
 - 결과는 구조화 JSON으로 받고 diff 승인을 거쳐야 편집기에 들어갑니다.
+- 맞춤법·문법 검사도 자동 실행하지 않으며 선택·현재 문단·전체 중 사용자가
+  고른 범위만 보내고, Markdown·YAML·URL·코드·수식·각주 표식을 보존하도록
+  별도 요청 계약을 사용합니다.
 
 ### 외부 연동
 

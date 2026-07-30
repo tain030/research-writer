@@ -5,6 +5,7 @@ describe("writing preferences", () => {
   it("uses Pretendard for a fresh profile", () => {
     expect(defaultPreferences.fontFamily).toBe("Pretendard");
     expect(defaultPreferences.manuscriptZoom).toBe(100);
+    expect(defaultPreferences.manuscriptGuidance).toBe(true);
     expect(parsePreferences(null).fontFamily).toBe("Pretendard");
   });
 
@@ -18,6 +19,7 @@ describe("writing preferences", () => {
       fontFamily: "MaruBuri",
       manuscriptZoom: 100,
       typewriterMode: true,
+      manuscriptGuidance: true,
     });
     expect("measure" in parsePreferences(stored)).toBe(false);
   });
@@ -31,5 +33,11 @@ describe("writing preferences", () => {
     expect(parsePreferences('{"manuscriptZoom":126}').manuscriptZoom).toBe(130);
     expect(parsePreferences('{"manuscriptZoom":20}').manuscriptZoom).toBe(80);
     expect(parsePreferences('{"manuscriptZoom":200}').manuscriptZoom).toBe(140);
+  });
+
+  it("preserves an explicit writing-guidance preference", () => {
+    expect(
+      parsePreferences('{"manuscriptGuidance":false}').manuscriptGuidance,
+    ).toBe(false);
   });
 });

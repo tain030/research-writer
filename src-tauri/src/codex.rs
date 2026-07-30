@@ -91,6 +91,24 @@ pub struct AiWritingResponse {
     pub model: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiGrammarRequest {
+    pub text: String,
+    #[serde(default)]
+    pub document_context: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiGrammarResponse {
+    pub corrected_text: String,
+    pub rationale: String,
+    pub warnings: Vec<String>,
+    pub original_hash: String,
+    pub model: String,
+}
+
 impl CodexBridge {
     pub fn new(session_directory: PathBuf) -> Self {
         Self {
@@ -269,6 +287,33 @@ impl CodexBridge {
         parsed.original_hash = hash_text(&request.selection);
         parsed.model = AI_MODEL.to_string();
         Ok(parsed)
+    }
+
+    pub fn run_grammar_check(
+        &self,
+        request: &AiGrammarRequest,
+    ) -> Result<AiGrammarResponse, String> {
+        if request.text.chars().count() > 60_000 {
+            return Err(
+                "한 번에 검사할 원고가 너무 깁니다. 현재 문단이나 선택 영역을 검사해주세요."
+                    .to_string(),
+            );
+        }
+        let response = self.run_writing_assistant(&AiWritingRequest {
+            action: "grammar".to_string(),
+            selection: request.text.clone(),
+            document_context: request.document_context.clone(),
+            style_reference: String::new(),
+            instructions: String::new(),
+            sources: Vec::new(),
+        })?;
+        Ok(AiGrammarResponse {
+            corrected_text: response.replacement,
+            rationale: response.rationale,
+            warnings: response.warnings,
+            original_hash: response.original_hash,
+            model: response.model,
+        })
     }
 
     fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -684,6 +729,7 @@ fn validate_ai_request(request: &AiWritingRequest) -> Result<(), String> {
         "logic",
         "counterargument",
         "evidence",
+        "grammar",
     ];
     if !supported.contains(&request.action.as_str()) {
         return Err("지원하지 않는 AI 작문 동작입니다.".to_string());
@@ -721,9 +767,19 @@ fn build_prompt(request: &AiWritingRequest) -> String {
         "evidence" => {
             "Strengthen the wording using only the supplied source cards. Cite source IDs in citations and never cite another source."
         }
+        "grammar" => {
+            "Proofread the Korean prose for spelling, spacing, particles, subject-predicate agreement, tense, punctuation, and accidental repetition. Preserve meaning, voice, Markdown structure, YAML, URLs, code, formulas, citation markers, and source identifiers exactly. Put the complete corrected selection in replacement. Explain the important correction categories briefly in rationale and put genuinely ambiguous cases in warnings. Do not make stylistic rewrites."
+        }
         _ => "Edit the selection.",
     };
-    let selection = truncate_chars(&request.selection, 30_000);
+    let selection = truncate_chars(
+        &request.selection,
+        if request.action == "grammar" {
+            60_000
+        } else {
+            30_000
+        },
+    );
     let document_context = truncate_chars(&request.document_context, 40_000);
     let style_reference = truncate_chars(&request.style_reference, 12_000);
     let sources = request
@@ -855,6 +911,24 @@ mod tests {
         });
         assert!(prompt.contains("[SOURCE S003]"));
         assert!(!prompt.contains("/home/"));
+    }
+
+    #[test]
+    fn grammar_prompt_preserves_document_structure_and_accepts_the_action() {
+        let request = AiWritingRequest {
+            action: "grammar".to_string(),
+            selection: "---\ntitle: 초고\n---\n\n문장이예요.[^1]".to_string(),
+            document_context: "현재 문단".to_string(),
+            style_reference: String::new(),
+            instructions: String::new(),
+            sources: Vec::new(),
+        };
+        let prompt = build_prompt(&request);
+
+        assert!(validate_ai_request(&request).is_ok());
+        assert!(prompt.contains("Preserve meaning, voice, Markdown structure, YAML"));
+        assert!(prompt.contains("[^1]"));
+        assert!(prompt.contains("문장이예요."));
     }
 
     #[test]

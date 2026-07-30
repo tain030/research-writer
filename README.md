@@ -53,7 +53,12 @@ chmod +x research-writer_amd64.AppImage
 ## 지금 들어 있는 기능
 
 - Pretendard를 원고 기본 글꼴로 제공, MaruBuri·NanumGothicCoding 및 설치된 시스템 글꼴 선택
-- Markdown 문자까지 한 칸씩 담는 20×20, 400자 행간 원고지와 80–140% 확대·축소
+- Markdown 문법은 감추고 완성될 글을 조판하는 20×20 행간 원고지와 80–140% 확대·축소
+- 제목·부제·장르·소속·작성자를 첫 장에 전통 방식으로 배치하는 호환 가능한 YAML 원고 정보
+- 문단 첫 칸, 인용·목록 들여쓰기, 영문 소문자·숫자 두 자 한 칸, 줄 끝 문장 부호와 줄임표 안내
+- 확정적인 원고지·문장 부호 문제의 실시간 표시와 안전한 항목 일괄 수정
+- 원고지·Markdown 원문·A4 완성본 보기, 안전한 미리보기와 인쇄·PDF 출력
+- 대화상자로 그림·표·KaTeX 수식·각주를 넣고 원고지에서는 편집 가능한 문서 카드로 표시
 - 어떤 폴더든 원고 저장소로 열고, 루트의 Markdown 원고를 생성·이름 변경·휴지통 삭제
 - 마지막 저장소와 마지막 원고 자동 복원, 저장소 밖 Markdown 파일의 독립 편집
 - 직렬화된 300ms 자동 저장, 원래 줄바꿈과 UTF-8 BOM 보존, 임시 파일·fsync·원자 교체
@@ -62,6 +67,7 @@ chmod +x research-writer_amd64.AppImage
 - 문단·문장 집중 모드, 타자기 스크롤, 선택 가능한 절제된 타건음
 - 로컬 SQLite 압축 버전 기록, 이름 있는 버전, Markdown 폴더 전체 검색
 - Codex App Server와 ChatGPT OAuth를 이용한 다듬기·축약·확장·논리 점검·반론·근거 강화·자동 이어쓰기
+- 선택·현재 문단·전체 범위를 명시적으로 보내는 AI 맞춤법·문법 검사와 변경별 diff 승인
 - AI 적용 전 버전 보관, 원문과 제안의 diff 확인, 명시적 수락 전 원고 불변
 - Zotero 로컬 API 검색과 Markdown 각주 삽입
 - Research Agent의 조사 요청·폴더·출처 연결, 로컬 `source_index.jsonl`과 검증 카드 폴백
@@ -107,11 +113,11 @@ sudo apt install \
 전체 CI, Linux x86_64 패키징, 체크섬 생성과 GitHub Release 공개를 수행합니다.
 
 ```bash
-pnpm release:version 0.1.6
+pnpm release:version 0.2.0
 git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "Release v0.1.6"
-git tag -a v0.1.6 -m "Research Writer v0.1.6"
-git push origin main v0.1.6
+git commit -m "Release v0.2.0"
+git tag -a v0.2.0 -m "Research Writer v0.2.0"
+git push origin main v0.2.0
 ```
 
 태그는 `v숫자.숫자.숫자` 형식이어야 하며 `main`에 포함된 커밋만 릴리스할 수
@@ -140,6 +146,41 @@ Dropbox·OneDrive·Google Drive·iCloud 폴더에 있다면 실제 업로드와 
 
 주요 단축키는 `Ctrl/Cmd+Shift+O` 저장소 열기, `Ctrl/Cmd+O` 파일 열기,
 `Ctrl/Cmd+N` 새 원고, `Ctrl/Cmd+W` 현재 원고 닫기입니다.
+
+## 원고지 작성 안내
+
+원고를 열면 Markdown 제목이나 파일 이름이 첫 장 제목으로 표시됩니다.
+`원고 정보`에서 제목·부제·장르·소속·이름을 입력하면 다음처럼 평범한 YAML
+frontmatter로 저장되므로 Obsidian과 다른 Markdown 편집기에서도 그대로
+읽을 수 있습니다.
+
+```yaml
+---
+title: 연구 노트의 감각
+subtitle: 도구보다 글이 먼저 보이게
+author: 홍길동
+affiliation: 원고지 연구소
+genre: 평론
+research_writer:
+  schema: 1
+  layout: traditional-ko
+---
+```
+
+`Enter`는 새 문단, `Shift+Enter`는 같은 문단 안 줄바꿈입니다. 문단과
+인용문의 첫 칸은 화면에서 자동으로 비우므로 원문 앞에 공백이나 탭을 직접
+넣지 않아도 됩니다. 괄호와 따옴표는 짝을 자동으로 만들고, 원고지 관행상
+확실히 고칠 수 있는 공백·말줄임표 문제에는 교정 패널에서 안전 수정을
+제공합니다. 문맥 판단이 필요한 맞춤법과 문법은 사용자가 버튼을 누를 때만
+선택한 범위를 AI에 보내며, 원문과 수정문을 비교해 승인하기 전에는 파일을
+바꾸지 않습니다.
+
+상단의 `그림`, `표`, `수식`, `각주` 도구는 Markdown 문법을 몰라도 표준
+문서 요소를 만듭니다. 그림은 원본을 건드리지 않고 현재 원고 옆의
+`assets/`에 무작위 안전 이름으로 복사됩니다. 원고지에서는 긴 Markdown
+구문 대신 두 줄짜리 카드를 보여주고, `원문` 보기에서는 실제 저장 내용을,
+`완성본` 보기에서는 표·그림·수식·각주가 조판된 A4 문서를 확인할 수
+있습니다.
 
 ## 선택 기능 연결
 
@@ -186,9 +227,11 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
 ## 데이터 원칙
 
 - 원고의 단일 진실은 사용자가 선택한 `.md` 파일입니다.
+- 삽입한 그림은 원고 옆 `assets/`에 두며 로컬 상대경로만 자동으로 읽습니다.
 - SQLite에는 버전, 최근 문서, 검색 색인, 비밀이 아닌 설정만 둡니다.
 - Research Agent 토큰은 Keychain, Credential Manager 또는 Secret Service에 둡니다.
 - AI 제안과 외부 동기화 결과는 자동으로 원고를 덮지 않습니다.
+- 원시 HTML과 원격 그림은 완성본에서 실행하거나 자동으로 불러오지 않습니다.
 - 레거시 인코딩은 읽기 전용으로 열고 원본 버전을 만든 뒤 명시적으로 UTF-8로 변환합니다.
 
 구조와 경계는 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), 기여 절차는 [CONTRIBUTING.md](CONTRIBUTING.md)를 참고하세요.

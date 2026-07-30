@@ -17,3 +17,8 @@ Research Writer's MIT license. Pretendard's copyright notice and complete
 license are included at
 [`static/fonts/Pretendard-OFL.txt`](static/fonts/Pretendard-OFL.txt); the
 NAVER font license is included at [`static/fonts/OFL.txt`](static/fonts/OFL.txt).
+
+The completed-document preview bundles KaTeX and its math fonts. KaTeX is
+copyright 2013–2020 Khan Academy and other contributors and is distributed
+under the MIT License. The complete license is included at
+[`static/katex-LICENSE.txt`](static/katex-LICENSE.txt).

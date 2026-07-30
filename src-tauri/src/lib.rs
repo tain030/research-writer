@@ -1,3 +1,4 @@
+mod assets;
 mod codex;
 mod database;
 mod document;
@@ -5,7 +6,10 @@ mod integrations;
 mod manuscript;
 mod platform;
 
-use codex::{AiAccountStatus, AiLoginStart, AiWritingRequest, AiWritingResponse, CodexBridge};
+use codex::{
+    AiAccountStatus, AiGrammarRequest, AiGrammarResponse, AiLoginStart, AiWritingRequest,
+    AiWritingResponse, CodexBridge,
+};
 use database::{MetadataDb, RecentDocument, SearchResult, StoredVersion, VersionSummary};
 use document::{DocumentPayload, MergeResult, SaveDocumentRequest, SaveDocumentResult};
 use integrations::{
@@ -19,6 +23,24 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Manager, State};
+
+#[tauri::command]
+fn import_manuscript_asset(
+    document_path: String,
+    source_path: String,
+    state: State<'_, AppState>,
+) -> Result<assets::ImportedAsset, String> {
+    assets::import_asset(&state.database, &document_path, &source_path)
+}
+
+#[tauri::command]
+fn read_manuscript_asset(
+    document_path: String,
+    relative_path: String,
+    state: State<'_, AppState>,
+) -> Result<assets::ManuscriptAssetData, String> {
+    assets::read_asset(&state.database, &document_path, &relative_path)
+}
 
 struct AppState {
     database: MetadataDb,
@@ -241,6 +263,17 @@ async fn run_ai_writing(
 }
 
 #[tauri::command]
+async fn run_ai_grammar_check(
+    request: AiGrammarRequest,
+    state: State<'_, AppState>,
+) -> Result<AiGrammarResponse, String> {
+    let codex = state.codex.clone();
+    tauri::async_runtime::spawn_blocking(move || codex.run_grammar_check(&request))
+        .await
+        .map_err(|error| format!("AI 문법 검사 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
 async fn zotero_status() -> ZoteroStatus {
     integrations::zotero_status().await
 }
@@ -344,6 +377,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            import_manuscript_asset,
+            read_manuscript_asset,
             read_document,
             save_document,
             convert_document_to_utf8,
@@ -373,6 +408,7 @@ pub fn run() {
             ai_account_status,
             ai_login_start,
             run_ai_writing,
+            run_ai_grammar_check,
             zotero_status,
             zotero_search,
             format_zotero_citation,

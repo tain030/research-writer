@@ -116,6 +116,25 @@ export interface AiWritingResponse {
   model: string;
 }
 
+export interface AiGrammarResponse {
+  correctedText: string;
+  rationale: string;
+  warnings: string[];
+  originalHash: string;
+  model: string;
+}
+
+export interface ImportedAsset {
+  relativePath: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
+export interface ManuscriptAssetData extends ImportedAsset {
+  dataUrl: string;
+}
+
 export interface ZoteroStatus {
   available: boolean;
   message: string;
@@ -181,4 +200,10 @@ export interface EditorSelection {
 
 export type FocusMode = "off" | "paragraph" | "sentence";
 export type SidePanel = "repository" | "outline" | "search" | "versions" | null;
-export type AssistantPanel = "ai" | "sources" | "settings" | null;
+export type AssistantPanel =
+  | "proofreading"
+  | "ai"
+  | "sources"
+  | "settings"
+  | null;
+export type DocumentViewMode = "manuscript" | "source" | "preview";
