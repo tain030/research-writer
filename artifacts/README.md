@@ -20,6 +20,6 @@ SHA-256 값은 같은 폴더의 `SHA256SUMS`에서 확인할 수 있습니다.
 
 ```bash
 cd ~/Downloads
-grep 'research-writer_0.1.1_amd64.deb$' SHA256SUMS | sha256sum -c -
-sudo apt install ./research-writer_0.1.1_amd64.deb
+grep 'research-writer_0.1.2_amd64.deb$' SHA256SUMS | sha256sum -c -
+sudo apt install ./research-writer_0.1.2_amd64.deb
 ```

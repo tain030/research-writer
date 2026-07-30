@@ -10,8 +10,8 @@
 [GitHub Releases](https://github.com/tain030/research-writer/releases/latest)에서
 내려받을 수 있습니다.
 
-- Debian/Ubuntu: `research-writer_0.1.1_amd64.deb`
-- 그 밖의 x86_64 Linux: `research-writer_0.1.1_amd64.AppImage`
+- Debian/Ubuntu: `research-writer_0.1.2_amd64.deb`
+- 그 밖의 x86_64 Linux: `research-writer_0.1.2_amd64.AppImage`
 
 두 파일은 공개 배포용 서명을 하지 않은 초기 빌드입니다. 같은 Release의
 `SHA256SUMS`를 함께 내려받으면 설치 전에 무결성을 확인할 수 있습니다.
@@ -24,8 +24,8 @@
 
 ```bash
 cd ~/Downloads
-grep 'research-writer_0.1.1_amd64.deb$' SHA256SUMS | sha256sum -c -
-sudo apt install ./research-writer_0.1.1_amd64.deb
+grep 'research-writer_0.1.2_amd64.deb$' SHA256SUMS | sha256sum -c -
+sudo apt install ./research-writer_0.1.2_amd64.deb
 ```
 
 설치 후 애플리케이션 메뉴에서 `Research Writer`를 선택하거나
@@ -36,9 +36,9 @@ Debian/Ubuntu 계열이 아닌 x86_64 Linux에서는 AppImage를 실행할 수 �
 
 ```bash
 cd ~/Downloads
-grep 'research-writer_0.1.1_amd64.AppImage$' SHA256SUMS | sha256sum -c -
-chmod +x research-writer_0.1.1_amd64.AppImage
-./research-writer_0.1.1_amd64.AppImage
+grep 'research-writer_0.1.2_amd64.AppImage$' SHA256SUMS | sha256sum -c -
+chmod +x research-writer_0.1.2_amd64.AppImage
+./research-writer_0.1.2_amd64.AppImage
 ```
 
 ## 지금 들어 있는 기능

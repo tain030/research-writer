@@ -2008,7 +2008,7 @@
     height: 32px;
     padding: 0 10px;
     border-radius: 7px;
-    font-size: 12px;
+    font-size: var(--type-control);
     font-weight: 720;
     letter-spacing: 0.08em;
   }
@@ -2028,7 +2028,7 @@
     min-width: 0;
     gap: 8px;
     color: var(--ink-muted);
-    font-size: 12px;
+    font-size: var(--type-control);
     letter-spacing: 0.01em;
   }
 
@@ -2107,7 +2107,7 @@
     background: transparent;
     padding: 7px 9px;
     color: var(--ink-muted);
-    font-size: 12px;
+    font-size: var(--type-control);
   }
 
   .panel-tabs button.active {
@@ -2142,9 +2142,9 @@
   .eyebrow {
     margin: 0 0 12px;
     color: var(--ink-faint);
-    font-size: 10px;
+    font-size: var(--type-caption);
     font-weight: 760;
-    letter-spacing: 0.13em;
+    letter-spacing: 0.11em;
     text-transform: uppercase;
   }
 
@@ -2165,7 +2165,7 @@
     padding: 7px 8px 7px calc(7px + var(--depth) * 9px);
     color: var(--ink);
     text-align: left;
-    font-size: 12px;
+    font-size: var(--type-control);
     line-height: 1.45;
   }
 
@@ -2175,7 +2175,7 @@
 
   .outline-marker {
     color: var(--ink-faint);
-    font-size: 9px;
+    font-size: var(--type-micro);
     line-height: 1.9;
   }
 
@@ -2189,7 +2189,7 @@
 
   .empty-state.small {
     min-height: 120px;
-    font-size: 12px;
+    font-size: var(--type-body);
   }
 
   .empty-state code {
@@ -2212,7 +2212,7 @@
     padding: 9px 10px;
     color: var(--ink-muted);
     text-align: left;
-    font-size: 11px;
+    font-size: var(--type-control);
   }
 
   .path-button span {
@@ -2228,7 +2228,7 @@
   .quiet-line,
   .working-line {
     color: var(--ink-muted);
-    font-size: 11px;
+    font-size: var(--type-caption);
   }
 
   .result-list,
@@ -2263,19 +2263,19 @@
 
   .result-list strong,
   .version-list strong {
-    font-size: 12px;
+    font-size: var(--type-control);
   }
 
   .result-list span {
     color: var(--ink-muted);
-    font-size: 11px;
+    font-size: var(--type-caption);
     line-height: 1.5;
   }
 
   .result-list small,
   .version-list small {
     color: var(--ink-faint);
-    font-size: 9px;
+    font-size: var(--type-micro);
   }
 
   .named-version {
@@ -2294,29 +2294,30 @@
     border-radius: 7px;
     background: var(--paper-raised);
     padding: 0 12px;
+    font-size: var(--type-control);
   }
 
   .panel-note {
     color: var(--ink-muted);
-    font-size: 10px;
+    font-size: var(--type-caption);
     line-height: 1.65;
   }
 
   .version-list > button {
     position: relative;
-    padding-left: 52px;
+    padding-left: 58px;
   }
 
   .version-kind {
     position: absolute;
     left: 7px;
     top: 10px;
-    width: 37px;
+    width: 43px;
     border-radius: 10px;
     background: var(--paper-raised);
     padding: 3px 0;
     color: var(--ink-muted);
-    font-size: 8px;
+    font-size: var(--type-micro);
     text-align: center;
   }
 
@@ -2340,7 +2341,7 @@
     padding: 7px 9px 7px 13px;
     box-shadow: var(--shadow);
     color: var(--ink-muted);
-    font-size: 10px;
+    font-size: var(--type-caption);
   }
 
   .encoding-banner button {
@@ -2348,13 +2349,13 @@
     border-radius: 5px;
     background: var(--paper-deep);
     padding: 5px 8px;
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .selection-tools {
     position: absolute;
     z-index: 9;
-    bottom: 38px;
+    bottom: 40px;
     left: 50%;
     display: flex;
     gap: 2px;
@@ -2372,7 +2373,7 @@
     background: transparent;
     padding: 6px 9px;
     color: var(--ink-muted);
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .selection-tools button:hover {
@@ -2388,11 +2389,11 @@
     left: 0;
     display: flex;
     justify-content: space-between;
-    height: 26px;
+    height: 28px;
     padding: 0 14px;
     background: linear-gradient(transparent, var(--paper));
     color: var(--ink-faint);
-    font-size: 9px;
+    font-size: var(--type-micro);
     pointer-events: none;
   }
 
@@ -2418,26 +2419,26 @@
   }
 
   .welcome-kicker {
-    margin: 0 0 18px;
+    margin: 0 0 14px;
     color: var(--ink-faint);
-    font-size: 9px;
-    letter-spacing: 0.24em;
+    font-size: var(--type-micro);
+    letter-spacing: 0.18em;
   }
 
   .welcome h1 {
     margin: 0;
     font-family: MaruBuri, Georgia, serif;
-    font-size: clamp(56px, 8vw, 92px);
+    font-size: var(--type-welcome-title);
     font-weight: 400;
-    letter-spacing: -0.08em;
+    letter-spacing: -0.06em;
     color: var(--ink-strong);
   }
 
   .welcome-copy {
-    margin: 20px 0 28px;
+    margin: 16px 0 24px;
     color: var(--ink-muted);
     font-family: MaruBuri, Georgia, serif;
-    font-size: 15px;
+    font-size: var(--type-reading);
     line-height: 1.8;
   }
 
@@ -2454,7 +2455,7 @@
     min-width: 104px;
     border-radius: 7px;
     padding: 9px 17px;
-    font-size: 11px;
+    font-size: var(--type-control);
   }
 
   .primary-button {
@@ -2472,12 +2473,12 @@
     display: flex;
     flex-direction: column;
     width: min(420px, 80vw);
-    margin-top: 36px;
+    margin-top: 30px;
   }
 
   .recent-block > p {
     color: var(--ink-faint);
-    font-size: 9px;
+    font-size: var(--type-micro);
     letter-spacing: 0.1em;
     text-transform: uppercase;
   }
@@ -2490,7 +2491,12 @@
     background: transparent;
     padding: 9px 4px;
     color: var(--ink-muted);
-    font-size: 11px;
+    font-size: var(--type-control);
+  }
+
+  .recent-block small {
+    color: var(--ink-faint);
+    font-size: var(--type-caption);
   }
 
   .recent-block button:hover {
@@ -2498,9 +2504,9 @@
   }
 
   .welcome-shortcuts {
-    margin-top: 30px;
+    margin-top: 24px;
     color: var(--ink-faint);
-    font-size: 9px;
+    font-size: var(--type-micro);
   }
 
   .panel-section {
@@ -2538,12 +2544,12 @@
   }
 
   .connection-line strong {
-    font-size: 11px;
+    font-size: var(--type-control);
   }
 
   .connection-line small {
     color: var(--ink-muted);
-    font-size: 9px;
+    font-size: var(--type-caption);
     line-height: 1.45;
   }
 
@@ -2555,12 +2561,12 @@
   }
 
   .connection-card strong {
-    font-size: 12px;
+    font-size: var(--type-control);
   }
 
   .connection-card p {
     color: var(--ink-muted);
-    font-size: 10px;
+    font-size: var(--type-caption);
     line-height: 1.55;
   }
 
@@ -2571,7 +2577,7 @@
     border-radius: 6px;
     background: var(--paper);
     padding: 6px 9px;
-    font-size: 9px;
+    font-size: var(--type-control);
   }
 
   .device-code {
@@ -2586,7 +2592,7 @@
     width: 100%;
     padding: 5px;
     color: var(--accent);
-    font-size: 9px;
+    font-size: var(--type-caption);
   }
 
   .segmented {
@@ -2603,7 +2609,7 @@
     background: transparent;
     padding: 6px;
     color: var(--ink-muted);
-    font-size: 9px;
+    font-size: var(--type-control);
   }
 
   .segmented button.active {
@@ -2625,7 +2631,7 @@
     background: var(--paper-raised);
     padding: 3px 7px;
     color: var(--ink-muted);
-    font-size: 8px;
+    font-size: var(--type-micro);
   }
 
   .action-grid {
@@ -2652,19 +2658,20 @@
   }
 
   .action-grid strong {
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .action-grid small {
     margin-top: 2px;
     color: var(--ink-faint);
-    font-size: 8px;
+    font-size: var(--type-micro);
+    line-height: 1.35;
   }
 
   .panel-section textarea {
     width: 100%;
     resize: vertical;
-    font-size: 10px;
+    font-size: var(--type-control);
     line-height: 1.55;
   }
 
@@ -2698,13 +2705,13 @@
 
   .switch-row strong,
   .field > span {
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .switch-row small,
   .field small {
     color: var(--ink-faint);
-    font-size: 8px;
+    font-size: var(--type-caption);
     line-height: 1.5;
   }
 
@@ -2732,7 +2739,7 @@
   .source-search input {
     min-width: 0;
     padding: 7px;
-    font-size: 9px;
+    font-size: var(--type-control);
   }
 
   .source-list article {
@@ -2747,7 +2754,7 @@
     display: block;
     padding-right: 52px;
     font-family: MaruBuri, Georgia, serif;
-    font-size: 11px;
+    font-size: var(--type-control);
     line-height: 1.4;
   }
 
@@ -2756,7 +2763,7 @@
     display: block;
     margin: 4px 0;
     color: var(--ink-muted);
-    font-size: 8px;
+    font-size: var(--type-micro);
     line-height: 1.4;
   }
 
@@ -2774,7 +2781,7 @@
     align-items: center;
     gap: 3px;
     color: var(--ink-faint);
-    font-size: 8px;
+    font-size: var(--type-micro);
   }
 
   .source-check input {
@@ -2795,7 +2802,7 @@
     border-radius: 7px;
     background: var(--paper-raised);
     padding: 8px 10px;
-    font-size: 9px;
+    font-size: var(--type-control);
   }
 
   .wide-button.accent {
@@ -2820,7 +2827,7 @@
   .field input {
     width: 100%;
     min-width: 0;
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .field input[type="range"] {
@@ -2836,12 +2843,12 @@
   }
 
   .settings-fact strong {
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .settings-fact span {
     color: var(--ink-muted);
-    font-size: 9px;
+    font-size: var(--type-caption);
     line-height: 1.55;
   }
 
@@ -2849,7 +2856,7 @@
     border-left: 2px solid var(--danger);
     padding-left: 9px;
     color: var(--danger);
-    font-size: 9px;
+    font-size: var(--type-caption);
     line-height: 1.55;
   }
 
@@ -2884,7 +2891,7 @@
     margin: 0 0 12px;
     color: var(--ink-strong);
     font-family: MaruBuri, Georgia, serif;
-    font-size: 21px;
+    font-size: var(--type-dialog-title);
     font-weight: 500;
   }
 
@@ -2896,7 +2903,7 @@
     background: var(--paper);
     padding: 18px;
     font-family: MaruBuri, Georgia, serif;
-    font-size: 15px;
+    font-size: var(--type-reading);
     line-height: 1.85;
     white-space: pre-wrap;
   }
@@ -2915,7 +2922,7 @@
   .rationale,
   .conflict-modal > p {
     color: var(--ink-muted);
-    font-size: 11px;
+    font-size: var(--type-body);
     line-height: 1.65;
   }
 
@@ -2931,7 +2938,7 @@
   }
 
   .conflict-columns strong {
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .conflict-columns pre {
@@ -2942,7 +2949,7 @@
     background: var(--paper);
     padding: 10px;
     font-family: NanumGothicCoding, monospace;
-    font-size: 9px;
+    font-size: var(--type-micro);
     line-height: 1.5;
     white-space: pre-wrap;
   }
@@ -2952,7 +2959,7 @@
     border-radius: 7px;
     background: var(--paper);
     padding: 8px 12px;
-    font-size: 10px;
+    font-size: var(--type-control);
   }
 
   .conflict-modal footer .primary-button {
@@ -2971,7 +2978,7 @@
     padding: 10px 14px;
     box-shadow: var(--shadow);
     color: var(--ink);
-    font-size: 10px;
+    font-size: var(--type-caption);
     line-height: 1.5;
     animation: toast-in 180ms ease-out;
   }

@@ -48,6 +48,13 @@
   text-rendering: optimizeLegibility;
   --ui-font:
     Inter, "Noto Sans KR", "NanumGothicCoding", system-ui, sans-serif;
+  --type-micro: 11px;
+  --type-caption: 12px;
+  --type-control: 13px;
+  --type-body: 14px;
+  --type-reading: 16px;
+  --type-dialog-title: 22px;
+  --type-welcome-title: clamp(48px, 6vw, 68px);
   --paper: #f7f2e8;
   --paper-deep: #efe8dc;
   --paper-raised: #fbf8f1;
@@ -133,11 +140,17 @@ textarea {
   font: inherit;
 }
 
+body {
+  font-size: var(--type-body);
+  line-height: 1.5;
+}
+
 button,
 input,
 select,
 textarea {
   color: inherit;
+  font-size: var(--type-control);
 }
 
 button {

@@ -709,5 +709,7 @@
 
   :global(.cm-tooltip) {
     font-family: var(--ui-font);
+    font-size: var(--type-caption);
+    line-height: 1.45;
   }
 </style>
