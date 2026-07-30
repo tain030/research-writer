@@ -154,14 +154,14 @@ mod tests {
         let database = test_database(directory.path());
         let repository = directory.path().join("3_Write");
         fs::create_dir(&repository).unwrap();
-        configure_repository(&database, repository.to_str().unwrap()).unwrap();
+        let configured = configure_repository(&database, repository.to_str().unwrap()).unwrap();
         fs::remove_dir(&repository).unwrap();
 
         let status = repository_status(&database).unwrap();
 
         assert!(status.configured);
         assert!(!status.available);
-        assert_eq!(status.path, Some(repository.to_string_lossy().to_string()));
+        assert_eq!(status.path, configured.path);
     }
 
     #[test]
