@@ -30,6 +30,7 @@
     value: string;
     readOnly?: boolean;
     fontFamily?: string;
+    manuscriptZoom?: number;
     focusMode?: FocusMode;
     typewriterMode?: boolean;
     soundEnabled?: boolean;
@@ -52,6 +53,7 @@
     value,
     readOnly = false,
     fontFamily = "Pretendard",
+    manuscriptZoom = 100,
     focusMode = "off",
     typewriterMode = true,
     soundEnabled = false,
@@ -79,6 +81,9 @@
   let dragAnchor: number | null = null;
   let scrollFrame: number | null = null;
 
+  let manuscriptScale = $derived(
+    Math.min(140, Math.max(80, manuscriptZoom)) / 100,
+  );
   let pages = $derived(paginateManuscript(internalValue));
   let activePageIndex = $derived(
     pageIndexForOffset(pages, selectionDirection === "backward" ? selectionFrom : selectionTo),
@@ -261,7 +266,12 @@
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = null;
-      const pageStride = 500;
+      const firstPage =
+        scroller.querySelector<HTMLElement>(".manuscript-page");
+      const pageStride = firstPage
+        ? firstPage.offsetHeight +
+          Number.parseFloat(getComputedStyle(firstPage).marginBottom)
+        : 1_236 * manuscriptScale;
       const first = Math.max(0, Math.floor((scroller.scrollTop - 56) / pageStride));
       const count = Math.max(1, Math.ceil(scroller.clientHeight / pageStride));
       visibleStart = Math.max(0, first - 2);
@@ -494,6 +504,15 @@
     syncSelection();
   });
 
+  $effect(() => {
+    manuscriptScale;
+    if (!mounted) return;
+    requestAnimationFrame(() => {
+      handleScroll();
+      scheduleCaretScroll();
+    });
+  });
+
   onDestroy(() => {
     mounted = false;
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
@@ -505,7 +524,20 @@
   class:focused
   class="editor-host"
   bind:this={host}
-  style={`--manuscript-font: "${fontFamily.replaceAll('"', '\\"')}", Pretendard, sans-serif;`}
+  style={[
+    `--manuscript-font: "${fontFamily.replaceAll('"', '\\"')}", Pretendard, sans-serif`,
+    `--cell-size: ${40 * manuscriptScale}px`,
+    `--row-gap: ${12 * manuscriptScale}px`,
+    `--paper-width: ${960 * manuscriptScale}px`,
+    `--paper-height: ${1200 * manuscriptScale}px`,
+    `--grid-width: ${800 * manuscriptScale}px`,
+    `--grid-height: ${1028 * manuscriptScale}px`,
+    `--grid-left: ${80 * manuscriptScale}px`,
+    `--grid-top: ${86 * manuscriptScale}px`,
+    `--page-gap: ${36 * manuscriptScale}px`,
+    `--writing-font-size: ${26 * manuscriptScale}px`,
+    `--tab-font-size: ${14 * manuscriptScale}px`,
+  ].join("; ")}
 >
   <textarea
     class="native-input"
@@ -538,7 +570,7 @@
           aria-label={`원고지 ${page.number}쪽`}
         >
           <span class="page-number">NO. {page.number}</span>
-          <div class="page-caption">20 × 10</div>
+          <div class="page-caption">20 × 20</div>
           <div class="manuscript-grid">
             {#if pageIsRendered(pageIndex)}
               {#each page.cells as cell, cellIndex (cell.index)}
@@ -581,11 +613,6 @@
     height: 100%;
     min-width: 0;
     overflow: hidden;
-    --cell-size: 32px;
-    --paper-width: 752px;
-    --paper-height: 464px;
-    --grid-width: 640px;
-    --grid-height: 320px;
     --grid-color: rgba(174, 79, 69, 0.48);
     --grid-strong: rgba(151, 61, 52, 0.7);
     --paper-ink: #342d29;
@@ -610,7 +637,7 @@
     background: transparent;
     pointer-events: none;
     font-family: var(--manuscript-font);
-    font-size: 21px;
+    font-size: var(--writing-font-size);
     line-height: var(--cell-size);
   }
 
@@ -645,7 +672,7 @@
     position: relative;
     width: var(--paper-width);
     height: var(--paper-height);
-    margin: 0 auto 36px;
+    margin: 0 auto var(--page-gap);
     border: 1px solid rgba(92, 70, 55, 0.18);
     border-radius: 2px;
     background:
@@ -667,7 +694,7 @@
   .page-number,
   .page-caption {
     position: absolute;
-    top: 31px;
+    top: calc(var(--grid-top) / 2);
     color: rgba(135, 64, 57, 0.72);
     font-family: var(--ui-font);
     font-size: 11px;
@@ -675,28 +702,23 @@
   }
 
   .page-number {
-    right: 56px;
+    right: var(--grid-left);
   }
 
   .page-caption {
-    left: 56px;
+    left: var(--grid-left);
   }
 
   .manuscript-grid {
     position: absolute;
-    top: 72px;
-    left: 56px;
+    top: var(--grid-top);
+    left: var(--grid-left);
     display: grid;
     grid-template-columns: repeat(20, var(--cell-size));
-    grid-template-rows: repeat(10, var(--cell-size));
+    grid-template-rows: repeat(20, var(--cell-size));
+    row-gap: var(--row-gap);
     width: var(--grid-width);
     height: var(--grid-height);
-    border: 1.5px solid var(--grid-strong);
-    background-image:
-      linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
-      linear-gradient(to bottom, var(--grid-color) 1px, transparent 1px);
-    background-size: var(--cell-size) var(--cell-size);
-    background-position: -0.5px -0.5px;
     user-select: none;
   }
 
@@ -705,11 +727,15 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    box-sizing: border-box;
     width: var(--cell-size);
     height: var(--cell-size);
+    border-top: 1px solid var(--grid-color);
+    border-bottom: 1px solid var(--grid-color);
+    border-left: 1px solid var(--grid-color);
     color: var(--paper-ink);
     font-family: var(--manuscript-font);
-    font-size: 21px;
+    font-size: var(--writing-font-size);
     font-weight: 400;
     line-height: 1;
     text-align: center;
@@ -717,6 +743,14 @@
     transition:
       opacity 150ms ease,
       background-color 80ms ease;
+  }
+
+  .manuscript-cell:nth-child(20n) {
+    border-right: 1px solid var(--grid-strong);
+  }
+
+  .manuscript-cell:nth-child(20n + 1) {
+    border-left-color: var(--grid-strong);
   }
 
   .cell-text,
@@ -783,7 +817,7 @@
 
   .tab-cell {
     color: rgba(150, 82, 72, 0.45);
-    font-size: 13px;
+    font-size: var(--tab-font-size);
   }
 
   .focus-dim {

@@ -85,10 +85,21 @@ pub fn save_document(request: &SaveDocumentRequest) -> Result<SaveDocumentResult
             .map_err(|error| format!("저장 폴더를 만들 수 없습니다: {error}"))?;
     }
 
+    let bytes = encode_document(&request.content, &request.line_ending, request.bom);
+    let requested_hash = hash_bytes(&bytes);
     if path.exists() {
         let disk_bytes =
             fs::read(&path).map_err(|error| format!("기존 문서를 확인할 수 없습니다: {error}"))?;
         let disk_hash = hash_bytes(&disk_bytes);
+        if disk_hash == requested_hash {
+            let saved = read_document(&path)?;
+            return Ok(SaveDocumentResult {
+                status: "saved".to_string(),
+                hash: saved.hash,
+                modified_at_ms: saved.modified_at_ms,
+                disk_document: None,
+            });
+        }
         let hash_matches = request
             .expected_hash
             .as_ref()
@@ -105,7 +116,6 @@ pub fn save_document(request: &SaveDocumentRequest) -> Result<SaveDocumentResult
         return Err("원본 파일이 사라졌습니다. 새 파일로 저장할지 확인해주세요.".to_string());
     }
 
-    let bytes = encode_document(&request.content, &request.line_ending, request.bom);
     let mut file = AtomicWriteFile::open(&path)
         .map_err(|error| format!("임시 저장 파일을 만들 수 없습니다: {error}"))?;
     file.write_all(&bytes)
@@ -342,6 +352,32 @@ mod tests {
         assert_eq!(result.status, "conflict");
         assert_eq!(result.disk_document.unwrap().content, "remote");
         assert_eq!(fs::read_to_string(path).unwrap(), "remote");
+    }
+
+    #[test]
+    fn treats_an_already_written_request_as_an_idempotent_save() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("draft.md");
+        fs::write(&path, "base").unwrap();
+        let opened = read_document(&path).unwrap();
+        fs::write(&path, "saved by the first request").unwrap();
+
+        let result = save_document(&SaveDocumentRequest {
+            path: opened.path,
+            content: "saved by the first request".to_string(),
+            expected_hash: Some(opened.hash),
+            line_ending: "LF".to_string(),
+            bom: false,
+            force: false,
+        })
+        .unwrap();
+
+        assert_eq!(result.status, "saved");
+        assert!(result.disk_document.is_none());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "saved by the first request"
+        );
     }
 
     #[test]

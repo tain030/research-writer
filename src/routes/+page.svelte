@@ -23,6 +23,7 @@
     parsePreferences,
     type Preferences,
   } from "$lib/preferences";
+  import { SingleFlight } from "$lib/single-flight";
   import { externalSyncProvider } from "$lib/storage";
   import type {
     AiAccountStatus,
@@ -65,6 +66,11 @@
     from: number;
     to: number;
     original: string;
+  }
+
+  interface ExitPrompt {
+    message: string;
+    conflict: boolean;
   }
 
   let desktop = $state(false);
@@ -114,6 +120,7 @@
   let aiInstructions = $state("");
   let contextMode = $state<ContextMode>("section");
   let suggestion = $state<Suggestion | null>(null);
+  let exitPrompt = $state<ExitPrompt | null>(null);
   let login = $state<AiLoginStart | null>(null);
   let styleReference = $state("");
   let styleReferenceName = $state("");
@@ -147,6 +154,8 @@
   let unlisteners: UnlistenFn[] = [];
   let lastSnapshotAt = 0;
   let closing = false;
+  const saveFlight = new SingleFlight<boolean>();
+  const exitFlight = new SingleFlight<void>();
 
   let outline = $derived(extractOutline(editorValue));
   let words = $derived(countWords(editorValue));
@@ -247,6 +256,14 @@
       JSON.stringify(preferences),
     );
     document.documentElement.dataset.theme = preferences.theme;
+  }
+
+  function setManuscriptZoom(value: number): void {
+    preferences.manuscriptZoom = Math.min(
+      140,
+      Math.max(80, Math.round(value / 10) * 10),
+    );
+    savePreferences();
   }
 
   async function loadRecents(): Promise<void> {
@@ -439,9 +456,8 @@
   }
 
   async function maybeSaveBeforeSwitch(): Promise<boolean> {
-    if (saveState !== "dirty" && saveState !== "error") return true;
-    await saveNow();
-    return documentIsSaved();
+    if (saveState === "saved" && !saveFlight.active) return true;
+    return saveNow();
   }
 
   async function openPath(path: string, line?: number): Promise<void> {
@@ -645,55 +661,101 @@
     saveTimer = setTimeout(() => void saveNow(), 300);
   }
 
-  async function saveNow(): Promise<void> {
-    if (!currentDocument || currentDocument.readOnly || !desktop) return;
-    if (saveState === "saved") return;
-    if (conflict) return;
+  async function saveUntilSettled(): Promise<boolean> {
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    saveState = "saving";
-    const contentAtStart = editorValue;
-    try {
-      const result = await invoke<SaveDocumentResult>("save_document", {
-        request: {
-          path: currentDocument.path,
-          content: contentAtStart,
-          expectedHash: currentDocument.hash,
-          lineEnding: currentDocument.lineEnding,
-          bom: currentDocument.bom,
-          force: false,
-        },
-      });
-      if (result.status === "conflict" && result.diskDocument) {
-        conflict = {
-          remote: result.diskDocument,
-          local: editorValue,
-          base: baseContent,
-        };
+
+    while (true) {
+      if (!currentDocument || currentDocument.readOnly || !desktop) return true;
+      if (conflict) return false;
+      if (saveState === "saved") return true;
+
+      const documentAtStart = currentDocument;
+      const contentAtStart = editorValue;
+      saveState = "saving";
+      try {
+        const result = await invoke<SaveDocumentResult>("save_document", {
+          request: {
+            path: documentAtStart.path,
+            content: contentAtStart,
+            expectedHash: documentAtStart.hash,
+            lineEnding: documentAtStart.lineEnding,
+            bom: documentAtStart.bom,
+            force: false,
+          },
+        });
+        if (currentDocument !== documentAtStart) {
+          return false;
+        }
+        if (result.status === "conflict" && result.diskDocument) {
+          conflict = {
+            remote: result.diskDocument,
+            local: editorValue,
+            base: baseContent,
+          };
+          saveState = "error";
+          saveError = "다른 장치에서 원고가 변경되었습니다.";
+          return false;
+        }
+        documentAtStart.hash = result.hash;
+        documentAtStart.modifiedAtMs = result.modifiedAtMs;
+        baseContent = contentAtStart;
+        saveError = "";
+        if (editorValue === contentAtStart) {
+          saveState = "saved";
+        } else {
+          saveState = "dirty";
+        }
+        if (Date.now() - lastSnapshotAt >= 5 * 60_000) {
+          lastSnapshotAt = Date.now();
+          try {
+            await createSnapshot("auto");
+          } catch (error) {
+            notify(`자동 버전을 남기지 못했습니다: ${errorMessage(error)}`, "error");
+          }
+        }
+      } catch (error) {
         saveState = "error";
-        saveError = "다른 장치에서 원고가 변경되었습니다.";
+        saveError = errorMessage(error);
+        notify(`저장하지 못했습니다: ${saveError}`, "error");
+        return false;
+      }
+    }
+  }
+
+  function saveNow(): Promise<boolean> {
+    return saveFlight.run(saveUntilSettled);
+  }
+
+  async function finishAppExit(): Promise<void> {
+    exitPrompt = null;
+    closing = true;
+    try {
+      await invoke("complete_app_exit");
+    } catch (error) {
+      closing = false;
+      notify(`앱을 끝내지 못했습니다: ${errorMessage(error)}`, "error");
+    }
+  }
+
+  function requestAppExit(): Promise<void> {
+    return exitFlight.run(async () => {
+      if (closing) return;
+      const saved = await saveNow();
+      if (saved && documentIsSaved() && !conflict) {
+        await finishAppExit();
         return;
       }
-      currentDocument.hash = result.hash;
-      currentDocument.modifiedAtMs = result.modifiedAtMs;
-      baseContent = contentAtStart;
-      if (editorValue === contentAtStart) {
-        saveState = "saved";
-      } else {
-        saveState = "dirty";
-        scheduleSave();
-      }
-      if (Date.now() - lastSnapshotAt >= 5 * 60_000) {
-        lastSnapshotAt = Date.now();
-        await createSnapshot("auto");
-      }
-    } catch (error) {
-      saveState = "error";
-      saveError = errorMessage(error);
-      notify(`저장하지 못했습니다: ${saveError}`, "error");
-    }
+      exitPrompt = {
+        conflict: conflict !== null,
+        message: conflict
+          ? "같은 원고의 외부 변경과 현재 편집이 겹쳤습니다. 충돌을 해결한 뒤 다시 끝내거나, 마지막 편집을 버리고 끝낼 수 있습니다."
+          : saveError ||
+            "마지막 편집을 저장하지 못했습니다. 다시 저장하거나 저장하지 않고 끝낼 수 있습니다.",
+      };
+    });
   }
 
   async function createSnapshot(
@@ -1298,7 +1360,7 @@
       "",
       "## 원고가 먼저다",
       "",
-      "화면 가운데에는 스무 칸 열 줄의 원고지가 놓인다. Markdown 기호까지 한 칸씩 자리를 잡고, 이백 자가 차면 다음 장으로 자연스럽게 넘어간다.",
+      "화면 가운데에는 스무 칸 스무 줄의 행간 원고지가 놓인다. Markdown 기호까지 한 칸씩 자리를 잡고, 사백 자가 차면 다음 장으로 자연스럽게 넘어간다.",
       "",
       "## 리서치는 글 옆에 머문다",
       "",
@@ -1349,6 +1411,10 @@
         return;
       }
       if (event.key === "Escape") {
+        if (exitPrompt) {
+          exitPrompt = null;
+          return;
+        }
         if (renamingPath) {
           renamingPath = "";
           return;
@@ -1364,6 +1430,9 @@
     if (event.key.toLowerCase() === "n") {
       event.preventDefault();
       void createDocument();
+    } else if (event.key.toLowerCase() === "q") {
+      event.preventDefault();
+      void requestAppExit();
     } else if (event.key.toLowerCase() === "o" && event.shiftKey) {
       event.preventDefault();
       void chooseRepository();
@@ -1385,6 +1454,15 @@
     } else if (event.key === "\\") {
       event.preventDefault();
       void toggleLeft("outline");
+    } else if (event.key === "0") {
+      event.preventDefault();
+      setManuscriptZoom(100);
+    } else if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      setManuscriptZoom(preferences.manuscriptZoom - 10);
+    } else if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      setManuscriptZoom(preferences.manuscriptZoom + 10);
     }
   }
 
@@ -1447,16 +1525,18 @@
       }),
     );
     unlisteners.push(
-      await getCurrentWindow().onCloseRequested(async (event) => {
-        if (closing || saveState === "saved") return;
-        event.preventDefault();
-        await saveNow();
-        if (documentIsSaved()) {
-          closing = true;
-          await getCurrentWindow().destroy();
-        }
+      await listen("app-exit-requested", () => {
+        void requestAppExit();
       }),
     );
+    unlisteners.push(
+      await getCurrentWindow().onCloseRequested((event) => {
+        if (closing) return;
+        event.preventDefault();
+        void requestAppExit();
+      }),
+    );
+    await invoke("register_exit_guard");
     syncTimer = setInterval(() => void refreshSync(), 30_000);
   });
 
@@ -1817,6 +1897,7 @@
         value={editorValue}
         readOnly={currentDocument.readOnly}
         fontFamily={preferences.fontFamily}
+        manuscriptZoom={preferences.manuscriptZoom}
         focusMode={preferences.focusMode}
         typewriterMode={preferences.typewriterMode}
         soundEnabled={preferences.soundEnabled}
@@ -1849,6 +1930,25 @@
           </span>
         </div>
         <div>
+          <span class="zoom-controls" aria-label="원고지 확대 및 축소">
+            <button
+              title="축소 (Ctrl+-)"
+              aria-label="원고지 축소"
+              disabled={preferences.manuscriptZoom <= 80}
+              onclick={() => setManuscriptZoom(preferences.manuscriptZoom - 10)}
+            >−</button>
+            <button
+              class="zoom-value"
+              title="100%로 초기화 (Ctrl+0)"
+              onclick={() => setManuscriptZoom(100)}
+            >{preferences.manuscriptZoom}%</button>
+            <button
+              title="확대 (Ctrl++)"
+              aria-label="원고지 확대"
+              disabled={preferences.manuscriptZoom >= 140}
+              onclick={() => setManuscriptZoom(preferences.manuscriptZoom + 10)}
+            >＋</button>
+          </span>
           {#if sync?.folderId}
             <span
               class:warning={sync.conflictFiles.length > 0}
@@ -1881,7 +1981,7 @@
     {:else if repository?.available && repository.path}
       <div class="repository-home">
         <div class="repository-home-paper" aria-hidden="true">
-          <span>20 × 10</span>
+          <span>20 × 20</span>
           <strong>NO. 1</strong>
         </div>
         <p class="welcome-kicker">OPEN REPOSITORY</p>
@@ -1945,7 +2045,7 @@
           </div>
         {/if}
         <p class="welcome-shortcuts">
-          Ctrl+Shift+O 저장소 · Ctrl+O 파일 · Ctrl+N 새 원고 · Ctrl+W 닫기
+          Ctrl+Shift+O 저장소 · Ctrl+N 새 원고 · Ctrl+W 닫기 · Ctrl+Q 끝내기
         </p>
       </div>
     {/if}
@@ -2244,9 +2344,20 @@
               </select>
             </label>
             <div class="settings-fact">
-              <strong>200자 원고지</strong>
-              <span>20칸 × 10줄 · 한 글자 한 칸</span>
+              <strong>400자 행간 원고지</strong>
+              <span>20칸 × 20줄 · 줄마다 교정용 행간</span>
             </div>
+            <label class="field">
+              <span>원고지 확대 {preferences.manuscriptZoom}%</span>
+              <input
+                type="range"
+                min="80"
+                max="140"
+                step="10"
+                bind:value={preferences.manuscriptZoom}
+                onchange={savePreferences}
+              />
+            </label>
             <label class="field">
               <span>집중 모드</span>
               <select bind:value={preferences.focusMode} onchange={savePreferences}>
@@ -2452,6 +2563,43 @@
         >
       </footer>
     </section>
+  </div>
+{/if}
+
+{#if exitPrompt}
+  <div class="modal-backdrop exit-backdrop" role="presentation">
+    <div
+      class="modal exit-modal"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="exit-dialog-title"
+    >
+      <p class="eyebrow">{exitPrompt.conflict ? "동기화 충돌" : "저장 실패"}</p>
+      <h2 id="exit-dialog-title">마지막 편집을 확인해주세요</h2>
+      <p>{exitPrompt.message}</p>
+      <footer>
+        <button class="secondary-button" onclick={() => (exitPrompt = null)}>
+          취소
+        </button>
+        {#if exitPrompt.conflict}
+          <button
+            class="primary-button"
+            onclick={() => (exitPrompt = null)}
+          >충돌 해결로 돌아가기</button>
+        {:else}
+          <button
+            class="primary-button"
+            onclick={() => {
+              exitPrompt = null;
+              void requestAppExit();
+            }}
+          >다시 저장</button>
+        {/if}
+        <button class="danger-button" onclick={() => void finishAppExit()}>
+          저장하지 않고 끝내기
+        </button>
+      </footer>
+    </div>
   </div>
 {/if}
 
@@ -3159,6 +3307,44 @@
     color: var(--danger);
   }
 
+  .zoom-controls {
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+    height: 22px;
+    border: 1px solid color-mix(in srgb, var(--rule) 78%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--paper-raised) 92%, transparent);
+    pointer-events: auto;
+  }
+
+  .zoom-controls button {
+    display: grid;
+    place-items: center;
+    min-width: 24px;
+    height: 20px;
+    border: 0;
+    background: transparent;
+    padding: 0 5px;
+    color: var(--ink-muted);
+    font-size: var(--type-micro);
+  }
+
+  .zoom-controls button:hover:not(:disabled) {
+    background: var(--paper-deep);
+    color: var(--ink-strong);
+  }
+
+  .zoom-controls button:disabled {
+    opacity: 0.35;
+  }
+
+  .zoom-controls .zoom-value {
+    min-width: 42px;
+    border-right: 1px solid var(--rule);
+    border-left: 1px solid var(--rule);
+  }
+
   .welcome,
   .repository-home {
     display: flex;
@@ -3778,7 +3964,8 @@
   }
 
   .rationale,
-  .conflict-modal > p {
+  .conflict-modal > p,
+  .exit-modal > p {
     color: var(--ink-muted);
     font-size: var(--type-body);
     line-height: 1.65;
@@ -3822,6 +4009,33 @@
 
   .conflict-modal footer .primary-button {
     background: var(--accent);
+  }
+
+  .exit-backdrop {
+    z-index: 120;
+  }
+
+  .exit-modal {
+    width: min(520px, 94vw);
+  }
+
+  .exit-modal footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .exit-modal .danger-button {
+    border: 1px solid color-mix(in srgb, var(--danger) 70%, var(--rule));
+    border-radius: 7px;
+    background: transparent;
+    padding: 8px 12px;
+    color: var(--danger);
+    font-size: var(--type-control);
+  }
+
+  .exit-modal .danger-button:hover {
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
 
   .toast {

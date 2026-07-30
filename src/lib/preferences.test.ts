@@ -4,6 +4,7 @@ import { defaultPreferences, parsePreferences } from "./preferences";
 describe("writing preferences", () => {
   it("uses Pretendard for a fresh profile", () => {
     expect(defaultPreferences.fontFamily).toBe("Pretendard");
+    expect(defaultPreferences.manuscriptZoom).toBe(100);
     expect(parsePreferences(null).fontFamily).toBe("Pretendard");
   });
 
@@ -15,6 +16,7 @@ describe("writing preferences", () => {
 
     expect(parsePreferences(stored)).toMatchObject({
       fontFamily: "MaruBuri",
+      manuscriptZoom: 100,
       typewriterMode: true,
     });
     expect("measure" in parsePreferences(stored)).toBe(false);
@@ -23,5 +25,11 @@ describe("writing preferences", () => {
   it("falls back safely when stored preferences are invalid", () => {
     expect(parsePreferences("{not-json")).toEqual(defaultPreferences);
     expect(parsePreferences("[]")).toEqual(defaultPreferences);
+  });
+
+  it("clamps and rounds the saved manuscript zoom", () => {
+    expect(parsePreferences('{"manuscriptZoom":126}').manuscriptZoom).toBe(130);
+    expect(parsePreferences('{"manuscriptZoom":20}').manuscriptZoom).toBe(80);
+    expect(parsePreferences('{"manuscriptZoom":200}').manuscriptZoom).toBe(140);
   });
 });

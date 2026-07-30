@@ -30,7 +30,9 @@ wget -O research-writer_amd64.deb \
 wget -O SHA256SUMS \
   https://github.com/tain030/research-writer/releases/latest/download/SHA256SUMS
 grep 'research-writer_amd64.deb$' SHA256SUMS | sha256sum -c -
-sudo apt install ./research-writer_amd64.deb
+install -m 0644 research-writer_amd64.deb /tmp/research-writer_amd64.deb
+sudo apt install /tmp/research-writer_amd64.deb
+rm /tmp/research-writer_amd64.deb
 ```
 
 설치 후 애플리케이션 메뉴에서 `Research Writer`를 선택하거나
@@ -51,10 +53,11 @@ chmod +x research-writer_amd64.AppImage
 ## 지금 들어 있는 기능
 
 - Pretendard를 원고 기본 글꼴로 제공, MaruBuri·NanumGothicCoding 및 설치된 시스템 글꼴 선택
-- Markdown 문자까지 한 칸씩 담는 20×10, 200자 원고지 편집 화면과 페이지 구분
+- Markdown 문자까지 한 칸씩 담는 20×20, 400자 행간 원고지와 80–140% 확대·축소
 - 어떤 폴더든 원고 저장소로 열고, 루트의 Markdown 원고를 생성·이름 변경·휴지통 삭제
 - 마지막 저장소와 마지막 원고 자동 복원, 저장소 밖 Markdown 파일의 독립 편집
-- 300ms 자동 저장, 원래 줄바꿈과 UTF-8 BOM 보존, 임시 파일·fsync·원자 교체
+- 직렬화된 300ms 자동 저장, 원래 줄바꿈과 UTF-8 BOM 보존, 임시 파일·fsync·원자 교체
+- 자동 저장과 종료가 겹쳐도 마지막 편집까지 저장한 뒤 끝내는 안전한 종료 절차
 - 외부 변경 감지, 해시 기반 낙관적 잠금, 3-way 병합과 충돌 양쪽 버전 보관
 - 문단·문장 집중 모드, 타자기 스크롤, 선택 가능한 절제된 타건음
 - 로컬 SQLite 압축 버전 기록, 이름 있는 버전, Markdown 폴더 전체 검색
@@ -104,11 +107,11 @@ sudo apt install \
 전체 CI, Linux x86_64 패키징, 체크섬 생성과 GitHub Release 공개를 수행합니다.
 
 ```bash
-pnpm release:version 0.1.5
+pnpm release:version 0.1.6
 git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "Release v0.1.5"
-git tag -a v0.1.5 -m "Research Writer v0.1.5"
-git push origin main v0.1.5
+git commit -m "Release v0.1.6"
+git tag -a v0.1.6 -m "Research Writer v0.1.6"
+git push origin main v0.1.6
 ```
 
 태그는 `v숫자.숫자.숫자` 형식이어야 하며 `main`에 포함된 커밋만 릴리스할 수

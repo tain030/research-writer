@@ -6,8 +6,8 @@ import {
   paginateManuscript,
 } from "./manuscript-layout";
 
-describe("200-character manuscript layout", () => {
-  it("creates a blank 20 by 10 first page", () => {
+describe("400-character manuscript layout", () => {
+  it("creates a blank 20 by 20 first page", () => {
     const pages = paginateManuscript("");
 
     expect(pages).toHaveLength(1);
@@ -20,14 +20,14 @@ describe("200-character manuscript layout", () => {
     });
   });
 
-  it("wraps after 20 cells and paginates after 200", () => {
-    const twoHundred = paginateManuscript("가".repeat(200));
-    const twoHundredOne = paginateManuscript("가".repeat(201));
+  it("wraps after 20 cells and paginates after 400", () => {
+    const fourHundred = paginateManuscript("가".repeat(400));
+    const fourHundredOne = paginateManuscript("가".repeat(401));
 
-    expect(twoHundred).toHaveLength(1);
-    expect(twoHundred[0].cells[199].text).toBe("가");
-    expect(twoHundredOne).toHaveLength(2);
-    expect(twoHundredOne[1].cells[0]).toMatchObject({
+    expect(fourHundred).toHaveLength(1);
+    expect(fourHundred[0].cells[399].text).toBe("가");
+    expect(fourHundredOne).toHaveLength(2);
+    expect(fourHundredOne[1].cells[0]).toMatchObject({
       text: "가",
       row: 0,
       column: 0,
@@ -35,11 +35,11 @@ describe("200-character manuscript layout", () => {
   });
 
   it("moves a trailing line break after the last row to a blank page", () => {
-    const pages = paginateManuscript(`${"가".repeat(200)}\n`);
+    const pages = paginateManuscript(`${"가".repeat(400)}\n`);
 
     expect(pages).toHaveLength(2);
     expect(pages[1].cells[0].filled).toBe(false);
-    expect(pages[1].cells[0].caretOffset).toBe(201);
+    expect(pages[1].cells[0].caretOffset).toBe(401);
   });
 
   it("moves a hard newline to the next manuscript row", () => {
@@ -73,9 +73,9 @@ describe("200-character manuscript layout", () => {
   });
 
   it("maps source offsets back to a page and cell", () => {
-    const pages = paginateManuscript(`${"가".repeat(200)}나`);
+    const pages = paginateManuscript(`${"가".repeat(400)}나`);
 
-    expect(pageIndexForOffset(pages, 200)).toBe(1);
-    expect(cellIndexForOffset(pages[1], 200)).toBe(0);
+    expect(pageIndexForOffset(pages, 400)).toBe(1);
+    expect(cellIndexForOffset(pages[1], 400)).toBe(0);
   });
 });

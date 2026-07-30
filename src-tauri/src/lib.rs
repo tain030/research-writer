@@ -17,12 +17,23 @@ use platform::{FontRecord, FontService, PlatformServices, SystemIntegration};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::{Manager, State};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager, State};
 
 struct AppState {
     database: MetadataDb,
     platform: PlatformServices,
     codex: Arc<CodexBridge>,
+}
+
+#[derive(Default)]
+struct ExitState {
+    guard_ready: AtomicBool,
+    allow_exit: AtomicBool,
+}
+
+fn should_guard_exit(guard_ready: bool, allow_exit: bool, has_main_window: bool) -> bool {
+    guard_ready && !allow_exit && has_main_window
 }
 
 #[tauri::command]
@@ -175,6 +186,17 @@ fn clear_repository_last_document(state: State<'_, AppState>) -> Result<(), Stri
 }
 
 #[tauri::command]
+fn register_exit_guard(state: State<'_, ExitState>) {
+    state.guard_ready.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn complete_app_exit(app: tauri::AppHandle, state: State<'_, ExitState>) {
+    state.allow_exit.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+#[tauri::command]
 fn index_workspace(root: String, state: State<'_, AppState>) -> Result<usize, String> {
     state.database.index_workspace(Path::new(&root))
 }
@@ -301,7 +323,7 @@ async fn start_research(topic: String, state: State<'_, AppState>) -> Result<Val
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -318,6 +340,7 @@ pub fn run() {
                 platform: PlatformServices::default(),
                 codex: Arc::new(CodexBridge::new(session_directory)),
             });
+            app.manage(ExitState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -343,6 +366,8 @@ pub fn run() {
             rename_repository_document,
             trash_repository_document,
             clear_repository_last_document,
+            register_exit_guard,
+            complete_app_exit,
             index_workspace,
             search_workspace,
             ai_account_status,
@@ -361,6 +386,34 @@ pub fn run() {
             research_sources,
             start_research
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            let exit_state = app_handle.state::<ExitState>();
+            let should_guard = should_guard_exit(
+                exit_state.guard_ready.load(Ordering::SeqCst),
+                exit_state.allow_exit.load(Ordering::SeqCst),
+                app_handle.get_webview_window("main").is_some(),
+            );
+            if should_guard {
+                api.prevent_exit();
+                let _ = app_handle.emit_to("main", "app-exit-requested", ());
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_guard_exit;
+
+    #[test]
+    fn guards_native_exit_only_while_the_frontend_can_finish_saving() {
+        assert!(should_guard_exit(true, false, true));
+        assert!(!should_guard_exit(false, false, true));
+        assert!(!should_guard_exit(true, true, true));
+        assert!(!should_guard_exit(true, false, false));
+    }
 }
