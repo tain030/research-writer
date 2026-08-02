@@ -1,6 +1,5 @@
 import {
   parseManuscript,
-  type DiagnosticSeverity,
   type ManuscriptBlock,
   type ManuscriptBlockKind,
   type ManuscriptInline,
@@ -27,8 +26,6 @@ export interface ManuscriptCell {
   compact?: boolean;
   style?: ManuscriptTextStyle;
   blockContinuation?: boolean;
-  diagnosticIds?: string[];
-  diagnosticSeverity?: DiagnosticSeverity;
 }
 
 export interface ManuscriptBlockPlacement {
@@ -46,6 +43,7 @@ export interface ManuscriptPage {
   number: number;
   cells: ManuscriptCell[];
   blocks: ManuscriptBlockPlacement[];
+  endOffset: number;
 }
 
 export interface ManuscriptLayout {
@@ -58,28 +56,31 @@ interface Grapheme {
   index: number;
 }
 
-function graphemes(value: string): Grapheme[] {
-  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
-    const segmenter = new Intl.Segmenter("ko", { granularity: "grapheme" });
-    return Array.from(segmenter.segment(value), (entry) => ({
-      segment: entry.segment,
-      index: entry.index,
-    }));
+const graphemeSegmenter =
+  typeof Intl !== "undefined" && "Segmenter" in Intl
+    ? new Intl.Segmenter("ko", { granularity: "grapheme" })
+    : null;
+
+function* graphemes(value: string): Iterable<Grapheme> {
+  if (graphemeSegmenter) {
+    for (const entry of graphemeSegmenter.segment(value)) {
+      yield { segment: entry.segment, index: entry.index };
+    }
+    return;
   }
 
-  const result: Grapheme[] = [];
   let index = 0;
   for (const segment of Array.from(value)) {
-    result.push({ segment, index });
+    yield { segment, index };
     index += segment.length;
   }
-  return result;
 }
 
 function blankPage(number: number): ManuscriptPage {
   return {
     number,
     blocks: [],
+    endOffset: 0,
     cells: Array.from(
       { length: MANUSCRIPT_CELLS_PER_PAGE },
       (_, index): ManuscriptCell => ({
@@ -124,7 +125,7 @@ export function layoutManuscript(
   value: string,
   fallbackTitle = "제목 없는 원고",
 ): ManuscriptLayout {
-  const document = parseManuscript(value, fallbackTitle);
+  const document = parseManuscript(value, fallbackTitle, { diagnostics: false });
   const pages = [blankPage(1)];
   let pageIndex = 0;
   let row = 0;
@@ -132,8 +133,9 @@ export function layoutManuscript(
   let lastOffset = document.bodyStart;
 
   const currentPage = () => pages[pageIndex];
-  const ensurePage = () => {
+  const ensurePage = (offset = lastOffset) => {
     while (row >= MANUSCRIPT_ROWS) {
+      finalizePage(currentPage(), offset);
       pages.push(blankPage(pages.length + 1));
       pageIndex += 1;
       row -= MANUSCRIPT_ROWS;
@@ -156,7 +158,6 @@ export function layoutManuscript(
     cell.compact = unit.compact;
     cell.style = unit.style;
     cell.tabContinuation = Boolean(unit.continuation);
-    attachDiagnostics(cell, document);
   };
   const fillRowRemainder = (offset: number) => {
     if (column >= MANUSCRIPT_COLUMNS) return;
@@ -173,7 +174,7 @@ export function layoutManuscript(
     if (column < MANUSCRIPT_COLUMNS) fillRowRemainder(offset);
     row += 1;
     column = 0;
-    ensurePage();
+    ensurePage(offset);
     for (let index = 0; index < indent; index += 1) {
       placeVirtual("", offset, "normal");
     }
@@ -213,7 +214,6 @@ export function layoutManuscript(
         previous.text += unit.text;
         previous.to = Math.max(previous.to, unit.to);
         previous.compact = true;
-        attachDiagnostics(previous, document);
         lastOffset = unit.to;
         return;
       }
@@ -245,7 +245,7 @@ export function layoutManuscript(
       startBlockRow(block.from);
       if (row > MANUSCRIPT_ROWS - 2) {
         row = MANUSCRIPT_ROWS;
-        ensurePage();
+        ensurePage(block.from);
       }
       const placement: ManuscriptBlockPlacement = {
         id: block.id,
@@ -265,12 +265,11 @@ export function layoutManuscript(
           cell.to = block.to;
           cell.caretOffset = block.from;
           cell.blockContinuation = true;
-          attachDiagnostics(cell, document);
         }
       }
       row += 2;
       column = 0;
-      ensurePage();
+      ensurePage(block.to);
       lastOffset = Math.max(lastOffset, block.to);
       continue;
     }
@@ -300,22 +299,30 @@ export function layoutManuscript(
     lastOffset = Math.max(lastOffset, block.to);
   }
 
-  for (const page of pages) {
-    for (const cell of page.cells) {
-      if (
-        !cell.filled &&
-        !cell.blockContinuation &&
-        cell.from === 0 &&
-        cell.to === 0
-      ) {
-        cell.from = lastOffset;
-        cell.to = lastOffset;
-        cell.caretOffset = lastOffset;
-      }
-    }
-  }
+  finalizePage(currentPage(), lastOffset);
 
   return { pages, document };
+}
+
+function finalizePage(page: ManuscriptPage, offset: number): void {
+  let endOffset = Math.max(
+    offset,
+    ...page.blocks.map((block) => block.to),
+  );
+  for (const cell of page.cells) {
+    if (
+      !cell.filled &&
+      !cell.blockContinuation &&
+      cell.from === 0 &&
+      cell.to === 0
+    ) {
+      cell.from = offset;
+      cell.to = offset;
+      cell.caretOffset = offset;
+    }
+    endOffset = Math.max(endOffset, cell.to, cell.caretOffset);
+  }
+  page.endOffset = endOffset;
 }
 
 function placeHeader(
@@ -396,10 +403,31 @@ function placeHeader(
 }
 
 function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
-  const raw: ProjectedUnit[] = [];
+  const grouped: ProjectedUnit[] = [];
+  const push = (unit: ProjectedUnit) => {
+    const previous = grouped.at(-1);
+    if (
+      previous &&
+      isHalfCellCharacter(previous.text) &&
+      isHalfCellCharacter(unit.text) &&
+      previous.style === unit.style &&
+      previous.to === unit.from
+    ) {
+      grouped[grouped.length - 1] = {
+        text: `${previous.text}${unit.text}`,
+        from: previous.from,
+        to: unit.to,
+        style: previous.style,
+        compact: true,
+      };
+      return;
+    }
+    grouped.push(unit);
+  };
+
   for (const inline of block.inlines) {
     if (inline.atomic) {
-      raw.push({
+      push({
         text: inline.text,
         from: inline.from,
         to: inline.to,
@@ -410,7 +438,7 @@ function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
     }
     let offset = inline.from;
     for (const segment of graphemes(inline.text)) {
-      raw.push({
+      push({
         text: segment.segment,
         from: offset,
         to: offset + segment.segment.length,
@@ -420,49 +448,7 @@ function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
       offset += segment.segment.length;
     }
   }
-
-  const grouped: ProjectedUnit[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    const current = raw[index];
-    const next = raw[index + 1];
-    if (
-      next &&
-      isHalfCellCharacter(current.text) &&
-      isHalfCellCharacter(next.text) &&
-      current.style === next.style &&
-      current.to === next.from
-    ) {
-      grouped.push({
-        text: `${current.text}${next.text}`,
-        from: current.from,
-        to: next.to,
-        style: current.style,
-        compact: true,
-      });
-      index += 1;
-    } else {
-      grouped.push(current);
-    }
-  }
   return grouped;
-}
-
-function attachDiagnostics(
-  cell: ManuscriptCell,
-  document: ParsedManuscript,
-): void {
-  const matches = document.diagnostics.filter((item) =>
-    item.from === item.to
-      ? cell.from <= item.from && cell.to >= item.to
-      : cell.from < item.to && cell.to > item.from,
-  );
-  if (!matches.length) return;
-  cell.diagnosticIds = matches.map((item) => item.id);
-  cell.diagnosticSeverity = matches.some((item) => item.severity === "error")
-    ? "error"
-    : matches.some((item) => item.severity === "warning")
-      ? "warning"
-      : "suggestion";
 }
 
 function previousFilledCell(
@@ -489,7 +475,7 @@ function isHalfCellCharacter(value: string): boolean {
 }
 
 function segmentText(value: string): string[] {
-  return graphemes(value).map((entry) => entry.segment);
+  return Array.from(graphemes(value), (entry) => entry.segment);
 }
 
 export function paginateManuscript(value: string): ManuscriptPage[] {
@@ -600,6 +586,13 @@ export function paginateManuscript(value: string): ManuscriptPage[] {
     }
   }
 
+  for (const page of pages) {
+    page.endOffset = page.cells.reduce(
+      (end, cell) => Math.max(end, cell.to, cell.caretOffset),
+      0,
+    );
+  }
+
   return pages;
 }
 
@@ -608,24 +601,14 @@ export function pageIndexForOffset(
   offset: number,
 ): number {
   const safeOffset = Math.max(0, offset);
-  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
-    const cells = pages[pageIndex].cells;
-    if (
-      pages[pageIndex].blocks.some(
-        (block) => safeOffset >= block.from && safeOffset <= block.to,
-      ) ||
-      cells.some(
-        (cell) =>
-          (cell.filled && safeOffset >= cell.from && safeOffset < cell.to) ||
-          (!cell.filled &&
-            !cell.virtual &&
-            cell.caretOffset === safeOffset),
-      )
-    ) {
-      return pageIndex;
-    }
+  let low = 0;
+  let high = pages.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (safeOffset < pages[middle].endOffset) high = middle;
+    else low = middle + 1;
   }
-  return Math.max(0, pages.length - 1);
+  return Math.max(0, low);
 }
 
 export function cellIndexForOffset(

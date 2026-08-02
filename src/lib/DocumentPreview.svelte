@@ -31,7 +31,9 @@
 
   let assetUrls = $state<Record<string, string>>({});
   let assetLoadId = 0;
-  let manuscript = $derived(parseManuscript(content, fallbackTitle));
+  let manuscript = $derived(
+    parseManuscript(content, fallbackTitle, { diagnostics: false }),
+  );
   let rendered = $derived(
     renderManuscriptHtml(manuscript.previewMarkdown, assetUrls),
   );

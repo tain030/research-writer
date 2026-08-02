@@ -50,6 +50,10 @@ export interface OutlineItem {
   offset: number;
 }
 
+export interface EditorChangeContext {
+  composing: boolean;
+}
+
 export interface FontRecord {
   family: string;
   monospaced: boolean;

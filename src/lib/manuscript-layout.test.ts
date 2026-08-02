@@ -171,4 +171,44 @@ describe("semantic Korean manuscript layout", () => {
     expect(pageIndex).toBe(0);
     expect(cellIndex).toBeGreaterThanOrEqual(5 * MANUSCRIPT_COLUMNS);
   });
+
+  it("places every newly typed trailing space in its own cell immediately", () => {
+    const source = "# 제목\n\n단어  ";
+    const { pages } = layoutManuscript(source);
+    const visible = pages[0].cells
+      .slice(5 * MANUSCRIPT_COLUMNS)
+      .filter((cell) => cell.filled && !cell.virtual);
+
+    expect(visible.map((cell) => cell.text)).toEqual(["단", "어", " ", " "]);
+    expect(visible.slice(-2)).toMatchObject([
+      { from: source.length - 2, to: source.length - 1 },
+      { from: source.length - 1, to: source.length },
+    ]);
+    expect(
+      cellIndexForOffset(pages[0], source.length),
+    ).toBeGreaterThan(5 * MANUSCRIPT_COLUMNS + 3);
+  });
+
+  it("keeps page offset boundaries monotonic when a card moves to a new page", () => {
+    const paragraphs = Array.from(
+      { length: 14 },
+      (_, index) => `문단 ${index + 1}`,
+    );
+    const source = [
+      "# 제목",
+      "",
+      ...paragraphs.flatMap((paragraph) => [paragraph, ""]),
+      "![그림](assets/a.png)",
+      "",
+      "카드 뒤 문장",
+    ].join("\n");
+    const { pages } = layoutManuscript(source);
+    const figureOffset = source.indexOf("![그림]");
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.map((page) => page.endOffset)).toEqual(
+      [...pages.map((page) => page.endOffset)].sort((left, right) => left - right),
+    );
+    expect(pageIndexForOffset(pages, figureOffset)).toBe(1);
+  });
 });

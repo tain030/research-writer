@@ -8,9 +8,14 @@
     type ManuscriptBlockPlacement,
     type ManuscriptCell,
   } from "./manuscript-layout";
-  import type { ParsedManuscript } from "./manuscript-document";
+  import {
+    createDiagnosticIndex,
+    diagnosticSeverityForRange,
+  } from "./diagnostic-index";
+  import type { WritingDiagnostic } from "./manuscript-document";
   import { sentenceRange } from "./markdown";
   import type {
+    EditorChangeContext,
     EditorSelection as SelectionInfo,
     FocusMode,
   } from "./types";
@@ -38,12 +43,12 @@
     typewriterMode?: boolean;
     soundEnabled?: boolean;
     showDiagnostics?: boolean;
+    diagnostics?: WritingDiagnostic[];
     onready?: (api: EditorApi | null) => void;
-    onchange?: (value: string) => void;
+    onchange?: (value: string, context: EditorChangeContext) => void;
     onselection?: (selection: SelectionInfo) => void;
     onactivity?: () => void;
     onghostaccept?: (text: string) => void;
-    ondocument?: (document: ParsedManuscript) => void;
     onblockactivate?: (block: ManuscriptBlockPlacement) => void;
   }
 
@@ -57,12 +62,12 @@
     typewriterMode = true,
     soundEnabled = false,
     showDiagnostics = true,
+    diagnostics = [],
     onready,
     onchange,
     onselection,
     onactivity,
     onghostaccept,
-    ondocument,
     onblockactivate,
   }: Props = $props();
 
@@ -82,12 +87,22 @@
   let inputTop = $state(0);
   let dragAnchor: number | null = null;
   let scrollFrame: number | null = null;
+  let caretFrame: number | null = null;
+  let caretScrollRequested = false;
+  let composing = false;
+  let contentRevision = 0;
+  let lastSelectionSignature = "";
+  let audioContext: AudioContext | null = null;
 
   let manuscriptScale = $derived(
     Math.min(140, Math.max(80, manuscriptZoom)) / 100,
   );
   let manuscript = $derived(layoutManuscript(internalValue, fallbackTitle));
   let pages = $derived(manuscript.pages);
+  let lineStarts = $derived(lineStartOffsets(internalValue));
+  let diagnosticIndex = $derived(
+    createDiagnosticIndex(showDiagnostics ? diagnostics : []),
+  );
   let activePageIndex = $derived(
     pageIndexForOffset(pages, selectionDirection === "backward" ? selectionFrom : selectionTo),
   );
@@ -107,8 +122,7 @@
     const to = Math.max(selectionFrom, selectionTo);
     const head =
       selectionDirection === "backward" ? selectionFrom : selectionTo;
-    const before = internalValue.slice(0, head);
-    const line = before.split("\n").length;
+    const line = lineNumberAtOffset(lineStarts, head);
     const page = activePageIndex + 1;
     const cell = pages[activePageIndex]?.cells[activeCellIndex];
     return {
@@ -128,18 +142,32 @@
     selectionTo = input.selectionEnd ?? selectionFrom;
     selectionDirection =
       (input.selectionDirection as "forward" | "backward" | "none") ?? "none";
-    if (notify) onselection?.(selectionInfo());
+    if (notify) {
+      const signature = `${selectionFrom}:${selectionTo}:${selectionDirection}:${contentRevision}`;
+      if (signature !== lastSelectionSignature) {
+        lastSelectionSignature = signature;
+        onselection?.(selectionInfo());
+      }
+    }
     scheduleCaretPosition();
   }
 
-  function commitInput(playSound = true): void {
+  function commitInput(
+    playSound = true,
+    context: EditorChangeContext = { composing: false },
+    forceNotify = false,
+  ): void {
     if (!input) return;
-    internalValue = input.value;
+    const changed = input.value !== internalValue;
+    if (changed) {
+      internalValue = input.value;
+      contentRevision += 1;
+    }
     ghostText = "";
     syncSelection();
-    onchange?.(internalValue);
-    onactivity?.();
-    if (playSound) playKeystroke();
+    if (changed || forceNotify) onchange?.(internalValue, context);
+    if (!context.composing && (changed || forceNotify)) onactivity?.();
+    if (playSound && changed && !context.composing) playKeystroke();
     scheduleCaretScroll();
   }
 
@@ -194,11 +222,23 @@
     };
   }
 
-  function handleInput(): void {
-    commitInput();
+  function handleInput(event: Event): void {
+    commitInput(true, {
+      composing: (event as InputEvent).isComposing || composing,
+    });
+  }
+
+  function handleCompositionStart(): void {
+    composing = true;
+  }
+
+  function handleCompositionEnd(): void {
+    composing = false;
+    commitInput(false, { composing: false }, true);
   }
 
   function handleKeydown(event: KeyboardEvent): void {
+    if (composing || event.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape" && ghostText) {
       event.preventDefault();
       clearGhostText();
@@ -409,23 +449,29 @@
   }
 
   function scheduleCaretScroll(): void {
-    requestAnimationFrame(async () => {
-      await tick();
-      const caret = host?.querySelector<HTMLElement>("[data-caret='true']");
-      caret?.scrollIntoView({
-        block: typewriterMode ? "center" : "nearest",
-        inline: "nearest",
-        behavior: "smooth",
-      });
-      scheduleCaretPosition();
-    });
+    caretScrollRequested = true;
+    scheduleCaretFrame();
   }
 
   function scheduleCaretPosition(): void {
-    requestAnimationFrame(async () => {
+    scheduleCaretFrame();
+  }
+
+  function scheduleCaretFrame(): void {
+    if (caretFrame !== null) return;
+    caretFrame = requestAnimationFrame(async () => {
+      caretFrame = null;
       await tick();
       const caret = host?.querySelector<HTMLElement>("[data-caret='true']");
       if (!caret || !host) return;
+      if (caretScrollRequested) {
+        caretScrollRequested = false;
+        caret.scrollIntoView({
+          block: typewriterMode ? "center" : "nearest",
+          inline: "nearest",
+          behavior: "auto",
+        });
+      }
       const caretRect = caret.getBoundingClientRect();
       const hostRect = host.getBoundingClientRect();
       inputLeft = caretRect.left - hostRect.left;
@@ -444,7 +490,9 @@
           }
         ).webkitAudioContext;
       if (!AudioContextClass) return;
-      const context = new AudioContextClass();
+      const context = audioContext ?? new AudioContextClass();
+      audioContext = context;
+      if (context.state === "suspended") void context.resume();
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.type = "triangle";
@@ -458,7 +506,6 @@
       gain.connect(context.destination);
       oscillator.start();
       oscillator.stop(context.currentTime + 0.029);
-      oscillator.addEventListener("ended", () => context.close());
     } catch {
       // Keystroke sound is optional and must never block writing.
     }
@@ -466,14 +513,39 @@
 
   function segmentGraphemes(text: string): string[] {
     if (!text) return [];
-    if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    if (graphemeSegmenter) {
       return Array.from(
-        new Intl.Segmenter("ko", { granularity: "grapheme" }).segment(text),
+        graphemeSegmenter.segment(text),
         (entry) => entry.segment,
       );
     }
     return Array.from(text);
   }
+
+  function lineStartOffsets(content: string): number[] {
+    const result = [0];
+    for (let index = 0; index < content.length; index += 1) {
+      if (content[index] === "\n") result.push(index + 1);
+    }
+    return result;
+  }
+
+  function lineNumberAtOffset(starts: number[], offset: number): number {
+    const safeOffset = Math.max(0, offset);
+    let low = 0;
+    let high = starts.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (starts[middle] <= safeOffset) low = middle + 1;
+      else high = middle;
+    }
+    return Math.max(1, low);
+  }
+
+  const graphemeSegmenter =
+    typeof Intl !== "undefined" && "Segmenter" in Intl
+      ? new Intl.Segmenter("ko", { granularity: "grapheme" })
+      : null;
 
   function focusRange(
     content: string,
@@ -497,6 +569,7 @@
   onMount(() => {
     mounted = true;
     internalValue = value;
+    contentRevision += 1;
     input.value = value;
     input.setSelectionRange(0, 0);
     syncSelection();
@@ -513,14 +586,11 @@
     if (!mounted || !input || value === internalValue) return;
     const head = Math.min(selectionTo, value.length);
     internalValue = value;
+    contentRevision += 1;
+    composing = false;
     input.value = value;
     input.setSelectionRange(head, head);
     syncSelection();
-  });
-
-  $effect(() => {
-    if (!mounted) return;
-    ondocument?.(manuscript.document);
   });
 
   $effect(() => {
@@ -535,6 +605,8 @@
   onDestroy(() => {
     mounted = false;
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
+    if (caretFrame !== null) cancelAnimationFrame(caretFrame);
+    if (audioContext) void audioContext.close();
     onready?.(null);
   });
 </script>
@@ -566,6 +638,8 @@
     spellcheck="false"
     aria-label="Markdown 원고 편집기"
     oninput={handleInput}
+    oncompositionstart={handleCompositionStart}
+    oncompositionend={handleCompositionEnd}
     onselect={() => syncSelection()}
     onkeyup={() => syncSelection()}
     onkeydown={handleKeydown}
@@ -594,6 +668,14 @@
             {#if pageIsRendered(pageIndex)}
               {#each page.cells as cell, cellIndex (cell.index)}
                 {@const ghost = ghostCharacter(pageIndex, cellIndex)}
+                {@const diagnosticSeverity =
+                  showDiagnostics && (cell.filled || cell.blockContinuation)
+                    ? diagnosticSeverityForRange(
+                        diagnosticIndex,
+                        cell.from,
+                        cell.to,
+                      )
+                    : undefined}
                 <span
                   class:active-cell={isActiveCell(pageIndex, cellIndex)}
                   class:caret-after={isActiveCell(pageIndex, cellIndex) && caretAfterCell(cell)}
@@ -611,9 +693,9 @@
                   class:compact-cell={cell.compact}
                   class:virtual-cell={cell.virtual}
                   class:block-reserved={cell.blockContinuation}
-                  class:diagnostic-error={showDiagnostics && cell.diagnosticSeverity === "error"}
-                  class:diagnostic-warning={showDiagnostics && cell.diagnosticSeverity === "warning"}
-                  class:diagnostic-suggestion={showDiagnostics && cell.diagnosticSeverity === "suggestion"}
+                  class:diagnostic-error={diagnosticSeverity === "error"}
+                  class:diagnostic-warning={diagnosticSeverity === "warning"}
+                  class:diagnostic-suggestion={diagnosticSeverity === "suggestion"}
                   class:focus-dim={cellIsDimmed(cell)}
                   class:tab-cell={cell.text === "⇥" || cell.tabContinuation}
                   class="manuscript-cell"

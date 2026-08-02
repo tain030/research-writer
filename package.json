@@ -1,6 +1,6 @@
 {
   "name": "research-writer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A quiet, local-first research writing editor.",
   "type": "module",
   "private": true,
@@ -11,6 +11,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test": "vitest run",
+    "benchmark:typing": "node scripts/benchmark-typing.mjs",
     "release:check": "node scripts/release-version.mjs check",
     "release:version": "node scripts/release-version.mjs set",
     "tauri": "tauri"

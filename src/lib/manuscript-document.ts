@@ -110,6 +110,10 @@ export interface ParsedManuscript {
   previewMarkdown: string;
 }
 
+export interface ParseManuscriptOptions {
+  diagnostics?: boolean;
+}
+
 interface Point {
   offset?: number;
 }
@@ -164,6 +168,7 @@ const blockKinds = new Set<ManuscriptBlockKind>([
 export function parseManuscript(
   content: string,
   fallbackTitle = "제목 없는 원고",
+  options: ParseManuscriptOptions = {},
 ): ParsedManuscript {
   const tree = parser.parse(content) as MdNode;
   const rootChildren = tree.children ?? [];
@@ -230,9 +235,15 @@ export function parseManuscript(
     });
   }
 
-  collectEmbeddedResources(tree, imagePaths, diagnostics);
-  analyzeBlocks(content, blocks, diagnostics);
-  analyzeMetadata(metadata, metadataSource, diagnostics);
+  collectEmbeddedResources(
+    tree,
+    imagePaths,
+    options.diagnostics === false ? undefined : diagnostics,
+  );
+  if (options.diagnostics !== false) {
+    analyzeBlocks(content, blocks, diagnostics);
+    analyzeMetadata(metadata, metadataSource, diagnostics);
+  }
   const firstBlock = blocks[0];
   const bodyStart =
     firstBlock?.from ??
@@ -251,7 +262,8 @@ export function parseManuscript(
     titleTextRange,
     bodyStart,
     blocks,
-    diagnostics: deduplicateDiagnostics(diagnostics),
+    diagnostics:
+      options.diagnostics === false ? [] : deduplicateDiagnostics(diagnostics),
     imagePaths: Array.from(new Set(imagePaths)),
     previewMarkdown: removeRanges(content, hiddenRanges),
   };
@@ -544,7 +556,38 @@ function inlineContent(
   for (const child of node.children ?? []) {
     appendInline(child, source, result, inheritedStyle);
   }
+  appendTrailingWhitespace(node, source, result, inheritedStyle);
   return result;
+}
+
+function appendTrailingWhitespace(
+  node: MdNode,
+  source: string,
+  result: ManuscriptInline[],
+  style: ManuscriptTextStyle,
+): void {
+  const range = nodeRange(node);
+  let trailingFrom = range.to;
+  while (
+    trailingFrom > range.from &&
+    /[ \t\u3000]/u.test(source[trailingFrom - 1] ?? "")
+  ) {
+    trailingFrom -= 1;
+  }
+  if (trailingFrom === range.to) return;
+  const coveredTo = result.reduce(
+    (latest, inline) => Math.max(latest, inline.to),
+    range.from,
+  );
+  const from = Math.max(trailingFrom, coveredTo);
+  if (from >= range.to) return;
+
+  result.push({
+    text: source.slice(from, range.to),
+    from,
+    to: range.to,
+    style,
+  });
 }
 
 function appendInline(
@@ -730,13 +773,13 @@ function analyzeBlocks(
 function collectEmbeddedResources(
   node: MdNode,
   imagePaths: string[],
-  diagnostics: WritingDiagnostic[],
+  diagnostics?: WritingDiagnostic[],
 ): void {
   if (node.type === "image") {
     const range = nodeRange(node);
     const path = node.url?.trim() ?? "";
     if (path && isRemotePath(path)) {
-      diagnostics.push(
+      diagnostics?.push(
         diagnostic(
           "remote-image",
           range.from,
@@ -754,7 +797,7 @@ function collectEmbeddedResources(
   }
   if (node.type === "html") {
     const range = nodeRange(node);
-    diagnostics.push(
+    diagnostics?.push(
       diagnostic(
         "raw-html",
         range.from,
@@ -1106,11 +1149,16 @@ function severityRank(value: DiagnosticSeverity): number {
 }
 
 function graphemes(value: string): string[] {
-  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+  if (graphemeSegmenter) {
     return Array.from(
-      new Intl.Segmenter("ko", { granularity: "grapheme" }).segment(value),
+      graphemeSegmenter.segment(value),
       (entry) => entry.segment,
     );
   }
   return Array.from(value);
 }
+
+const graphemeSegmenter =
+  typeof Intl !== "undefined" && "Segmenter" in Intl
+    ? new Intl.Segmenter("ko", { granularity: "grapheme" })
+    : null;

@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import type { EditorApi } from "./Editor.svelte";
-  import type { EditorSelection } from "./types";
+  import type { EditorChangeContext, EditorSelection } from "./types";
 
   interface Props {
     value: string;
     readOnly?: boolean;
     fontFamily?: string;
     onready?: (api: EditorApi | null) => void;
-    onchange?: (value: string) => void;
+    onchange?: (value: string, context: EditorChangeContext) => void;
     onselection?: (selection: EditorSelection) => void;
     onactivity?: () => void;
   }
@@ -26,6 +26,10 @@
   let input: HTMLTextAreaElement;
   let internalValue = $state("");
   let mounted = false;
+  let composing = false;
+  let contentRevision = 0;
+  let lastSelectionSignature = "";
+  let lineStarts = $derived(lineStartOffsets(internalValue));
 
   function selectionInfo(): EditorSelection {
     const from = input?.selectionStart ?? 0;
@@ -34,11 +38,14 @@
       from: Math.min(from, to),
       to: Math.max(from, to),
       text: internalValue.slice(Math.min(from, to), Math.max(from, to)),
-      line: internalValue.slice(0, to).split("\n").length,
+      line: lineNumberAtOffset(lineStarts, to),
     };
   }
 
   function notifySelection(): void {
+    const signature = `${input?.selectionStart ?? 0}:${input?.selectionEnd ?? 0}:${contentRevision}`;
+    if (signature === lastSelectionSignature) return;
+    lastSelectionSignature = signature;
     onselection?.(selectionInfo());
   }
 
@@ -46,7 +53,8 @@
     if (!input || readOnly) return;
     input.setRangeText(text, from, to, "end");
     internalValue = input.value;
-    onchange?.(internalValue);
+    contentRevision += 1;
+    onchange?.(internalValue, { composing: false });
     notifySelection();
     onactivity?.();
     input.focus();
@@ -85,14 +93,32 @@
     };
   }
 
-  function handleInput(): void {
+  function handleInput(event: Event): void {
+    const changed = input.value !== internalValue;
+    if (changed) {
+      internalValue = input.value;
+      contentRevision += 1;
+    }
+    const isComposing = (event as InputEvent).isComposing || composing;
+    if (changed) onchange?.(internalValue, { composing: isComposing });
+    notifySelection();
+    if (changed && !isComposing) onactivity?.();
+  }
+
+  function handleCompositionStart(): void {
+    composing = true;
+  }
+
+  function handleCompositionEnd(): void {
+    composing = false;
     internalValue = input.value;
-    onchange?.(internalValue);
+    onchange?.(internalValue, { composing: false });
     notifySelection();
     onactivity?.();
   }
 
   function handleKeydown(event: KeyboardEvent): void {
+    if (composing || event.isComposing || event.keyCode === 229) return;
     if (event.key !== "Tab" || readOnly) return;
     event.preventDefault();
     if (event.shiftKey) {
@@ -112,6 +138,7 @@
   onMount(() => {
     mounted = true;
     internalValue = value;
+    contentRevision += 1;
     input.value = value;
     onready?.(api());
     notifySelection();
@@ -121,6 +148,8 @@
     if (!mounted || value === internalValue) return;
     const offset = Math.min(input.selectionEnd, value.length);
     internalValue = value;
+    contentRevision += 1;
+    composing = false;
     input.value = value;
     input.setSelectionRange(offset, offset);
     notifySelection();
@@ -130,6 +159,25 @@
     mounted = false;
     onready?.(null);
   });
+
+  function lineStartOffsets(content: string): number[] {
+    const result = [0];
+    for (let index = 0; index < content.length; index += 1) {
+      if (content[index] === "\n") result.push(index + 1);
+    }
+    return result;
+  }
+
+  function lineNumberAtOffset(starts: number[], offset: number): number {
+    let low = 0;
+    let high = starts.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (starts[middle] <= offset) low = middle + 1;
+      else high = middle;
+    }
+    return Math.max(1, low);
+  }
 </script>
 
 <div class="source-shell">
@@ -145,6 +193,8 @@
       aria-label="Markdown 원문 편집기"
       style={`--source-font: "${fontFamily.replaceAll('"', '\\"')}", NanumGothicCoding, monospace`}
       oninput={handleInput}
+      oncompositionstart={handleCompositionStart}
+      oncompositionend={handleCompositionEnd}
       onselect={notifySelection}
       onkeyup={notifySelection}
       onkeydown={handleKeydown}

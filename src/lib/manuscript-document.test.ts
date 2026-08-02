@@ -159,4 +159,40 @@ describe("manuscript document model", () => {
     expect(fixed).toContain("\n같은 문단");
     expect(fixed).not.toContain("\n\n같은 문단");
   });
+
+  it("preserves trailing source spaces that Markdown omits from text nodes", () => {
+    const plain = parseManuscript("문장  ");
+    const styled = parseManuscript("**강조** ");
+
+    expect(plain.blocks[0].inlines.map((inline) => inline.text).join("")).toBe(
+      "문장  ",
+    );
+    expect(plain.blocks[0].inlines.at(-1)).toMatchObject({
+      text: "  ",
+      from: 2,
+      to: 4,
+    });
+    expect(plain.diagnostics.map((item) => item.ruleId)).toContain(
+      "repeated-space",
+    );
+    expect(styled.blocks[0].inlines.map((inline) => inline.text).join("")).toBe(
+      "강조 ",
+    );
+    expect(styled.blocks[0].inlines.at(-1)).toMatchObject({
+      text: " ",
+      from: 6,
+      to: 7,
+    });
+  });
+
+  it("can skip diagnostics without changing structure or embedded resources", () => {
+    const source = "문장  입니다 !다음 ![그림](assets/a.png)";
+    const full = parseManuscript(source);
+    const fast = parseManuscript(source, "제목", { diagnostics: false });
+
+    expect(full.diagnostics.length).toBeGreaterThan(0);
+    expect(fast.diagnostics).toEqual([]);
+    expect(fast.blocks).toEqual(full.blocks);
+    expect(fast.imagePaths).toEqual(full.imagePaths);
+  });
 });

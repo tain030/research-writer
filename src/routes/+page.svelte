@@ -27,7 +27,6 @@
     extractOutline,
     findFootnoteByIdentity,
     nextFootnoteId,
-    readingMinutes,
   } from "$lib/markdown";
   import {
     defaultPreferences,
@@ -35,6 +34,7 @@
     type Preferences,
   } from "$lib/preferences";
   import { SingleFlight } from "$lib/single-flight";
+  import { DeferredLatest } from "$lib/deferred-latest";
   import { externalSyncProvider } from "$lib/storage";
   import type {
     AiAccountStatus,
@@ -45,6 +45,7 @@
     AssistantPanel,
     DocumentPayload,
     DocumentViewMode,
+    EditorChangeContext,
     EditorSelection,
     FontRecord,
     ImportedAsset,
@@ -114,6 +115,8 @@
   let desktop = $state(false);
   let currentDocument = $state<DocumentPayload | null>(null);
   let editorValue = $state("");
+  let analyzedValue = $state("");
+  let analysisPending = $state(false);
   let baseContent = $state("");
   let editorApi = $state<EditorApi | null>(null);
   let Preview = $state<PreviewComponent | null>(null);
@@ -222,10 +225,11 @@
   let closing = false;
   const saveFlight = new SingleFlight<boolean>();
   const exitFlight = new SingleFlight<void>();
+  const documentAnalysis = new DeferredLatest();
 
-  let outline = $derived(extractOutline(editorValue));
-  let words = $derived(countWords(editorValue));
-  let minutes = $derived(readingMinutes(editorValue));
+  let outline = $derived(extractOutline(analyzedValue));
+  let words = $derived(countWords(analyzedValue));
+  let minutes = $derived(Math.max(1, Math.ceil(words / 350)));
   let documentTitle = $derived(
     currentDocument ? basename(currentDocument.path) : "Research Writer",
   );
@@ -238,7 +242,9 @@
     parseManuscript("", "제목 없는 원고"),
   );
   let diagnostics = $derived(
-    preferences.manuscriptGuidance ? parsedManuscript.diagnostics : [],
+    preferences.manuscriptGuidance && !analysisPending
+      ? parsedManuscript.diagnostics
+      : [],
   );
   let safeDiagnosticCount = $derived(
     diagnostics.filter((item) => item.fix?.safe).length,
@@ -354,8 +360,47 @@
     savePreferences();
   }
 
-  function receiveParsedManuscript(document: ParsedManuscript): void {
-    parsedManuscript = document;
+  function cancelDocumentAnalysis(): void {
+    documentAnalysis.cancel();
+  }
+
+  function analyzeDocumentNow(value = editorValue): ParsedManuscript {
+    cancelDocumentAnalysis();
+    const parsed = parseManuscript(value, manuscriptFallbackTitle);
+    if (value === editorValue) {
+      analyzedValue = value;
+      parsedManuscript = parsed;
+      analysisPending = false;
+    }
+    return parsed;
+  }
+
+  function scheduleDocumentAnalysis(value = editorValue): void {
+    cancelDocumentAnalysis();
+    if (value === analyzedValue) {
+      analysisPending = false;
+      return;
+    }
+    analysisPending = true;
+    documentAnalysis.schedule(
+      250,
+      () => parseManuscript(value, manuscriptFallbackTitle),
+      (parsed) => {
+        if (value !== editorValue) return;
+        analyzedValue = value;
+        parsedManuscript = parsed;
+        analysisPending = false;
+      },
+    );
+  }
+
+  function handleEditorSelection(value: EditorSelection): void {
+    selection = value;
+    editorApi?.clearGhostText();
+    if (completionTimer) {
+      clearTimeout(completionTimer);
+      completionTimer = null;
+    }
   }
 
   async function switchDocumentView(mode: DocumentViewMode): Promise<void> {
@@ -397,7 +442,7 @@
   }
 
   function openMetadataDialog(): void {
-    metadataDraft = { ...parsedManuscript.metadata };
+    metadataDraft = { ...analyzeDocumentNow().metadata };
     documentDialog = "metadata";
   }
 
@@ -802,7 +847,10 @@
       }).catch(() => undefined);
     }
     currentDocument = null;
+    cancelDocumentAnalysis();
     editorValue = "";
+    analyzedValue = "";
+    analysisPending = false;
     baseContent = "";
     parsedManuscript = parseManuscript("", "제목 없는 원고");
     saveState = "saved";
@@ -902,7 +950,10 @@
       }).catch(() => undefined);
     }
     currentDocument = document;
+    cancelDocumentAnalysis();
     editorValue = document.content;
+    analyzedValue = document.content;
+    analysisPending = false;
     baseContent = document.content;
     parsedManuscript = parseManuscript(
       document.content,
@@ -1130,14 +1181,17 @@
     }
   }
 
-  function onEditorChange(value: string): void {
+  function onEditorChange(
+    value: string,
+    context: EditorChangeContext = { composing: false },
+  ): void {
     editorValue = value;
-    if (viewMode === "source") {
-      parsedManuscript = parseManuscript(value, manuscriptFallbackTitle);
-    }
+    analysisPending = value !== analyzedValue;
     if (!currentDocument || currentDocument.readOnly) return;
     saveState = "dirty";
     saveError = "";
+    if (context.composing) return;
+    scheduleDocumentAnalysis(value);
     scheduleSave();
   }
 
@@ -1357,6 +1411,7 @@
           notify("겹치지 않는 변경 사항을 병합했습니다.", "success");
         }
       }
+      scheduleDocumentAnalysis(editorValue);
       saveState = "dirty";
       await saveNow();
     } catch (error) {
@@ -1426,6 +1481,7 @@
         id: version.id,
       });
       editorValue = stored.content;
+      scheduleDocumentAnalysis(editorValue);
       saveState = "dirty";
       scheduleSave();
       notify("선택한 버전을 편집 화면에 복원했습니다.", "success");
@@ -2048,6 +2104,7 @@
     if (toastTimer) clearTimeout(toastTimer);
     if (externalTimer) clearTimeout(externalTimer);
     if (repositoryTimer) clearTimeout(repositoryTimer);
+    documentAnalysis.cancel();
     if (syncTimer) clearInterval(syncTimer);
   });
 </script>
@@ -2447,15 +2504,12 @@
           typewriterMode={preferences.typewriterMode}
           soundEnabled={preferences.soundEnabled}
           showDiagnostics={preferences.manuscriptGuidance}
+          {diagnostics}
           onready={(api) => (editorApi = api)}
           onchange={onEditorChange}
-          onselection={(value) => {
-            selection = value;
-            scheduleCompletion();
-          }}
+          onselection={handleEditorSelection}
           onactivity={scheduleCompletion}
           onghostaccept={() => notify("자동 완성을 반영했습니다.", "success")}
-          ondocument={receiveParsedManuscript}
           onblockactivate={editDocumentBlock}
         />
       {:else if viewMode === "source"}
@@ -2464,10 +2518,7 @@
           readOnly={currentDocument.readOnly}
           onready={(api) => (editorApi = api)}
           onchange={onEditorChange}
-          onselection={(value) => {
-            selection = value;
-            scheduleCompletion();
-          }}
+          onselection={handleEditorSelection}
           onactivity={scheduleCompletion}
         />
       {:else}
@@ -2688,9 +2739,11 @@
               <div>
                 <p class="eyebrow">현재 원고</p>
                 <strong>
-                  {diagnostics.length
-                    ? `${diagnostics.length}개 확인 필요`
-                    : "원고지 규칙에 맞습니다"}
+                  {analysisPending
+                    ? "교정 갱신 중…"
+                    : diagnostics.length
+                      ? `${diagnostics.length}개 확인 필요`
+                      : "원고지 규칙에 맞습니다"}
                 </strong>
               </div>
               {#if safeDiagnosticCount}
@@ -2699,7 +2752,11 @@
                 </button>
               {/if}
             </div>
-            {#if diagnostics.length}
+            {#if analysisPending}
+              <div class="empty-state small proof-empty" aria-live="polite">
+                <p>입력을 마치면 잠시 후 교정 결과를 갱신합니다.</p>
+              </div>
+            {:else if diagnostics.length}
               <div class="diagnostic-list">
                 {#each diagnostics as item (item.id)}
                   <article class={`diagnostic-card ${item.severity}`}>
