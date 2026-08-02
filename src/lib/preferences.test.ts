@@ -4,7 +4,7 @@ import { defaultPreferences, parsePreferences } from "./preferences";
 describe("writing preferences", () => {
   it("uses Pretendard for a fresh profile", () => {
     expect(defaultPreferences.fontFamily).toBe("Pretendard");
-    expect(defaultPreferences.manuscriptZoom).toBe(100);
+    expect(defaultPreferences.manuscriptFitMode).toBe("page");
     expect(defaultPreferences.manuscriptGuidance).toBe(true);
     expect(parsePreferences(null).fontFamily).toBe("Pretendard");
   });
@@ -17,7 +17,7 @@ describe("writing preferences", () => {
 
     expect(parsePreferences(stored)).toMatchObject({
       fontFamily: "MaruBuri",
-      manuscriptZoom: 100,
+      manuscriptFitMode: "page",
       typewriterMode: true,
       manuscriptGuidance: true,
     });
@@ -29,10 +29,19 @@ describe("writing preferences", () => {
     expect(parsePreferences("[]")).toEqual(defaultPreferences);
   });
 
-  it("clamps and rounds the saved manuscript zoom", () => {
-    expect(parsePreferences('{"manuscriptZoom":126}').manuscriptZoom).toBe(130);
-    expect(parsePreferences('{"manuscriptZoom":20}').manuscriptZoom).toBe(80);
-    expect(parsePreferences('{"manuscriptZoom":200}').manuscriptZoom).toBe(140);
+  it("migrates manual zoom profiles to page fitting", () => {
+    const migrated = parsePreferences('{"manuscriptZoom":130}');
+    expect(migrated.manuscriptFitMode).toBe("page");
+    expect("manuscriptZoom" in migrated).toBe(false);
+  });
+
+  it("preserves a valid manuscript fitting mode", () => {
+    expect(
+      parsePreferences('{"manuscriptFitMode":"width"}').manuscriptFitMode,
+    ).toBe("width");
+    expect(
+      parsePreferences('{"manuscriptFitMode":"invalid"}').manuscriptFitMode,
+    ).toBe("page");
   });
 
   it("preserves an explicit writing-guidance preference", () => {

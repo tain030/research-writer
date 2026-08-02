@@ -130,21 +130,26 @@
   .preview-scroll {
     height: 100%;
     overflow: auto;
-    background: color-mix(in srgb, var(--paper-deep) 88%, #746b61);
+    background-color: var(--desk);
+    background-image:
+      var(--hanji-texture),
+      radial-gradient(circle at 50% 0, rgba(255, 255, 255, 0.16), transparent 48%);
+    background-blend-mode: soft-light, normal;
+    background-size: 320px 320px, auto;
     padding: 64px 42px 120px;
   }
 
   .preview-paper {
     box-sizing: border-box;
-    width: min(210mm, calc(100vw - 104px));
+    width: min(210mm, 100%);
     min-height: 297mm;
     margin: 0 auto;
-    border: 1px solid rgba(92, 70, 55, 0.16);
-    background: #fff;
+    border: 1px solid color-mix(in srgb, var(--sheet-edge) 70%, transparent);
+    background-color: var(--sheet);
+    background-image: var(--hanji-texture);
+    background-size: 320px 320px;
     padding: 25mm 23mm 27mm;
-    box-shadow:
-      0 2px 4px rgba(49, 39, 29, 0.08),
-      0 18px 50px rgba(49, 39, 29, 0.18);
+    box-shadow: var(--shadow-paper);
     color: #24201d;
     font-family: var(--preview-font);
     font-size: 11pt;
@@ -336,6 +341,7 @@
       border: 0;
       padding: 0;
       box-shadow: none;
+      background: #fff;
     }
   }
 </style>

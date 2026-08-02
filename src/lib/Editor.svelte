@@ -27,10 +27,20 @@
   } from "./diagnostic-index";
   import type { WritingDiagnostic } from "./manuscript-document";
   import { sentenceRange } from "./markdown";
+  import {
+    calculateManuscriptFitScale,
+    MANUSCRIPT_GUTTER_BOTTOM,
+    MANUSCRIPT_GUTTER_TOP,
+    MANUSCRIPT_GUTTER_X,
+    MANUSCRIPT_PAGE_BORDER,
+    MANUSCRIPT_PAPER_HEIGHT,
+    MANUSCRIPT_PAPER_WIDTH,
+  } from "./manuscript-fit";
   import type {
     EditorChangeContext,
     EditorSelection as SelectionInfo,
     FocusMode,
+    ManuscriptFitMode,
   } from "./types";
 
   export interface EditorApi {
@@ -51,7 +61,7 @@
     readOnly?: boolean;
     fallbackTitle?: string;
     fontFamily?: string;
-    manuscriptZoom?: number;
+    manuscriptFitMode?: ManuscriptFitMode;
     focusMode?: FocusMode;
     typewriterMode?: boolean;
     soundEnabled?: boolean;
@@ -72,7 +82,7 @@
     readOnly = false,
     fallbackTitle = "제목 없는 원고",
     fontFamily = "Pretendard",
-    manuscriptZoom = 100,
+    manuscriptFitMode = "page",
     focusMode = "off",
     typewriterMode = true,
     soundEnabled = false,
@@ -106,6 +116,8 @@
   let dragAnchor: number | null = null;
   let scrollFrame: number | null = null;
   let caretFrame: number | null = null;
+  let viewportFrame: number | null = null;
+  let viewportObserver: ResizeObserver | null = null;
   let caretScrollRequested = false;
   let composing = false;
   let contentRevision = 0;
@@ -126,9 +138,21 @@
   let optimisticProjection = $state<ManuscriptOptimisticProjection | null>(
     null,
   );
+  let viewportWidth = $state(
+    MANUSCRIPT_PAPER_WIDTH + MANUSCRIPT_GUTTER_X * 2 + MANUSCRIPT_PAGE_BORDER,
+  );
+  let viewportHeight = $state(
+    MANUSCRIPT_PAPER_HEIGHT +
+      MANUSCRIPT_GUTTER_TOP +
+      MANUSCRIPT_GUTTER_BOTTOM +
+      MANUSCRIPT_PAGE_BORDER,
+  );
 
   let manuscriptScale = $derived(
-    Math.min(140, Math.max(80, manuscriptZoom)) / 100,
+    calculateManuscriptFitScale(
+      { width: viewportWidth, height: viewportHeight },
+      manuscriptFitMode,
+    ),
   );
   let pages = $derived(manuscript.pages);
   let renderPages = $derived(projectedPagesForRender(pages, optimisticProjection));
@@ -718,7 +742,12 @@
         ? firstPage.offsetHeight +
           Number.parseFloat(getComputedStyle(firstPage).marginBottom)
         : 1_236 * manuscriptScale;
-      const first = Math.max(0, Math.floor((scroller.scrollTop - 56) / pageStride));
+      const first = Math.max(
+        0,
+        Math.floor(
+          (scroller.scrollTop - MANUSCRIPT_GUTTER_TOP) / pageStride,
+        ),
+      );
       const count = Math.max(1, Math.ceil(scroller.clientHeight / pageStride));
       visibleStart = Math.max(0, first - 2);
       visibleEnd = Math.min(pages.length - 1, first + count + 2);
@@ -985,6 +1014,20 @@
     return Math.max(1, low);
   }
 
+  function measureViewport(): void {
+    viewportFrame = null;
+    if (!scroller) return;
+    const width = scroller.clientWidth;
+    const height = scroller.clientHeight;
+    if (width > 0) viewportWidth = width;
+    if (height > 0) viewportHeight = height;
+  }
+
+  function scheduleViewportMeasurement(): void {
+    if (viewportFrame !== null) return;
+    viewportFrame = requestAnimationFrame(measureViewport);
+  }
+
   const graphemeSegmenter =
     typeof Intl !== "undefined" && "Segmenter" in Intl
       ? new Intl.Segmenter("ko", { granularity: "grapheme" })
@@ -1023,8 +1066,17 @@
       dragAnchor = null;
     };
     window.addEventListener("pointerup", endDrag);
+    window.addEventListener("resize", scheduleViewportMeasurement);
+    if (typeof ResizeObserver !== "undefined") {
+      viewportObserver = new ResizeObserver(scheduleViewportMeasurement);
+      viewportObserver.observe(scroller);
+    }
+    scheduleViewportMeasurement();
     scheduleCaretPosition();
-    return () => window.removeEventListener("pointerup", endDrag);
+    return () => {
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("resize", scheduleViewportMeasurement);
+    };
   });
 
   $effect(() => {
@@ -1061,6 +1113,9 @@
     mounted = false;
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     if (caretFrame !== null) cancelAnimationFrame(caretFrame);
+    if (viewportFrame !== null) cancelAnimationFrame(viewportFrame);
+    viewportObserver?.disconnect();
+    viewportObserver = null;
     if (audioContext) void audioContext.close();
     layoutWorker?.terminate();
     layoutWorker = null;
@@ -1075,6 +1130,9 @@
   bind:this={host}
   style={[
     `--manuscript-font: "${fontFamily.replaceAll('"', '\\"')}", Pretendard, sans-serif`,
+    `--page-gutter-x: ${MANUSCRIPT_GUTTER_X}px`,
+    `--page-gutter-top: ${MANUSCRIPT_GUTTER_TOP}px`,
+    `--page-gutter-bottom: ${MANUSCRIPT_GUTTER_BOTTOM}px`,
     `--cell-size: ${40 * manuscriptScale}px`,
     `--row-gap: ${12 * manuscriptScale}px`,
     `--paper-width: ${960 * manuscriptScale}px`,
@@ -1231,8 +1289,8 @@
     height: 100%;
     min-width: 0;
     overflow: hidden;
-    --grid-color: rgba(174, 79, 69, 0.48);
-    --grid-strong: rgba(151, 61, 52, 0.7);
+    --grid-color: rgba(157, 65, 56, 0.4);
+    --grid-strong: rgba(142, 54, 47, 0.65);
     --paper-ink: #342d29;
   }
 
@@ -1271,19 +1329,30 @@
     overflow: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
-    background:
+    background-color: var(--desk);
+    background-image:
+      var(--hanji-texture),
       radial-gradient(
         circle at 50% -10%,
-        color-mix(in srgb, var(--paper-raised) 76%, transparent),
+        color-mix(in srgb, white 22%, transparent),
         transparent 52%
       ),
-      color-mix(in srgb, var(--paper-deep) 84%, #746b61);
+      linear-gradient(
+        110deg,
+        color-mix(in srgb, var(--desk) 88%, #756d62),
+        var(--desk) 42%,
+        color-mix(in srgb, var(--desk) 92%, #b9b0a4)
+      );
+    background-blend-mode: soft-light, normal, normal;
+    background-size: 320px 320px, auto, auto;
   }
 
   .page-stack {
+    box-sizing: border-box;
     width: max-content;
     min-width: 100%;
-    padding: 56px 42px 120px;
+    padding: var(--page-gutter-top) var(--page-gutter-x)
+      var(--page-gutter-bottom);
   }
 
   .page-stack.single-sheet {
@@ -1292,7 +1361,6 @@
     justify-content: center;
     width: max-content;
     min-height: 100%;
-    padding: 32px;
   }
 
   .page-stack.single-sheet .manuscript-page {
@@ -1305,22 +1373,27 @@
     width: var(--paper-width);
     height: var(--paper-height);
     margin: 0 auto var(--page-gap);
-    border: 1px solid rgba(92, 70, 55, 0.18);
+    border: 1px solid color-mix(in srgb, var(--sheet-edge) 70%, transparent);
     border-radius: 2px;
-    background:
+    background-color: var(--sheet);
+    background-image:
+      var(--hanji-texture),
       radial-gradient(circle at var(--blot-1, 12% 18%), rgba(125, 101, 75, 0.025), transparent 28%),
       radial-gradient(circle at var(--blot-2, 78% 72%), rgba(125, 101, 75, 0.022), transparent 32%),
-      #fffdf7;
+      linear-gradient(105deg, rgba(118, 94, 70, 0.018), transparent 32%, rgba(255, 255, 255, 0.16));
+    background-blend-mode: multiply, normal, normal, normal;
+    background-size: 320px 320px, auto, auto, auto;
     box-shadow:
-      0 2px 4px rgba(49, 39, 29, 0.09),
-      0 18px 50px rgba(49, 39, 29, 0.17);
+      var(--shadow-paper),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.45);
     color: var(--paper-ink);
   }
 
   .manuscript-page.active-page {
     box-shadow:
-      0 2px 4px rgba(49, 39, 29, 0.1),
-      0 20px 55px rgba(49, 39, 29, 0.2);
+      0 1px 2px rgba(49, 39, 29, 0.15),
+      0 18px 42px rgba(49, 39, 29, 0.19),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.5);
   }
 
   .page-caption {

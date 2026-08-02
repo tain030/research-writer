@@ -40,83 +40,112 @@
 
 :root {
   font-family:
-    Inter, "Noto Sans KR", "NanumGothicCoding", system-ui, -apple-system,
-    sans-serif;
-  color: #302c28;
-  background: #eae5dc;
+    Pretendard, "Noto Sans KR", system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+  background: var(--desk);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --ui-font:
-    Inter, "Noto Sans KR", "NanumGothicCoding", system-ui, sans-serif;
-  --type-micro: 11px;
-  --type-caption: 12px;
+    Pretendard, "Noto Sans KR", system-ui, -apple-system, sans-serif;
+  --type-micro: 12px;
+  --type-caption: 13px;
   --type-control: 13px;
   --type-body: 14px;
   --type-reading: 16px;
   --type-dialog-title: 22px;
   --type-welcome-title: clamp(48px, 6vw, 68px);
-  --paper: #f7f2e8;
-  --paper-deep: #efe8dc;
-  --paper-raised: #fbf8f1;
-  --ink: #39342e;
-  --ink-strong: #211e1a;
-  --ink-muted: #786f65;
-  --ink-faint: #a49a8e;
-  --ink-ghost: #b7aea3;
-  --accent: #9f4f39;
-  --accent-soft: #ead7cd;
+  --desk: #d8d1c5;
+  --chrome: #f3eee5;
+  --panel: #e9e2d7;
+  --surface-raised: #faf6ee;
+  --sheet: #fffdf6;
+  --sheet-edge: #c9bdaf;
+  --paper: var(--chrome);
+  --paper-deep: var(--panel);
+  --paper-raised: var(--surface-raised);
+  --ink: #37312c;
+  --ink-strong: #231f1b;
+  --ink-muted: #625a52;
+  --ink-faint: #665f57;
+  --ink-ghost: #91877d;
+  --accent: #98483c;
+  --accent-soft: #ead4ca;
   --link: #3e6e70;
-  --rule: #d7cec0;
-  --rule-strong: #bfb3a3;
+  --rule: #cfc4b6;
+  --rule-strong: #b4a697;
   --selection: rgba(169, 106, 74, 0.18);
   --success: #4f7561;
-  --warning: #a06b2c;
+  --warning: #926020;
   --danger: #9b443d;
-  --shadow: 0 18px 55px rgba(48, 40, 31, 0.12);
+  --shadow-contact: 0 1px 2px rgba(46, 37, 29, 0.14);
+  --shadow-float: 0 12px 30px rgba(46, 37, 29, 0.15);
+  --shadow-paper:
+    0 1px 2px rgba(46, 37, 29, 0.13),
+    0 16px 38px rgba(46, 37, 29, 0.16);
+  --shadow: var(--shadow-float);
+  --hanji-texture: url("/textures/hanji-grain.svg");
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
-    --paper: #24211d;
-    --paper-deep: #1c1a17;
-    --paper-raised: #2c2823;
+    --desk: #171613;
+    --chrome: #24211d;
+    --panel: #1e1c19;
+    --surface-raised: #2d2924;
+    --paper: var(--chrome);
+    --paper-deep: var(--panel);
+    --paper-raised: var(--surface-raised);
     --ink: #ddd4c8;
     --ink-strong: #f3eadf;
-    --ink-muted: #a99e91;
-    --ink-faint: #756e65;
-    --ink-ghost: #665f57;
-    --accent: #d4866c;
+    --ink-muted: #b2a79a;
+    --ink-faint: #9b9389;
+    --ink-ghost: #746d65;
+    --accent: #cf8068;
     --accent-soft: #4c3128;
     --link: #83b3b1;
-    --rule: #453f38;
-    --rule-strong: #5e564d;
+    --rule: #48423b;
+    --rule-strong: #665d53;
     --selection: rgba(210, 134, 105, 0.2);
     --success: #84ad92;
     --warning: #d5a566;
     --danger: #dd8077;
-    --shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
+    --shadow-contact: 0 1px 2px rgba(0, 0, 0, 0.34);
+    --shadow-float: 0 14px 34px rgba(0, 0, 0, 0.34);
+    --shadow-paper:
+      0 1px 2px rgba(0, 0, 0, 0.34),
+      0 18px 44px rgba(0, 0, 0, 0.42);
+    --shadow: var(--shadow-float);
   }
 }
 
 :root[data-theme="dark"] {
-  --paper: #24211d;
-  --paper-deep: #1c1a17;
-  --paper-raised: #2c2823;
+  --desk: #171613;
+  --chrome: #24211d;
+  --panel: #1e1c19;
+  --surface-raised: #2d2924;
+  --paper: var(--chrome);
+  --paper-deep: var(--panel);
+  --paper-raised: var(--surface-raised);
   --ink: #ddd4c8;
   --ink-strong: #f3eadf;
-  --ink-muted: #a99e91;
-  --ink-faint: #756e65;
-  --ink-ghost: #665f57;
-  --accent: #d4866c;
+  --ink-muted: #b2a79a;
+  --ink-faint: #9b9389;
+  --ink-ghost: #746d65;
+  --accent: #cf8068;
   --accent-soft: #4c3128;
   --link: #83b3b1;
-  --rule: #453f38;
-  --rule-strong: #5e564d;
+  --rule: #48423b;
+  --rule-strong: #665d53;
   --selection: rgba(210, 134, 105, 0.2);
   --success: #84ad92;
   --warning: #d5a566;
   --danger: #dd8077;
-  --shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
+  --shadow-contact: 0 1px 2px rgba(0, 0, 0, 0.34);
+  --shadow-float: 0 14px 34px rgba(0, 0, 0, 0.34);
+  --shadow-paper:
+    0 1px 2px rgba(0, 0, 0, 0.34),
+    0 18px 44px rgba(0, 0, 0, 0.42);
+  --shadow: var(--shadow-float);
 }
 
 * {
@@ -143,6 +172,7 @@ textarea {
 body {
   font-size: var(--type-body);
   line-height: 1.5;
+  scrollbar-color: var(--rule-strong) transparent;
 }
 
 button,
@@ -179,6 +209,24 @@ textarea:focus {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 13%, transparent);
 }
 
+button:focus-visible,
+[href]:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 ::selection {
   background: var(--selection);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

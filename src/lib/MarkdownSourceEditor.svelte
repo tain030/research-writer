@@ -206,18 +206,25 @@
   .source-shell {
     height: 100%;
     overflow: auto;
-    background: color-mix(in srgb, var(--paper-deep) 88%, #746b61);
+    background-color: var(--desk);
+    background-image:
+      var(--hanji-texture),
+      radial-gradient(circle at 50% 0, rgba(255, 255, 255, 0.16), transparent 48%);
+    background-blend-mode: soft-light, normal;
+    background-size: 320px 320px, auto;
     padding: 64px 40px 110px;
   }
 
   .source-paper {
-    width: min(940px, calc(100vw - 96px));
+    width: min(940px, 100%);
     min-height: calc(100vh - 150px);
     margin: 0 auto;
-    border: 1px solid var(--rule);
+    border: 1px solid color-mix(in srgb, var(--sheet-edge) 72%, transparent);
     border-radius: 3px;
-    background: #fffdf7;
-    box-shadow: var(--shadow);
+    background-color: var(--sheet);
+    background-image: var(--hanji-texture);
+    background-size: 320px 320px;
+    box-shadow: var(--shadow-paper);
   }
 
   header {
@@ -281,6 +288,14 @@
     textarea {
       padding-right: 20px;
       padding-left: 20px;
+    }
+  }
+
+  @media print {
+    .source-shell,
+    .source-paper {
+      background: #fff;
+      box-shadow: none;
     }
   }
 </style>

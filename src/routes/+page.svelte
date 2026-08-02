@@ -146,8 +146,10 @@
   let lastLeftPanel = $state<Exclude<SidePanel, null>>("repository");
   let lastRightPanel = $state<Exclude<AssistantPanel, null>>("proofreading");
   let toolbarMenu = $state<ToolbarMenu>(null);
+  let toolbarMenuTrigger: HTMLButtonElement | null = null;
   let linkUrl = $state("https://");
   let linkInput = $state<HTMLInputElement>();
+  let linkMenuButton = $state<HTMLButtonElement>();
   let advancedSettingsOpen = $state(false);
   let chromeSuppressed = $state(false);
   let saveState = $state<SaveState>("saved");
@@ -394,11 +396,10 @@
     document.documentElement.dataset.theme = preferences.theme;
   }
 
-  function setManuscriptZoom(value: number): void {
-    preferences.manuscriptZoom = Math.min(
-      140,
-      Math.max(80, Math.round(value / 10) * 10),
-    );
+  function setManuscriptFitMode(
+    mode: Preferences["manuscriptFitMode"],
+  ): void {
+    preferences.manuscriptFitMode = mode;
     savePreferences();
   }
 
@@ -474,6 +475,7 @@
     api.replaceRange(edit.replaceFrom, edit.replaceTo, edit.replacement);
     api.setSelection(edit.from, edit.to);
     toolbarMenu = null;
+    toolbarMenuTrigger = null;
   }
 
   async function formatBlock(style: MarkdownBlockStyle): Promise<void> {
@@ -494,12 +496,120 @@
 
   async function openLinkMenu(): Promise<void> {
     if (formattingDisabled) return;
-    toolbarMenu = toolbarMenu === "link" ? null : "link";
-    if (toolbarMenu !== "link") return;
+    if (toolbarMenu === "link") {
+      closeToolbarMenu(false);
+      return;
+    }
+    toolbarMenuTrigger = linkMenuButton ?? null;
+    toolbarMenu = "link";
     linkUrl = "https://";
     await tick();
     linkInput?.focus();
     linkInput?.select();
+  }
+
+  const focusableSelector =
+    'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+  function focusableWithin(node: HTMLElement): HTMLElement[] {
+    return Array.from(node.querySelectorAll<HTMLElement>(focusableSelector));
+  }
+
+  async function toggleToolbarMenu(
+    menu: Exclude<ToolbarMenu, "link" | null>,
+    trigger: HTMLButtonElement,
+  ): Promise<void> {
+    if (toolbarMenu === menu) {
+      toolbarMenu = null;
+      toolbarMenuTrigger = null;
+      return;
+    }
+    toolbarMenuTrigger = trigger;
+    toolbarMenu = menu;
+    await tick();
+    document
+      .querySelector<HTMLElement>(`.toolbar-menu[data-menu="${menu}"]`)
+      ?.querySelector<HTMLElement>(focusableSelector)
+      ?.focus();
+  }
+
+  function closeToolbarMenu(restoreFocus: boolean): void {
+    const trigger = toolbarMenuTrigger;
+    toolbarMenu = null;
+    toolbarMenuTrigger = null;
+    if (restoreFocus && trigger?.isConnected) {
+      void tick().then(() => trigger.focus());
+    }
+  }
+
+  function handleToolbarMenuKeydown(event: KeyboardEvent): void {
+    const menu = event.currentTarget as HTMLElement;
+    const items = focusableWithin(menu);
+    if (!items.length) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeToolbarMenu(true);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = Math.max(0, items.indexOf(document.activeElement as HTMLElement));
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? items.length - 1
+          : event.key === "ArrowDown"
+            ? (current + 1) % items.length
+            : (current - 1 + items.length) % items.length;
+    items[next]?.focus();
+  }
+
+  function modalFocus(node: HTMLElement): { destroy: () => void } {
+    const activeElement =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const returnFocus = toolbarMenuTrigger?.isConnected
+      ? toolbarMenuTrigger
+      : activeElement;
+    toolbarMenuTrigger = null;
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const focusable = focusableWithin(node);
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    node.querySelectorAll<HTMLElement>(".close-button:not([aria-label])").forEach(
+      (button) => button.setAttribute("aria-label", "대화상자 닫기"),
+    );
+    node.addEventListener("keydown", trapFocus);
+    void tick().then(() => {
+      const preferred = node.querySelector<HTMLElement>(
+        `[autofocus], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), ${focusableSelector}`,
+      );
+      preferred?.focus();
+    });
+    return {
+      destroy: () => {
+        node.removeEventListener("keydown", trapFocus);
+        if (returnFocus?.isConnected) {
+          void tick().then(() => returnFocus.focus());
+        }
+      },
+    };
   }
 
   async function applyLink(): Promise<void> {
@@ -2256,7 +2366,7 @@
       }
       if (event.key === "Escape") {
         if (toolbarMenu) {
-          toolbarMenu = null;
+          closeToolbarMenu(true);
           return;
         }
         if (documentDialog) {
@@ -2334,15 +2444,6 @@
     } else if (event.key === "\\") {
       event.preventDefault();
       void toggleLeft("outline");
-    } else if (event.key === "0") {
-      event.preventDefault();
-      setManuscriptZoom(100);
-    } else if (event.key === "-" || event.key === "_") {
-      event.preventDefault();
-      setManuscriptZoom(preferences.manuscriptZoom - 10);
-    } else if (event.key === "+" || event.key === "=") {
-      event.preventDefault();
-      setManuscriptZoom(preferences.manuscriptZoom + 10);
     }
   }
 
@@ -2357,6 +2458,7 @@
         !event.target.closest(".toolbar-menu-host")
       ) {
         toolbarMenu = null;
+        toolbarMenuTrigger = null;
       }
     };
     window.addEventListener("pointerdown", toolbarClickAway);
@@ -2468,9 +2570,17 @@
     <button
       class:active={leftPanel !== null}
       class="panel-toggle"
-      title="원고 목록·개요·검색·버전"
+      title={leftPanel ? "원고 패널 닫기" : "원고 패널 열기"}
+      aria-label={leftPanel ? "원고 패널 닫기" : "원고 패널 열기"}
+      aria-expanded={leftPanel !== null}
+      aria-controls="left-panel"
       onclick={() => void togglePrimaryLeft()}
-    >원고</button>
+    >
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+        <path d="M9 4v16M6 8h.01M6 12h.01M6 16h.01"></path>
+      </svg>
+    </button>
 
     <div class="document-name" title={currentDocument?.path ?? ""}>
       <span>{documentTitle}</span>
@@ -2541,10 +2651,13 @@
       >가</button>
       <div class="toolbar-menu-host">
         <button
+          bind:this={linkMenuButton}
           class:active={toolbarMenu === "link"}
           class="format-button"
           title="링크 (Ctrl+K)"
           aria-label="링크"
+          aria-haspopup="dialog"
+          aria-expanded={toolbarMenu === "link"}
           disabled={formattingDisabled}
           onclick={() => void openLinkMenu()}
         >↗</button>
@@ -2572,16 +2685,24 @@
         <button
           class:active={toolbarMenu === "insert"}
           class="toolbar-text-button"
+          aria-haspopup="menu"
+          aria-expanded={toolbarMenu === "insert"}
           disabled={formattingDisabled}
-          onclick={() => (toolbarMenu = toolbarMenu === "insert" ? null : "insert")}
+          onclick={(event) => void toggleToolbarMenu("insert", event.currentTarget)}
         >삽입⌄</button>
         {#if toolbarMenu === "insert"}
-          <div class="toolbar-popover toolbar-menu" role="menu">
-            <button onclick={() => { toolbarMenu = null; openMetadataDialog(); }}>원고 정보</button>
-            <button onclick={() => { toolbarMenu = null; openFigureDialog(); }}>그림</button>
-            <button onclick={() => { toolbarMenu = null; openTableDialog(); }}>표</button>
-            <button onclick={() => { toolbarMenu = null; openMathDialog(); }}>수식</button>
-            <button onclick={() => { toolbarMenu = null; openFootnoteDialog(); }}>각주</button>
+          <div
+            class="toolbar-popover toolbar-menu"
+            role="menu"
+            tabindex="-1"
+            data-menu="insert"
+            onkeydown={handleToolbarMenuKeydown}
+          >
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openMetadataDialog(); }}>원고 정보</button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openFigureDialog(); }}>그림</button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openTableDialog(); }}>표</button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openMathDialog(); }}>수식</button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openFootnoteDialog(); }}>각주</button>
           </div>
         {/if}
       </div>
@@ -2589,20 +2710,45 @@
         <button
           class:active={toolbarMenu === "view"}
           class="toolbar-text-button"
+          aria-haspopup="menu"
+          aria-expanded={toolbarMenu === "view"}
           disabled={!currentDocument}
-          onclick={() => (toolbarMenu = toolbarMenu === "view" ? null : "view")}
+          onclick={(event) => void toggleToolbarMenu("view", event.currentTarget)}
         >보기⌄</button>
         {#if toolbarMenu === "view"}
-          <div class="toolbar-popover toolbar-menu view-menu" role="menu">
-            <button class:active={viewMode === "manuscript"} onclick={() => { toolbarMenu = null; void switchDocumentView("manuscript"); }}>원고지</button>
-            <button class:active={viewMode === "source"} onclick={() => { toolbarMenu = null; void switchDocumentView("source"); }}>Markdown 원문</button>
-            <button class:active={viewMode === "preview"} onclick={() => { toolbarMenu = null; void switchDocumentView("preview"); }}>완성본</button>
-            <button onclick={() => { toolbarMenu = null; printCompletedDocument(); }}>인쇄·PDF</button>
+          <div
+            class="toolbar-popover toolbar-menu view-menu"
+            role="menu"
+            tabindex="-1"
+            data-menu="view"
+            onkeydown={handleToolbarMenuKeydown}
+          >
+            <button class:active={viewMode === "manuscript"} role="menuitemradio" aria-checked={viewMode === "manuscript"} onclick={() => { closeToolbarMenu(false); void switchDocumentView("manuscript"); }}>원고지</button>
+            <button class:active={viewMode === "source"} role="menuitemradio" aria-checked={viewMode === "source"} onclick={() => { closeToolbarMenu(false); void switchDocumentView("source"); }}>Markdown 원문</button>
+            <button class:active={viewMode === "preview"} role="menuitemradio" aria-checked={viewMode === "preview"} onclick={() => { closeToolbarMenu(false); void switchDocumentView("preview"); }}>완성본</button>
+            <button role="menuitem" onclick={() => { closeToolbarMenu(false); printCompletedDocument(); }}>인쇄·PDF</button>
+            <span class="toolbar-menu-divider"></span>
+            <button
+              class:active={preferences.manuscriptFitMode === "page"}
+              role="menuitemradio"
+              aria-checked={preferences.manuscriptFitMode === "page"}
+              disabled={viewMode !== "manuscript"}
+              onclick={() => { closeToolbarMenu(false); setManuscriptFitMode("page"); }}
+            >페이지에 맞추기</button>
+            <button
+              class:active={preferences.manuscriptFitMode === "width"}
+              role="menuitemradio"
+              aria-checked={preferences.manuscriptFitMode === "width"}
+              disabled={viewMode !== "manuscript"}
+              onclick={() => { closeToolbarMenu(false); setManuscriptFitMode("width"); }}
+            >페이지 너비에 맞추기</button>
             <span class="toolbar-menu-divider"></span>
             <button
               class:active={preferences.focusSheetMode}
+              role="menuitemcheckbox"
+              aria-checked={preferences.focusSheetMode}
               disabled={viewMode !== "manuscript"}
-              onclick={() => { toolbarMenu = null; toggleSingleSheetMode(); }}
+              onclick={() => { closeToolbarMenu(false); toggleSingleSheetMode(); }}
             >한 장만 보기</button>
           </div>
         {/if}
@@ -2618,13 +2764,26 @@
     <button
       class:active={rightPanel !== null}
       class="panel-toggle tools-toggle"
-      title="교정·AI·출처·설정"
+      title={rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}
+      aria-label={`${rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}${diagnostics.length ? `, 규칙 문제 ${diagnostics.length}개` : ""}`}
+      aria-expanded={rightPanel !== null}
+      aria-controls="right-panel"
       onclick={() => void togglePrimaryRight()}
-    >도구{diagnostics.length ? ` ${diagnostics.length}` : ""}</button>
+    >
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+        <path d="M15 4v16M18 8h.01M18 12h.01M18 16h.01"></path>
+      </svg>
+      {#if diagnostics.length}
+        <span class="panel-count" aria-hidden="true">
+          {diagnostics.length > 99 ? "99+" : diagnostics.length}
+        </span>
+      {/if}
+    </button>
   </header>
 
   {#if leftPanel}
-    <aside class="panel left-panel">
+    <aside id="left-panel" class="panel left-panel">
       <div class="panel-heading">
         <div class="panel-tabs">
           <button
@@ -2644,7 +2803,10 @@
             onclick={() => void selectLeftPanel("versions")}>버전</button
           >
         </div>
-        <button class="close-button" onclick={() => (leftPanel = null)}
+        <button
+          class="close-button"
+          aria-label="원고 패널 닫기"
+          onclick={() => (leftPanel = null)}
           >×</button
         >
       </div>
@@ -2861,7 +3023,7 @@
           readOnly={currentDocument.readOnly}
           fallbackTitle={manuscriptFallbackTitle}
           fontFamily={preferences.fontFamily}
-          manuscriptZoom={preferences.manuscriptZoom}
+          manuscriptFitMode={preferences.manuscriptFitMode}
           focusMode={preferences.focusMode}
           typewriterMode={preferences.typewriterMode}
           soundEnabled={preferences.soundEnabled}
@@ -2929,27 +3091,6 @@
           {/if}
         </div>
         <div>
-          {#if viewMode === "manuscript"}
-            <span class="zoom-controls" aria-label="원고지 확대 및 축소">
-            <button
-              title="축소 (Ctrl+-)"
-              aria-label="원고지 축소"
-              disabled={preferences.manuscriptZoom <= 80}
-              onclick={() => setManuscriptZoom(preferences.manuscriptZoom - 10)}
-            >−</button>
-            <button
-              class="zoom-value"
-              title="100%로 초기화 (Ctrl+0)"
-              onclick={() => setManuscriptZoom(100)}
-            >{preferences.manuscriptZoom}%</button>
-            <button
-              title="확대 (Ctrl++)"
-              aria-label="원고지 확대"
-              disabled={preferences.manuscriptZoom >= 140}
-              onclick={() => setManuscriptZoom(preferences.manuscriptZoom + 10)}
-            >＋</button>
-            </span>
-          {/if}
           {#if sync?.folderId}
             <span
               class:warning={sync.conflictFiles.length > 0}
@@ -3009,6 +3150,9 @@
       </div>
     {:else}
       <div class="welcome">
+        <div class="welcome-seal" aria-hidden="true">
+          <span>원</span><span>고</span>
+        </div>
         <p class="welcome-kicker">LOCAL · MARKDOWN · MANUSCRIPT</p>
         <h1>원고지</h1>
         <p class="welcome-copy">
@@ -3053,7 +3197,7 @@
   </section>
 
   {#if rightPanel}
-    <aside class="panel right-panel">
+    <aside id="right-panel" class="panel right-panel">
       <div class="panel-heading">
         <div class="panel-tabs">
           <button
@@ -3073,7 +3217,10 @@
             onclick={() => void selectRightPanel("settings")}>설정</button
           >
         </div>
-        <button class="close-button" onclick={() => (rightPanel = null)}
+        <button
+          class="close-button"
+          aria-label="도구 패널 닫기"
+          onclick={() => (rightPanel = null)}
           >×</button
         >
       </div>
@@ -3551,14 +3698,20 @@
 {#if documentDialog}
   <div class="modal-backdrop" role="presentation">
     {#if documentDialog === "metadata"}
-      <form
+      <div
         class="modal document-element-modal"
+        role="dialog"
+        aria-modal="true"
         aria-label="원고 정보"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void saveMetadata();
-        }}
+        use:modalFocus
       >
+        <form
+          class="modal-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveMetadata();
+          }}
+        >
         <header>
           <div>
             <p class="eyebrow">첫 장 배치</p>
@@ -3602,16 +3755,23 @@
             >반영</button
           >
         </footer>
-      </form>
+        </form>
+      </div>
     {:else if documentDialog === "figure"}
-      <form
+      <div
         class="modal document-element-modal"
+        role="dialog"
+        aria-modal="true"
         aria-label="그림 삽입"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void insertFigure();
-        }}
+        use:modalFocus
       >
+        <form
+          class="modal-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void insertFigure();
+          }}
+        >
         <header>
           <div><p class="eyebrow">문서 요소</p><h2>그림 넣기</h2></div>
           <button type="button" class="close-button" onclick={() => (documentDialog = null)}
@@ -3640,16 +3800,23 @@
           >
           <button class="primary-button" disabled={!figureSourcePath}>그림 넣기</button>
         </footer>
-      </form>
+        </form>
+      </div>
     {:else if documentDialog === "table"}
-      <form
+      <div
         class="modal document-element-modal table-modal"
+        role="dialog"
+        aria-modal="true"
         aria-label="표 삽입"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void insertTable();
-        }}
+        use:modalFocus
       >
+        <form
+          class="modal-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void insertTable();
+          }}
+        >
         <header>
           <div><p class="eyebrow">문서 요소</p><h2>표 만들기</h2></div>
           <button type="button" class="close-button" onclick={() => (documentDialog = null)}
@@ -3693,16 +3860,23 @@
           >
           <button class="primary-button">표 넣기</button>
         </footer>
-      </form>
+        </form>
+      </div>
     {:else if documentDialog === "math"}
-      <form
+      <div
         class="modal document-element-modal"
+        role="dialog"
+        aria-modal="true"
         aria-label="수식 삽입"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void insertMath();
-        }}
+        use:modalFocus
       >
+        <form
+          class="modal-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void insertMath();
+          }}
+        >
         <header>
           <div><p class="eyebrow">KaTeX</p><h2>수식 넣기</h2></div>
           <button type="button" class="close-button" onclick={() => (documentDialog = null)}
@@ -3727,16 +3901,23 @@
           >
           <button class="primary-button" disabled={!mathValue.trim()}>수식 넣기</button>
         </footer>
-      </form>
+        </form>
+      </div>
     {:else if documentDialog === "footnote"}
-      <form
+      <div
         class="modal document-element-modal"
+        role="dialog"
+        aria-modal="true"
         aria-label="각주 삽입"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void insertFootnoteFromDialog();
-        }}
+        use:modalFocus
       >
+        <form
+          class="modal-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void insertFootnoteFromDialog();
+          }}
+        >
         <header>
           <div><p class="eyebrow">문서 요소</p><h2>각주 넣기</h2></div>
           <button type="button" class="close-button" onclick={() => (documentDialog = null)}
@@ -3761,16 +3942,23 @@
           >
           <button class="primary-button" disabled={!footnoteValue.trim()}>각주 넣기</button>
         </footer>
-      </form>
+        </form>
+      </div>
     {:else}
-      <form
+      <div
         class="modal document-element-modal"
+        role="dialog"
+        aria-modal="true"
         aria-label="문서 요소 편집"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void saveDocumentBlock();
-        }}
+        use:modalFocus
       >
+        <form
+          class="modal-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveDocumentBlock();
+          }}
+        >
         <header>
           <div>
             <p class="eyebrow">{activeBlock?.kind ?? "문서 요소"}</p>
@@ -3794,20 +3982,31 @@
           >
           <button class="primary-button">반영</button>
         </footer>
-      </form>
+        </form>
+      </div>
     {/if}
   </div>
 {/if}
 
 {#if grammarSuggestion}
   <div class="modal-backdrop" role="presentation">
-    <section class="modal grammar-modal" role="dialog" aria-modal="true">
+    <div
+      class="modal grammar-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="AI 문법 검사 결과"
+      use:modalFocus
+    >
       <header>
         <div>
           <p class="eyebrow">AI 문법 검사 · {grammarSuggestion.response.model}</p>
           <h2>원문은 아직 바뀌지 않았습니다</h2>
         </div>
-        <button class="close-button" onclick={() => (grammarSuggestion = null)}>×</button>
+        <button
+          class="close-button"
+          aria-label="문법 검사 결과 닫기"
+          onclick={() => (grammarSuggestion = null)}
+        >×</button>
       </header>
       <div class="diff-view">
         {#each diffWords(grammarSuggestion.original, grammarSuggestion.response.correctedText) as part}
@@ -3852,19 +4051,29 @@
           >모두 반영</button>
         {/if}
       </footer>
-    </section>
+    </div>
   </div>
 {/if}
 
 {#if suggestion}
   <div class="modal-backdrop" role="presentation">
-    <section class="modal suggestion-modal" role="dialog" aria-modal="true">
+    <div
+      class="modal suggestion-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="AI 작문 제안"
+      use:modalFocus
+    >
       <header>
         <div>
           <p class="eyebrow">AI 제안 · {suggestion.response.model}</p>
           <h2>원문은 그대로 두었습니다</h2>
         </div>
-        <button class="close-button" onclick={() => (suggestion = null)}>×</button>
+        <button
+          class="close-button"
+          aria-label="AI 제안 닫기"
+          onclick={() => (suggestion = null)}
+        >×</button>
       </header>
       <div class="diff-view">
         {#each diffWords(suggestion.original, suggestion.response.replacement) as part}
@@ -3889,7 +4098,7 @@
         >
         <button class="primary-button" onclick={applySuggestion}>반영</button>
       </footer>
-    </section>
+    </div>
   </div>
 {/if}
 
@@ -3964,7 +4173,13 @@
 
 {#if conflict}
   <div class="modal-backdrop" role="presentation">
-    <section class="modal conflict-modal" role="alertdialog" aria-modal="true">
+    <div
+      class="modal conflict-modal"
+      role="alertdialog"
+      aria-modal="true"
+      aria-label="동기화 충돌 해결"
+      use:modalFocus
+    >
       <p class="eyebrow">동기화 충돌</p>
       <h2>같은 원고가 다른 곳에서도 바뀌었습니다</h2>
       <p>
@@ -3984,7 +4199,7 @@
           >자동 병합</button
         >
       </footer>
-    </section>
+    </div>
   </div>
 {/if}
 
@@ -3995,6 +4210,7 @@
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="exit-dialog-title"
+      use:modalFocus
     >
       <p class="eyebrow">{exitPrompt.conflict ? "동기화 충돌" : "저장 실패"}</p>
       <h2 id="exit-dialog-title">마지막 편집을 확인해주세요</h2>
@@ -4040,7 +4256,7 @@
       0 minmax(0, 1fr) 0;
     width: 100vw;
     height: 100vh;
-    background: var(--paper);
+    background: var(--chrome);
     color: var(--ink);
     overflow: hidden;
     transition: grid-template-columns 180ms ease;
@@ -4068,9 +4284,13 @@
     min-width: 0;
     height: 46px;
     padding: 0 10px;
-    border-bottom: 1px solid color-mix(in srgb, var(--rule) 68%, transparent);
-    background: color-mix(in srgb, var(--paper) 93%, transparent);
-    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--rule);
+    background-color: color-mix(in srgb, var(--chrome) 96%, transparent);
+    background-image: var(--hanji-texture);
+    background-blend-mode: soft-light;
+    background-size: 320px 320px;
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.25);
+    backdrop-filter: blur(8px);
     transition: opacity 700ms ease;
   }
 
@@ -4098,25 +4318,68 @@
   .panel-toggle,
   .toolbar-text-button {
     height: 30px;
-    padding: 0 9px;
     border-radius: 7px;
     font-size: var(--type-control);
     font-weight: 680;
     white-space: nowrap;
   }
 
+  .toolbar-text-button {
+    padding: 0 9px;
+  }
+
   .panel-toggle:hover,
-  .panel-toggle.active,
   .format-button:hover:not(:disabled),
-  .format-button.active,
-  .toolbar-text-button:hover:not(:disabled),
-  .toolbar-text-button.active {
+  .toolbar-text-button:hover:not(:disabled) {
     color: var(--ink-strong);
-    background: var(--paper-deep);
+    background: color-mix(in srgb, var(--ink-strong) 6%, transparent);
+  }
+
+  .panel-toggle.active,
+  .format-button.active,
+  .toolbar-text-button.active {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    box-shadow: inset 0 -2px var(--accent);
+    color: var(--accent);
   }
 
   .panel-toggle {
-    min-width: 46px;
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+    padding: 0;
+  }
+
+  .panel-toggle svg {
+    display: block;
+    width: 19px;
+    height: 19px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.7;
+  }
+
+  .panel-count {
+    position: absolute;
+    top: -3px;
+    right: -5px;
+    display: grid;
+    place-items: center;
+    min-width: 16px;
+    height: 16px;
+    border: 2px solid var(--paper);
+    border-radius: 8px;
+    background: var(--warning);
+    padding: 0 3px;
+    color: white;
+    font-size: 9px;
+    font-weight: 750;
+    line-height: 1;
   }
 
   .tools-toggle {
@@ -4218,7 +4481,7 @@
   .toolbar-select select:hover:not(:disabled),
   .toolbar-select select:focus {
     outline: 0;
-    background: var(--paper-deep);
+    background: color-mix(in srgb, var(--ink-strong) 6%, transparent);
     color: var(--ink-strong);
   }
 
@@ -4261,10 +4524,13 @@
     min-width: 150px;
     transform: translateX(-50%);
     border: 1px solid var(--rule);
-    border-radius: 9px;
-    background: var(--paper-raised);
+    border-radius: 8px;
+    background-color: var(--surface-raised);
+    background-image: var(--hanji-texture);
+    background-blend-mode: soft-light;
+    background-size: 320px 320px;
     padding: 6px;
-    box-shadow: 0 12px 34px color-mix(in srgb, var(--ink-strong) 18%, transparent);
+    box-shadow: var(--shadow-float);
   }
 
   .toolbar-menu {
@@ -4285,8 +4551,8 @@
 
   .toolbar-menu button:hover,
   .toolbar-menu button.active {
-    background: var(--paper-deep);
-    color: var(--ink-strong);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--accent);
   }
 
   .toolbar-menu-divider {
@@ -4340,13 +4606,21 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background:
+    background-color: var(--desk);
+    background-image:
+      var(--hanji-texture),
       radial-gradient(
         ellipse at 50% 8%,
-        color-mix(in srgb, white 20%, transparent),
+        color-mix(in srgb, white 18%, transparent),
         transparent 54%
       ),
-      var(--paper);
+      linear-gradient(
+        115deg,
+        color-mix(in srgb, var(--desk) 90%, #756d62),
+        var(--desk)
+      );
+    background-blend-mode: soft-light, normal, normal;
+    background-size: 320px 320px, auto, auto;
   }
 
   .panel {
@@ -4354,7 +4628,10 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background: var(--paper-deep);
+    background-color: var(--panel);
+    background-image: var(--hanji-texture);
+    background-blend-mode: soft-light;
+    background-size: 320px 320px;
   }
 
   .left-panel {
@@ -4374,6 +4651,8 @@
     height: 48px;
     padding: 0 10px 0 14px;
     border-bottom: 1px solid var(--rule);
+    background: color-mix(in srgb, var(--chrome) 45%, transparent);
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.13);
   }
 
   .panel-tabs {
@@ -4382,8 +4661,9 @@
   }
 
   .panel-tabs button {
+    position: relative;
     border: 0;
-    border-radius: 6px;
+    border-radius: 4px;
     background: transparent;
     padding: 7px 9px;
     color: var(--ink-muted);
@@ -4391,9 +4671,9 @@
   }
 
   .panel-tabs button.active {
-    background: var(--paper-raised);
-    color: var(--ink-strong);
-    box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 8%, transparent);
+    background: transparent;
+    box-shadow: inset 0 -2px var(--accent);
+    color: var(--accent);
   }
 
   .close-button {
@@ -4507,17 +4787,17 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    min-height: 42px;
+    min-height: 46px;
     border-radius: 6px;
   }
 
   .repository-row:hover,
   .repository-row.current {
-    background: var(--paper);
+    background: color-mix(in srgb, var(--surface-raised) 70%, transparent);
   }
 
   .repository-row.current {
-    box-shadow: inset 2px 0 var(--accent);
+    box-shadow: inset 3px 0 var(--accent);
   }
 
   .repository-document {
@@ -4774,8 +5054,8 @@
 
   .eyebrow {
     margin: 0 0 12px;
-    color: var(--ink-faint);
-    font-size: var(--type-caption);
+    color: var(--ink-muted);
+    font-size: var(--type-micro);
     font-weight: 760;
     letter-spacing: 0.11em;
     text-transform: uppercase;
@@ -5048,8 +5328,9 @@
     justify-content: space-between;
     height: 28px;
     padding: 0 14px;
-    background: linear-gradient(transparent, var(--paper));
-    color: var(--ink-faint);
+    border-top: 1px solid color-mix(in srgb, var(--rule) 72%, transparent);
+    background: color-mix(in srgb, var(--chrome) 94%, transparent);
+    color: var(--ink-muted);
     font-size: var(--type-micro);
     pointer-events: none;
   }
@@ -5077,44 +5358,6 @@
     color: var(--accent);
   }
 
-  .zoom-controls {
-    display: inline-flex;
-    align-items: center;
-    overflow: hidden;
-    height: 22px;
-    border: 1px solid color-mix(in srgb, var(--rule) 78%, transparent);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--paper-raised) 92%, transparent);
-    pointer-events: auto;
-  }
-
-  .zoom-controls button {
-    display: grid;
-    place-items: center;
-    min-width: 24px;
-    height: 20px;
-    border: 0;
-    background: transparent;
-    padding: 0 5px;
-    color: var(--ink-muted);
-    font-size: var(--type-micro);
-  }
-
-  .zoom-controls button:hover:not(:disabled) {
-    background: var(--paper-deep);
-    color: var(--ink-strong);
-  }
-
-  .zoom-controls button:disabled {
-    opacity: 0.35;
-  }
-
-  .zoom-controls .zoom-value {
-    min-width: 42px;
-    border-right: 1px solid var(--rule);
-    border-left: 1px solid var(--rule);
-  }
-
   .welcome,
   .repository-home {
     display: flex;
@@ -5125,6 +5368,37 @@
     height: 100%;
     padding: 40px;
     text-align: center;
+  }
+
+  .welcome > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .welcome-seal {
+    display: grid;
+    grid-template-rows: 1fr 1fr;
+    place-items: center;
+    width: 38px;
+    height: 52px;
+    margin-bottom: 18px;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 82%, transparent);
+    border-radius: 2px;
+    background-color: var(--sheet);
+    background-image: var(--hanji-texture);
+    background-size: 160px 160px;
+    box-shadow: var(--shadow-contact);
+    color: var(--accent);
+    font-family: MaruBuri, Georgia, serif;
+    font-size: 13px;
+    line-height: 1;
+    transform: rotate(-1deg);
+  }
+
+  .welcome-seal span + span {
+    width: 70%;
+    border-top: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    padding-top: 4px;
   }
 
   .repository-home {
@@ -5155,13 +5429,14 @@
     height: 142px;
     margin-bottom: 23px;
     border: 1px solid rgba(151, 61, 52, 0.52);
-    background-color: #fffdf7;
+    background-color: var(--sheet);
     background-image:
+      var(--hanji-texture),
       linear-gradient(to right, rgba(174, 79, 69, 0.34) 1px, transparent 1px),
       linear-gradient(to bottom, rgba(174, 79, 69, 0.34) 1px, transparent 1px);
-    background-position: 15px 43px;
-    background-size: 10px 10px;
-    box-shadow: 0 14px 34px rgba(49, 39, 29, 0.15);
+    background-position: 0 0, 15px 43px, 15px 43px;
+    background-size: 160px 160px, 10px 10px, 10px 10px;
+    box-shadow: var(--shadow-paper);
     color: rgba(135, 64, 57, 0.7);
   }
 
@@ -5229,7 +5504,7 @@
   .primary-button,
   .secondary-button {
     min-width: 104px;
-    border-radius: 7px;
+    border-radius: 6px;
     padding: 9px 17px;
     font-size: var(--type-control);
   }
@@ -5238,6 +5513,12 @@
     border: 1px solid var(--accent);
     background: var(--accent);
     color: #fff9f3;
+  }
+
+  .primary-button:hover:not(:disabled),
+  .wide-button.accent:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 88%, var(--ink-strong));
+    box-shadow: var(--shadow-contact);
   }
 
   .secondary-button {
@@ -5332,7 +5613,7 @@
   .panel-section {
     padding: 2px 0 20px;
     margin-bottom: 20px;
-    border-bottom: 1px solid var(--rule);
+    border-bottom: 1px solid color-mix(in srgb, var(--rule) 74%, transparent);
   }
 
   .panel-section:last-child {
@@ -5433,9 +5714,9 @@
   }
 
   .segmented button.active {
-    background: var(--paper-raised);
-    color: var(--ink-strong);
-    box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 8%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised));
+    box-shadow: inset 0 -2px var(--accent);
+    color: var(--accent);
   }
 
   .context-chips {
@@ -5467,14 +5748,14 @@
     align-items: flex-start;
     border: 1px solid var(--rule);
     border-radius: 7px;
-    background: var(--paper-raised);
+    background: color-mix(in srgb, var(--surface-raised) 42%, transparent);
     padding: 9px;
     text-align: left;
   }
 
   .action-grid button:hover:not(:disabled) {
-    border-color: var(--rule-strong);
-    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent) 42%, var(--rule));
+    background: color-mix(in srgb, var(--surface-raised) 78%, transparent);
   }
 
   .action-grid strong {
@@ -5535,9 +5816,31 @@
   }
 
   .switch-row input {
-    width: 30px;
-    height: 16px;
-    accent-color: var(--accent);
+    flex: 0 0 auto;
+    width: 36px;
+    height: 20px;
+    appearance: none;
+    border: 0;
+    border-radius: 10px;
+    background:
+      radial-gradient(
+        circle at 9px 50%,
+        var(--surface-raised) 0 6px,
+        transparent 6.5px
+      ),
+      var(--rule-strong);
+    padding: 0;
+    transition: background-color 140ms ease;
+  }
+
+  .switch-row input:checked {
+    background:
+      radial-gradient(
+        circle at calc(100% - 9px) 50%,
+        #fffaf3 0 6px,
+        transparent 6.5px
+      ),
+      var(--accent);
   }
 
   .source-search {
@@ -5706,8 +6009,8 @@
     display: grid;
     place-items: center;
     padding: 24px;
-    background: color-mix(in srgb, var(--ink-strong) 32%, transparent);
-    backdrop-filter: blur(4px);
+    background: color-mix(in srgb, var(--ink-strong) 38%, transparent);
+    backdrop-filter: blur(5px);
   }
 
   .modal {
@@ -5715,13 +6018,21 @@
     max-height: 88vh;
     overflow: auto;
     border: 1px solid var(--rule);
-    border-radius: 13px;
-    background: var(--paper-raised);
+    border-radius: 9px;
+    background-color: var(--surface-raised);
+    background-image: var(--hanji-texture);
+    background-blend-mode: soft-light;
+    background-size: 320px 320px;
     padding: 22px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-float);
   }
 
-  .modal > header {
+  .modal-form {
+    margin: 0;
+  }
+
+  .modal > header,
+  .modal-form > header {
     display: flex;
     justify-content: space-between;
   }
@@ -5948,7 +6259,9 @@
     overflow: auto;
     border: 1px solid rgba(92, 70, 55, 0.18);
     border-radius: 4px;
-    background: #fffdf7;
+    background-color: var(--sheet);
+    background-image: var(--hanji-texture);
+    background-size: 320px 320px;
     padding: 24px 22px 22px 34px;
     color: #342d29;
     font-family: MaruBuri, Georgia, serif;
@@ -6087,10 +6400,13 @@
     bottom: 18px;
     max-width: min(420px, calc(100vw - 36px));
     border: 1px solid var(--rule-strong);
-    border-radius: 9px;
-    background: var(--paper-raised);
+    border-radius: 7px;
+    background-color: var(--surface-raised);
+    background-image: var(--hanji-texture);
+    background-blend-mode: soft-light;
+    background-size: 320px 320px;
     padding: 10px 14px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--shadow-float);
     color: var(--ink);
     font-size: var(--type-caption);
     line-height: 1.5;
@@ -6201,6 +6517,12 @@
 
     .metadata-form .field {
       grid-column: 1;
+    }
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    .repository-row-actions {
+      opacity: 1;
     }
   }
 

@@ -3,6 +3,7 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Editor from "./Editor.svelte";
+import { calculateManuscriptFitScale } from "./manuscript-fit";
 import { layoutManuscript } from "./manuscript-layout";
 import type { EditorChangeContext } from "./types";
 
@@ -285,6 +286,61 @@ describe("manuscript editor input", () => {
 
     expect(worker.requests).toHaveLength(2);
     expect(worker.requests[1].source).toBe(`${initial}나다`);
+    unmount(component);
+  });
+
+  it("refits the manuscript when its viewport is resized", async () => {
+    let resizeCallback: ResizeObserverCallback = () => {};
+    class FakeResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+
+    const viewport = { width: 1_180, height: 774 };
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Editor, {
+      target,
+      props: {
+        value: "원고",
+        fallbackTitle: "제목",
+        manuscriptFitMode: "page",
+      },
+    });
+    await tick();
+
+    const scroller = target.querySelector<HTMLElement>(".manuscript-scroll")!;
+    const host = target.querySelector<HTMLElement>(".editor-host")!;
+    Object.defineProperty(scroller, "clientWidth", {
+      configurable: true,
+      get: () => viewport.width,
+    });
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      get: () => viewport.height,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 5));
+    await tick();
+
+    expect(Number.parseFloat(host.style.getPropertyValue("--paper-width"))).toBeCloseTo(
+      960 * calculateManuscriptFitScale(viewport, "page"),
+    );
+
+    viewport.width = 720;
+    viewport.height = 494;
+    resizeCallback?.([], {} as ResizeObserver);
+    await new Promise((resolve) => window.setTimeout(resolve, 5));
+    await tick();
+
+    expect(Number.parseFloat(host.style.getPropertyValue("--paper-width"))).toBeCloseTo(
+      960 * calculateManuscriptFitScale(viewport, "page"),
+    );
     unmount(component);
   });
 

@@ -1,8 +1,8 @@
-import type { FocusMode } from "./types";
+import type { FocusMode, ManuscriptFitMode } from "./types";
 
 export interface Preferences {
   fontFamily: string;
-  manuscriptZoom: number;
+  manuscriptFitMode: ManuscriptFitMode;
   focusMode: FocusMode;
   typewriterMode: boolean;
   soundEnabled: boolean;
@@ -16,7 +16,7 @@ export interface Preferences {
 
 export const defaultPreferences: Preferences = {
   fontFamily: "Pretendard",
-  manuscriptZoom: 100,
+  manuscriptFitMode: "page",
   focusMode: "off",
   typewriterMode: true,
   soundEnabled: false,
@@ -36,17 +36,16 @@ export function parsePreferences(stored: string | null): Preferences {
       return { ...defaultPreferences };
     }
     const candidate = parsed as Partial<Preferences>;
-    const manuscriptZoom =
-      typeof candidate.manuscriptZoom === "number" &&
-      Number.isFinite(candidate.manuscriptZoom)
-        ? Math.min(140, Math.max(80, Math.round(candidate.manuscriptZoom / 10) * 10))
-        : defaultPreferences.manuscriptZoom;
     return {
       fontFamily:
         typeof candidate.fontFamily === "string" && candidate.fontFamily.trim()
           ? candidate.fontFamily
           : defaultPreferences.fontFamily,
-      manuscriptZoom,
+      manuscriptFitMode: ["page", "width"].includes(
+        candidate.manuscriptFitMode ?? "",
+      )
+        ? (candidate.manuscriptFitMode as ManuscriptFitMode)
+        : defaultPreferences.manuscriptFitMode,
       focusMode: ["off", "paragraph", "sentence"].includes(
         candidate.focusMode ?? "",
       )

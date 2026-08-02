@@ -203,6 +203,7 @@ export interface EditorSelection {
 }
 
 export type FocusMode = "off" | "paragraph" | "sentence";
+export type ManuscriptFitMode = "page" | "width";
 export type SidePanel = "repository" | "outline" | "search" | "versions" | null;
 export type AssistantPanel =
   | "proofreading"
