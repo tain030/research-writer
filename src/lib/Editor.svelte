@@ -1,13 +1,25 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
   import {
-    cellIndexForOffset,
+    caretPlacementForOffset,
     layoutManuscript,
     MANUSCRIPT_CELLS_PER_PAGE,
-    pageIndexForOffset,
+    MANUSCRIPT_COLUMNS,
+    sameCaretPlacement,
+    type ManuscriptCaretAffinity,
+    type ManuscriptCaretPlacement,
     type ManuscriptBlockPlacement,
     type ManuscriptCell,
+    type ManuscriptLayout,
   } from "./manuscript-layout";
+  import type {
+    ManuscriptLayoutRequest,
+    ManuscriptLayoutResponse,
+  } from "./manuscript-layout.worker";
+  import {
+    projectManuscriptEdit,
+    type ManuscriptOptimisticProjection,
+  } from "./manuscript-projection";
   import {
     createDiagnosticIndex,
     diagnosticSeverityForRange,
@@ -79,6 +91,7 @@
   let selectionFrom = $state(0);
   let selectionTo = $state(0);
   let selectionDirection = $state<"forward" | "backward" | "none">("none");
+  let caretAffinity = $state<ManuscriptCaretAffinity>("forward");
   let focused = $state(false);
   let ghostText = $state("");
   let visibleStart = $state(0);
@@ -93,25 +106,44 @@
   let contentRevision = 0;
   let lastSelectionSignature = "";
   let audioContext: AudioContext | null = null;
+  let manuscript = $state<ManuscriptLayout>(
+    layoutManuscript("", "제목 없는 원고"),
+  );
+  let manuscriptSource = "";
+  let requestedLayoutSource = "";
+  let requestedLayoutTitle = "";
+  let layoutWorker: Worker | null = null;
+  let layoutWorkerBusy = false;
+  let queuedLayout: ManuscriptLayoutRequest | null = null;
+  let layoutRevision = 0;
+  let layoutPending = $state(false);
+  let optimisticProjection = $state<ManuscriptOptimisticProjection | null>(
+    null,
+  );
 
   let manuscriptScale = $derived(
     Math.min(140, Math.max(80, manuscriptZoom)) / 100,
   );
-  let manuscript = $derived(layoutManuscript(internalValue, fallbackTitle));
   let pages = $derived(manuscript.pages);
   let lineStarts = $derived(lineStartOffsets(internalValue));
   let diagnosticIndex = $derived(
     createDiagnosticIndex(showDiagnostics ? diagnostics : []),
   );
-  let activePageIndex = $derived(
-    pageIndexForOffset(pages, selectionDirection === "backward" ? selectionFrom : selectionTo),
+  let activeCaretOffset = $derived(
+    selectionDirection === "backward" ? selectionFrom : selectionTo,
   );
-  let activeCellIndex = $derived(
-    cellIndexForOffset(
-      pages[activePageIndex] ?? pages[0],
-      selectionDirection === "backward" ? selectionFrom : selectionTo,
-    ),
+  let activeCaretPlacement = $derived(
+    caretPlacementForOffset(manuscript, activeCaretOffset, caretAffinity),
   );
+  let visualCaretPlacement = $derived(
+    optimisticProjection &&
+      selectionFrom === selectionTo &&
+      activeCaretOffset === optimisticProjection.caretOffset
+      ? optimisticProjection.caret
+      : activeCaretPlacement,
+  );
+  let activePageIndex = $derived(visualCaretPlacement.pageIndex);
+  let activeCellIndex = $derived(visualCaretPlacement.cellIndex);
   let activeFocusRange = $derived(
     focusRange(internalValue, selectionFrom, selectionTo, focusMode),
   );
@@ -162,6 +194,13 @@
     if (changed) {
       internalValue = input.value;
       contentRevision += 1;
+      caretAffinity = "forward";
+      requestManuscriptLayout(
+        internalValue,
+        input.selectionDirection === "backward"
+          ? input.selectionStart
+          : input.selectionEnd,
+      );
     }
     ghostText = "";
     syncSelection();
@@ -185,11 +224,17 @@
     input.focus();
   }
 
-  function setSelection(from: number, to: number, scroll = true): void {
+  function setSelection(
+    from: number,
+    to: number,
+    scroll = true,
+    affinity: ManuscriptCaretAffinity = from <= to ? "forward" : "backward",
+  ): void {
     if (!input) return;
     const start = Math.max(0, Math.min(from, internalValue.length));
     const end = Math.max(0, Math.min(to, internalValue.length));
     input.setSelectionRange(start, end);
+    caretAffinity = affinity;
     syncSelection();
     input.focus({ preventScroll: true });
     if (scroll) scheduleCaretScroll();
@@ -237,12 +282,265 @@
     commitInput(false, { composing: false }, true);
   }
 
+  const ASYNC_LAYOUT_THRESHOLD = 4_000;
+
+  function startLayoutWorker(): void {
+    if (typeof Worker === "undefined") return;
+    try {
+      layoutWorker = new Worker(
+        new URL("./manuscript-layout.worker.ts", import.meta.url),
+        { type: "module", name: "manuscript-layout" },
+      );
+      layoutWorker.onmessage = (
+        event: MessageEvent<ManuscriptLayoutResponse>,
+      ) => {
+        layoutWorkerBusy = false;
+        const response = event.data;
+        if (response.revision === layoutRevision) {
+          manuscript = response.layout;
+          manuscriptSource = response.source;
+          layoutPending = false;
+          optimisticProjection = null;
+          scheduleCaretScroll();
+        }
+        pumpLayoutWorker();
+      };
+      layoutWorker.onerror = () => {
+        layoutWorker?.terminate();
+        layoutWorker = null;
+        layoutWorkerBusy = false;
+        queuedLayout = null;
+        applyLayoutSynchronously(internalValue, fallbackTitle);
+      };
+    } catch {
+      layoutWorker = null;
+    }
+  }
+
+  function pumpLayoutWorker(): void {
+    if (!layoutWorker || layoutWorkerBusy || !queuedLayout) return;
+    const request = queuedLayout;
+    queuedLayout = null;
+    layoutWorkerBusy = true;
+    layoutWorker.postMessage(request);
+  }
+
+  function applyLayoutSynchronously(source: string, title: string): void {
+    manuscript = layoutManuscript(source, title);
+    manuscriptSource = source;
+    requestedLayoutSource = source;
+    requestedLayoutTitle = title;
+    layoutPending = false;
+    optimisticProjection = null;
+  }
+
+  function requestManuscriptLayout(
+    source: string,
+    caretOffset = source.length,
+    force = false,
+  ): void {
+    const title = fallbackTitle;
+    if (
+      !force &&
+      source === requestedLayoutSource &&
+      title === requestedLayoutTitle
+    ) {
+      return;
+    }
+    requestedLayoutSource = source;
+    requestedLayoutTitle = title;
+    layoutRevision += 1;
+
+    if (!layoutWorker || source.length < ASYNC_LAYOUT_THRESHOLD) {
+      queuedLayout = null;
+      applyLayoutSynchronously(source, title);
+      return;
+    }
+
+    optimisticProjection = projectManuscriptEdit(
+      manuscript,
+      manuscriptSource,
+      source,
+      caretOffset,
+    );
+    layoutPending = true;
+    queuedLayout = {
+      revision: layoutRevision,
+      source,
+      fallbackTitle: title,
+    };
+    pumpLayoutWorker();
+  }
+
+  function selectionHead(): number {
+    return selectionDirection === "backward" ? selectionFrom : selectionTo;
+  }
+
+  function moveSelectionHead(
+    offset: number,
+    affinity: ManuscriptCaretAffinity,
+    extend: boolean,
+  ): void {
+    const safeOffset = Math.max(0, Math.min(offset, internalValue.length));
+    caretAffinity = affinity;
+    if (!extend) {
+      setSelection(safeOffset, safeOffset, true, affinity);
+      return;
+    }
+    const anchor =
+      selectionFrom === selectionTo
+        ? selectionFrom
+        : selectionDirection === "backward"
+          ? selectionTo
+          : selectionFrom;
+    setNativeSelection(anchor, safeOffset);
+    scheduleCaretScroll();
+  }
+
+  function moveHorizontal(direction: -1 | 1, extend: boolean): void {
+    if (!extend && selectionFrom !== selectionTo) {
+      moveSelectionHead(
+        direction < 0 ? selectionFrom : selectionTo,
+        direction < 0 ? "backward" : "forward",
+        false,
+      );
+      return;
+    }
+    const affinity: ManuscriptCaretAffinity =
+      direction < 0 ? "backward" : "forward";
+    const head = selectionHead();
+    const current = caretPlacementForOffset(manuscript, head, affinity);
+    let next = head + direction;
+    while (next >= 0 && next <= internalValue.length) {
+      const candidate = caretPlacementForOffset(manuscript, next, affinity);
+      if (!sameCaretPlacement(current, candidate)) break;
+      next += direction;
+    }
+    moveSelectionHead(
+      Math.max(0, Math.min(next, internalValue.length)),
+      affinity,
+      extend,
+    );
+  }
+
+  function cellOffset(
+    page: number,
+    cellIndex: number,
+    ratio: number,
+    preferEnd = false,
+  ): number {
+    const cells = pages[page]?.cells;
+    if (!cells?.length) return selectionHead();
+    let safeIndex = Math.max(0, Math.min(cellIndex, cells.length - 1));
+    const rowStart = Math.floor(safeIndex / MANUSCRIPT_COLUMNS) * MANUSCRIPT_COLUMNS;
+    const rowEnd = rowStart + MANUSCRIPT_COLUMNS;
+    while (
+      safeIndex < rowEnd &&
+      (cells[safeIndex].virtual || cells[safeIndex].tabContinuation)
+    ) {
+      safeIndex += 1;
+    }
+    const cell = cells[Math.min(safeIndex, rowEnd - 1)];
+    if (cell.blockContinuation) return preferEnd ? cell.to : cell.from;
+    if (cell.caretStops?.length) {
+      const slot = preferEnd
+        ? cell.caretStops.length - 1
+        : Math.max(
+            0,
+            Math.min(
+              cell.caretStops.length - 1,
+              Math.round(ratio * (cell.caretStops.length - 1)),
+            ),
+          );
+      return cell.caretStops[slot];
+    }
+    return cell.caretOffset;
+  }
+
+  function moveVertical(rows: number, extend: boolean): void {
+    const current = caretPlacementForOffset(
+      manuscript,
+      selectionHead(),
+      caretAffinity,
+    );
+    const currentCell = pages[current.pageIndex]?.cells[current.cellIndex];
+    if (!currentCell) return;
+    const absoluteRow =
+      current.pageIndex * 20 + currentCell.row + rows;
+    const maxRow = pages.length * 20 - 1;
+    const targetRow = Math.max(0, Math.min(absoluteRow, maxRow));
+    const targetPage = Math.floor(targetRow / 20);
+    const targetCell =
+      (targetRow % 20) * MANUSCRIPT_COLUMNS + currentCell.column;
+    const ratio = current.slot / Math.max(1, current.slotCount);
+    moveSelectionHead(
+      cellOffset(targetPage, targetCell, ratio),
+      rows < 0 ? "backward" : "forward",
+      extend,
+    );
+  }
+
+  function moveToRowEdge(end: boolean, extend: boolean): void {
+    const current = caretPlacementForOffset(
+      manuscript,
+      selectionHead(),
+      caretAffinity,
+    );
+    const cells = pages[current.pageIndex]?.cells;
+    if (!cells) return;
+    const row = Math.floor(current.cellIndex / MANUSCRIPT_COLUMNS);
+    const start = row * MANUSCRIPT_COLUMNS;
+    if (!end) {
+      moveSelectionHead(
+        cellOffset(current.pageIndex, start, 0),
+        "backward",
+        extend,
+      );
+      return;
+    }
+    let last = start + MANUSCRIPT_COLUMNS - 1;
+    while (
+      last > start &&
+      !cells[last].filled &&
+      !cells[last].blockContinuation
+    ) {
+      last -= 1;
+    }
+    moveSelectionHead(
+      cellOffset(current.pageIndex, last, 1, true),
+      "forward",
+      extend,
+    );
+  }
+
   function handleKeydown(event: KeyboardEvent): void {
     if (composing || event.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape" && ghostText) {
       event.preventDefault();
       clearGhostText();
       return;
+    }
+    if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        moveHorizontal(event.key === "ArrowLeft" ? -1 : 1, event.shiftKey);
+        return;
+      }
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        moveVertical(event.key === "ArrowUp" ? -1 : 1, event.shiftKey);
+        return;
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        moveToRowEdge(event.key === "End", event.shiftKey);
+        return;
+      }
+      if (event.key === "PageUp" || event.key === "PageDown") {
+        event.preventDefault();
+        moveVertical(event.key === "PageUp" ? -20 : 20, event.shiftKey);
+        return;
+      }
     }
     if (
       event.key === "Enter" &&
@@ -359,7 +657,21 @@
       return cell.caretOffset;
     }
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    return event.clientX - rect.left > rect.width / 2 ? cell.to : cell.from;
+    const ratio = Math.max(
+      0,
+      Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)),
+    );
+    if (cell.caretStops?.length) {
+      const slot = Math.max(
+        0,
+        Math.min(
+          cell.caretStops.length - 1,
+          Math.round(ratio * (cell.caretStops.length - 1)),
+        ),
+      );
+      return cell.caretStops[slot];
+    }
+    return ratio >= 0.5 ? cell.to : cell.from;
   }
 
   function setNativeSelection(anchor: number, head: number): void {
@@ -368,8 +680,10 @@
     const to = Math.max(0, Math.min(Math.max(anchor, head), internalValue.length));
     const direction = head < anchor ? "backward" : "forward";
     input.setSelectionRange(from, to, direction);
+    caretAffinity = head < anchor ? "backward" : "forward";
     syncSelection();
     input.focus({ preventScroll: true });
+    scheduleCaretScroll();
   }
 
   function handleScroll(): void {
@@ -424,10 +738,6 @@
     );
   }
 
-  function caretAfterCell(cell: ManuscriptCell): boolean {
-    return cell.filled && selectionTo >= cell.to && cell.to === internalValue.length;
-  }
-
   function ghostCharacter(pageIndex: number, cellIndex: number): string {
     if (
       !ghostGraphemes.length ||
@@ -446,6 +756,24 @@
       cellIndex -
       startCell;
     return relative >= 0 ? (ghostGraphemes[relative] ?? "") : "";
+  }
+
+  function optimisticCharacter(pageIndex: number, cellIndex: number): string {
+    const absolute =
+      pageIndex * MANUSCRIPT_CELLS_PER_PAGE + cellIndex;
+    return optimisticProjection?.cells[absolute] ?? "";
+  }
+
+  function cellIsOptimisticallyDeleted(cell: ManuscriptCell): boolean {
+    const projection = optimisticProjection;
+    if (!projection || projection.deletedFrom === projection.deletedTo) {
+      return false;
+    }
+    return (
+      cell.filled &&
+      cell.from < projection.deletedTo &&
+      cell.to > projection.deletedFrom
+    );
   }
 
   function scheduleCaretScroll(): void {
@@ -474,7 +802,11 @@
       }
       const caretRect = caret.getBoundingClientRect();
       const hostRect = host.getBoundingClientRect();
-      inputLeft = caretRect.left - hostRect.left;
+      const slotRatio =
+        visualCaretPlacement.slot /
+        Math.max(1, visualCaretPlacement.slotCount);
+      inputLeft =
+        caretRect.left - hostRect.left + caretRect.width * slotRatio;
       inputTop = caretRect.top - hostRect.top;
     });
   }
@@ -568,10 +900,12 @@
 
   onMount(() => {
     mounted = true;
+    startLayoutWorker();
     internalValue = value;
     contentRevision += 1;
     input.value = value;
     input.setSelectionRange(0, 0);
+    requestManuscriptLayout(value, 0, true);
     syncSelection();
     onready?.(createApi());
     const endDrag = () => {
@@ -583,14 +917,24 @@
   });
 
   $effect(() => {
-    if (!mounted || !input || value === internalValue) return;
-    const head = Math.min(selectionTo, value.length);
-    internalValue = value;
-    contentRevision += 1;
-    composing = false;
-    input.value = value;
-    input.setSelectionRange(head, head);
-    syncSelection();
+    const externalValue = value;
+    const externalTitle = fallbackTitle;
+    if (!mounted || !input) return;
+    if (externalValue !== internalValue) {
+      const head = Math.min(selectionTo, externalValue.length);
+      internalValue = externalValue;
+      contentRevision += 1;
+      composing = false;
+      input.value = externalValue;
+      input.setSelectionRange(head, head);
+      syncSelection();
+    }
+    if (
+      externalValue !== requestedLayoutSource ||
+      externalTitle !== requestedLayoutTitle
+    ) {
+      requestManuscriptLayout(externalValue, selectionTo);
+    }
   });
 
   $effect(() => {
@@ -607,12 +951,15 @@
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     if (caretFrame !== null) cancelAnimationFrame(caretFrame);
     if (audioContext) void audioContext.close();
+    layoutWorker?.terminate();
+    layoutWorker = null;
     onready?.(null);
   });
 </script>
 
 <div
   class:focused
+  class:layout-pending={layoutPending}
   class="editor-host"
   bind:this={host}
   style={[
@@ -668,6 +1015,7 @@
             {#if pageIsRendered(pageIndex)}
               {#each page.cells as cell, cellIndex (cell.index)}
                 {@const ghost = ghostCharacter(pageIndex, cellIndex)}
+                {@const optimistic = optimisticCharacter(pageIndex, cellIndex)}
                 {@const diagnosticSeverity =
                   showDiagnostics && (cell.filled || cell.blockContinuation)
                     ? diagnosticSeverityForRange(
@@ -678,8 +1026,9 @@
                     : undefined}
                 <span
                   class:active-cell={isActiveCell(pageIndex, cellIndex)}
-                  class:caret-after={isActiveCell(pageIndex, cellIndex) && caretAfterCell(cell)}
                   class:selected={cellIsSelected(cell)}
+                  class:optimistic-cell={Boolean(optimistic)}
+                  class:optimistic-deleted={cellIsOptimisticallyDeleted(cell)}
                   class:style-title={cell.style === "title"}
                   class:style-subtitle={cell.style === "subtitle"}
                   class:style-metadata={cell.style === "metadata"}
@@ -701,10 +1050,17 @@
                   class="manuscript-cell"
                   role="presentation"
                   data-caret={isActiveCell(pageIndex, cellIndex) ? "true" : undefined}
+                  data-cell-index={cellIndex}
+                  data-page-index={pageIndex}
+                  style={isActiveCell(pageIndex, cellIndex)
+                    ? `--caret-x: ${(visualCaretPlacement.slot / Math.max(1, visualCaretPlacement.slotCount)) * 100}%`
+                    : undefined}
                   onpointerdown={(event) => beginCellSelection(event, cell)}
                   onpointerenter={(event) => extendCellSelection(event, cell)}
                 >
-                  {#if cell.text}
+                  {#if optimistic}
+                    <span class="cell-text optimistic-text">{optimistic}</span>
+                  {:else if cell.text}
                     <span class="cell-text">{cell.text}</span>
                   {:else if ghost}
                     <span class="ghost-text">{ghost}</span>
@@ -914,22 +1270,26 @@
     content: "";
   }
 
+  .manuscript-cell.optimistic-deleted .cell-text {
+    opacity: 0;
+  }
+
+  .manuscript-cell .optimistic-text {
+    opacity: 1;
+  }
+
   .manuscript-cell.active-cell::after {
     position: absolute;
     z-index: 4;
     top: 4px;
     bottom: 4px;
-    left: 3px;
+    left: clamp(3px, var(--caret-x, 3px), calc(100% - 2px));
     width: 2px;
     border-radius: 1px;
     background: #a34839;
     content: "";
+    transform: translateX(-1px);
     animation: caret-blink 1.08s steps(1) infinite;
-  }
-
-  .manuscript-cell.active-cell.caret-after::after {
-    right: 2px;
-    left: auto;
   }
 
   .style-title {

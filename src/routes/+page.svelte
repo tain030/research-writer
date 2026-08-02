@@ -29,6 +29,15 @@
     nextFootnoteId,
   } from "$lib/markdown";
   import {
+    applyBlockStyle,
+    currentBlockStyle,
+    insertMarkdownLink,
+    toggleInlineStyle,
+    type MarkdownBlockStyle,
+    type MarkdownEdit,
+    type MarkdownInlineStyle,
+  } from "$lib/markdown-formatting";
+  import {
     defaultPreferences,
     parsePreferences,
     type Preferences,
@@ -70,6 +79,7 @@
   type ContextMode = "selection" | "section" | "document";
   type GrammarScope = "selection" | "paragraph" | "document";
   type PreviewComponent = typeof import("$lib/DocumentPreview.svelte").default;
+  type ToolbarMenu = "insert" | "view" | "link" | null;
   type DocumentDialog =
     | "metadata"
     | "figure"
@@ -129,6 +139,12 @@
   });
   let leftPanel = $state<SidePanel>(null);
   let rightPanel = $state<AssistantPanel>(null);
+  let lastLeftPanel = $state<Exclude<SidePanel, null>>("repository");
+  let lastRightPanel = $state<Exclude<AssistantPanel, null>>("proofreading");
+  let toolbarMenu = $state<ToolbarMenu>(null);
+  let linkUrl = $state("https://");
+  let linkInput = $state<HTMLInputElement>();
+  let advancedSettingsOpen = $state(false);
   let saveState = $state<SaveState>("saved");
   let saveError = $state("");
   let conflict = $state<ConflictState | null>(null);
@@ -212,6 +228,13 @@
   let researchToken = $state("");
   let researchTopic = $state("");
   let researchBusy = $state(false);
+
+  let activeBlockStyle = $derived(
+    currentBlockStyle(editorValue, selection.from),
+  );
+  let formattingDisabled = $derived(
+    !currentDocument || currentDocument.readOnly || viewMode === "preview",
+  );
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -424,6 +447,50 @@
       await tick();
     }
     return editorApi;
+  }
+
+  async function applyEditorMarkdownEdit(edit: MarkdownEdit): Promise<void> {
+    const api = await editableApi();
+    if (!api) return;
+    api.replaceRange(edit.replaceFrom, edit.replaceTo, edit.replacement);
+    api.setSelection(edit.from, edit.to);
+    toolbarMenu = null;
+  }
+
+  async function formatBlock(style: MarkdownBlockStyle): Promise<void> {
+    const api = await editableApi();
+    if (!api) return;
+    const content = api.getContent();
+    const selected = api.getSelection();
+    await applyEditorMarkdownEdit(applyBlockStyle(content, selected, style));
+  }
+
+  async function formatInline(style: MarkdownInlineStyle): Promise<void> {
+    const api = await editableApi();
+    if (!api) return;
+    const content = api.getContent();
+    const selected = api.getSelection();
+    await applyEditorMarkdownEdit(toggleInlineStyle(content, selected, style));
+  }
+
+  async function openLinkMenu(): Promise<void> {
+    if (formattingDisabled) return;
+    toolbarMenu = toolbarMenu === "link" ? null : "link";
+    if (toolbarMenu !== "link") return;
+    linkUrl = "https://";
+    await tick();
+    linkInput?.focus();
+    linkInput?.select();
+  }
+
+  async function applyLink(): Promise<void> {
+    const api = await editableApi();
+    if (!api) return;
+    const content = api.getContent();
+    const selected = api.getSelection();
+    await applyEditorMarkdownEdit(
+      insertMarkdownLink(content, selected, linkUrl),
+    );
   }
 
   async function replaceWholeDocument(
@@ -777,8 +844,9 @@
     notify("문서 요소를 수정했습니다.", "success");
   }
 
-  function printCompletedDocument(): void {
-    if (viewMode !== "preview") return;
+  async function printCompletedDocument(): Promise<void> {
+    if (viewMode !== "preview") await switchDocumentView("preview");
+    await tick();
     window.print();
   }
 
@@ -1425,6 +1493,7 @@
       rightPanel = null;
     }
     leftPanel = nextPanel;
+    if (nextPanel) lastLeftPanel = nextPanel;
     if (leftPanel === "versions") await refreshVersions();
     if (leftPanel === "search") await prepareSearch();
   }
@@ -1437,6 +1506,7 @@
       leftPanel = null;
     }
     rightPanel = nextPanel;
+    if (nextPanel) lastRightPanel = nextPanel;
     if (rightPanel === "ai" || rightPanel === "proofreading") {
       await refreshAiAccount();
     }
@@ -1448,6 +1518,38 @@
         refreshResearchWorkspace(),
       ]);
     }
+  }
+
+  async function togglePrimaryLeft(): Promise<void> {
+    if (leftPanel) {
+      lastLeftPanel = leftPanel;
+      leftPanel = null;
+      return;
+    }
+    await toggleLeft(lastLeftPanel);
+  }
+
+  async function togglePrimaryRight(): Promise<void> {
+    if (rightPanel) {
+      lastRightPanel = rightPanel;
+      rightPanel = null;
+      return;
+    }
+    await toggleRight(lastRightPanel);
+  }
+
+  async function selectLeftPanel(
+    panel: Exclude<SidePanel, null>,
+  ): Promise<void> {
+    if (leftPanel === panel) return;
+    await toggleLeft(panel);
+  }
+
+  async function selectRightPanel(
+    panel: Exclude<AssistantPanel, null>,
+  ): Promise<void> {
+    if (rightPanel === panel) return;
+    await toggleRight(panel);
   }
 
   async function refreshVersions(): Promise<void> {
@@ -1958,6 +2060,10 @@
         return;
       }
       if (event.key === "Escape") {
+        if (toolbarMenu) {
+          toolbarMenu = null;
+          return;
+        }
         if (documentDialog) {
           documentDialog = null;
           return;
@@ -1982,7 +2088,31 @@
       }
       return;
     }
-    if (event.key.toLowerCase() === "n") {
+    const formattingTarget =
+      event.target instanceof HTMLElement &&
+      Boolean(event.target.closest(".editor-host, .source-shell, .topbar"));
+    if (
+      formattingTarget &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === "b"
+    ) {
+      event.preventDefault();
+      void formatInline("strong");
+    } else if (
+      formattingTarget &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === "i"
+    ) {
+      event.preventDefault();
+      void formatInline("emphasis");
+    } else if (
+      formattingTarget &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === "k"
+    ) {
+      event.preventDefault();
+      void openLinkMenu();
+    } else if (event.key.toLowerCase() === "n") {
       event.preventDefault();
       void createDocument();
     } else if (event.key.toLowerCase() === "q") {
@@ -2025,6 +2155,19 @@
     desktop = isDesktopRuntime();
     loadPreferences();
     window.addEventListener("keydown", keyboardHandler);
+    const toolbarClickAway = (event: PointerEvent) => {
+      if (
+        toolbarMenu &&
+        event.target instanceof HTMLElement &&
+        !event.target.closest(".toolbar-menu-host")
+      ) {
+        toolbarMenu = null;
+      }
+    };
+    window.addEventListener("pointerdown", toolbarClickAway);
+    unlisteners.push(() =>
+      window.removeEventListener("pointerdown", toolbarClickAway),
+    );
     const blurHandler = () => void saveNow();
     window.addEventListener("blur", blurHandler);
     unlisteners.push(() => window.removeEventListener("blur", blurHandler));
@@ -2119,53 +2262,12 @@
   class="app-shell"
 >
   <header class="topbar">
-    <div class="topbar-side">
-      <button
-        class:active={leftPanel === "repository"}
-        class="icon-button"
-        title="원고 저장소"
-        onclick={() => void toggleLeft("repository")}
-        aria-label="원고 저장소 열기"
-      >
-        ▱
-      </button>
-      <button
-        class="icon-button"
-        title="새 원고 (Ctrl+N)"
-        aria-label="새 원고 만들기"
-        disabled={creatingDocument || !repository?.available || !repository.writable}
-        onclick={() => void createDocument()}
-      >
-        ＋
-      </button>
-      <button
-        class:active={leftPanel === "outline"}
-        class="icon-button"
-        title="개요 (Ctrl+\\)"
-        onclick={() => void toggleLeft("outline")}
-        aria-label="개요 열기"
-      >
-        ☰
-      </button>
-      <button
-        class:active={leftPanel === "search"}
-        class="icon-button"
-        title="전체 검색 (Ctrl+P)"
-        onclick={() => void toggleLeft("search")}
-        aria-label="검색 열기"
-      >
-        ⌕
-      </button>
-      <button
-        class:active={leftPanel === "versions"}
-        class="icon-button"
-        title="버전"
-        onclick={() => void toggleLeft("versions")}
-        aria-label="버전 열기"
-      >
-        ◷
-      </button>
-    </div>
+    <button
+      class:active={leftPanel !== null}
+      class="panel-toggle"
+      title="원고 목록·개요·검색·버전"
+      onclick={() => void togglePrimaryLeft()}
+    >원고</button>
 
     <div class="document-name" title={currentDocument?.path ?? ""}>
       <span>{documentTitle}</span>
@@ -2188,40 +2290,128 @@
       {/if}
     </div>
 
-    <div class="topbar-side topbar-right">
-      <button
-        class:active={rightPanel === "proofreading"}
-        class="text-button proof-button"
-        onclick={() => void toggleRight("proofreading")}
+    <div class="writing-toolbar" aria-label="글쓰기 도구">
+      <label class="toolbar-select style-select" title="문단의 의미 구조">
+        <span class="sr-only">문단 스타일</span>
+        <select
+          value={activeBlockStyle}
+          disabled={formattingDisabled}
+          onchange={(event) =>
+            void formatBlock(event.currentTarget.value as MarkdownBlockStyle)}
+        >
+          <option value="body">본문</option>
+          <option value="heading2">큰 제목</option>
+          <option value="heading3">작은 제목</option>
+          <option value="quote">인용</option>
+          <option value="bullet">목록</option>
+        </select>
+      </label>
+      <label
+        class="toolbar-select font-select"
+        title="원고 전체 글꼴 · 원고지 칸 크기는 유지됩니다"
       >
-        교정{diagnostics.length ? ` ${diagnostics.length}` : ""}
-      </button>
+        <span class="sr-only">글꼴</span>
+        <select
+          bind:value={preferences.fontFamily}
+          disabled={!currentDocument}
+          onchange={savePreferences}
+        >
+          {#each fonts as font}
+            <option value={font.family}>{font.family}</option>
+          {/each}
+        </select>
+      </label>
+      <span class="toolbar-divider"></span>
+      <button
+        class="format-button"
+        title="굵게 (Ctrl+B) · 의미 강조로 저장"
+        aria-label="굵게"
+        disabled={formattingDisabled}
+        onclick={() => void formatInline("strong")}
+      ><strong>가</strong></button>
+      <button
+        class="format-button italic-button"
+        title="기울임 (Ctrl+I) · 의미 강조로 저장"
+        aria-label="기울임"
+        disabled={formattingDisabled}
+        onclick={() => void formatInline("emphasis")}
+      >가</button>
+      <div class="toolbar-menu-host">
+        <button
+          class:active={toolbarMenu === "link"}
+          class="format-button"
+          title="링크 (Ctrl+K)"
+          aria-label="링크"
+          disabled={formattingDisabled}
+          onclick={() => void openLinkMenu()}
+        >↗</button>
+        {#if toolbarMenu === "link"}
+          <form
+            class="toolbar-popover link-popover"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void applyLink();
+            }}
+          >
+            <label for="toolbar-link-url">링크 주소</label>
+            <input
+              id="toolbar-link-url"
+              bind:this={linkInput}
+              bind:value={linkUrl}
+              inputmode="url"
+              placeholder="https://…"
+            />
+            <button type="submit">적용</button>
+          </form>
+        {/if}
+      </div>
+      <div class="toolbar-menu-host compact-menu">
+        <button
+          class:active={toolbarMenu === "insert"}
+          class="toolbar-text-button"
+          disabled={formattingDisabled}
+          onclick={() => (toolbarMenu = toolbarMenu === "insert" ? null : "insert")}
+        >삽입⌄</button>
+        {#if toolbarMenu === "insert"}
+          <div class="toolbar-popover toolbar-menu" role="menu">
+            <button onclick={() => { toolbarMenu = null; openMetadataDialog(); }}>원고 정보</button>
+            <button onclick={() => { toolbarMenu = null; openFigureDialog(); }}>그림</button>
+            <button onclick={() => { toolbarMenu = null; openTableDialog(); }}>표</button>
+            <button onclick={() => { toolbarMenu = null; openMathDialog(); }}>수식</button>
+            <button onclick={() => { toolbarMenu = null; openFootnoteDialog(); }}>각주</button>
+          </div>
+        {/if}
+      </div>
+      <div class="toolbar-menu-host compact-menu">
+        <button
+          class:active={toolbarMenu === "view"}
+          class="toolbar-text-button"
+          disabled={!currentDocument}
+          onclick={() => (toolbarMenu = toolbarMenu === "view" ? null : "view")}
+        >보기⌄</button>
+        {#if toolbarMenu === "view"}
+          <div class="toolbar-popover toolbar-menu view-menu" role="menu">
+            <button class:active={viewMode === "manuscript"} onclick={() => { toolbarMenu = null; void switchDocumentView("manuscript"); }}>원고지</button>
+            <button class:active={viewMode === "source"} onclick={() => { toolbarMenu = null; void switchDocumentView("source"); }}>Markdown 원문</button>
+            <button class:active={viewMode === "preview"} onclick={() => { toolbarMenu = null; void switchDocumentView("preview"); }}>완성본</button>
+            <button onclick={() => { toolbarMenu = null; printCompletedDocument(); }}>인쇄·PDF</button>
+          </div>
+        {/if}
+      </div>
       <button
         class:active={rightPanel === "ai"}
-        class="text-button"
+        class="toolbar-text-button ai-toolbar-button"
+        disabled={!currentDocument}
         onclick={() => void toggleRight("ai")}
-      >
-        AI
-      </button>
-      <button
-        class:active={rightPanel === "sources"}
-        class="icon-button"
-        title="출처"
-        onclick={() => void toggleRight("sources")}
-        aria-label="출처 열기"
-      >
-        ◇
-      </button>
-      <button
-        class:active={rightPanel === "settings"}
-        class="icon-button"
-        title="설정"
-        onclick={() => void toggleRight("settings")}
-        aria-label="설정 열기"
-      >
-        ···
-      </button>
+      >AI</button>
     </div>
+
+    <button
+      class:active={rightPanel !== null}
+      class="panel-toggle tools-toggle"
+      title="교정·AI·출처·설정"
+      onclick={() => void togglePrimaryRight()}
+    >도구{diagnostics.length ? ` ${diagnostics.length}` : ""}</button>
   </header>
 
   {#if leftPanel}
@@ -2230,19 +2420,19 @@
         <div class="panel-tabs">
           <button
             class:active={leftPanel === "repository"}
-            onclick={() => (leftPanel = "repository")}>원고</button
+            onclick={() => void selectLeftPanel("repository")}>원고</button
           >
           <button
             class:active={leftPanel === "outline"}
-            onclick={() => (leftPanel = "outline")}>개요</button
+            onclick={() => void selectLeftPanel("outline")}>개요</button
           >
           <button
             class:active={leftPanel === "search"}
-            onclick={() => void toggleLeft("search")}>검색</button
+            onclick={() => void selectLeftPanel("search")}>검색</button
           >
           <button
             class:active={leftPanel === "versions"}
-            onclick={() => void toggleLeft("versions")}>버전</button
+            onclick={() => void selectLeftPanel("versions")}>버전</button
           >
         </div>
         <button class="close-button" onclick={() => (leftPanel = null)}
@@ -2456,43 +2646,6 @@
         </div>
       {/if}
 
-      <div class="document-toolbar">
-        <div class="insert-tools">
-          <button onclick={openMetadataDialog}>원고 정보</button>
-          <button disabled={currentDocument.readOnly} onclick={openFigureDialog}
-            >그림</button
-          >
-          <button disabled={currentDocument.readOnly} onclick={openTableDialog}
-            >표</button
-          >
-          <button disabled={currentDocument.readOnly} onclick={openMathDialog}
-            >수식</button
-          >
-          <button disabled={currentDocument.readOnly} onclick={openFootnoteDialog}
-            >각주</button
-          >
-        </div>
-        <div class="view-switcher" aria-label="문서 보기">
-          <button
-            class:active={viewMode === "manuscript"}
-            onclick={() => void switchDocumentView("manuscript")}>원고지</button
-          >
-          <button
-            class:active={viewMode === "source"}
-            onclick={() => void switchDocumentView("source")}>원문</button
-          >
-          <button
-            class:active={viewMode === "preview"}
-            onclick={() => void switchDocumentView("preview")}>완성본</button
-          >
-          {#if viewMode === "preview"}
-            <button class="print-button" onclick={printCompletedDocument}
-              >인쇄·PDF</button
-            >
-          {/if}
-        </div>
-      </div>
-
       {#if viewMode === "manuscript"}
         <Editor
           value={editorValue}
@@ -2694,19 +2847,19 @@
         <div class="panel-tabs">
           <button
             class:active={rightPanel === "proofreading"}
-            onclick={() => (rightPanel = "proofreading")}>교정</button
+            onclick={() => void selectRightPanel("proofreading")}>교정</button
           >
           <button
             class:active={rightPanel === "ai"}
-            onclick={() => (rightPanel = "ai")}>AI</button
+            onclick={() => void selectRightPanel("ai")}>AI</button
           >
           <button
             class:active={rightPanel === "sources"}
-            onclick={() => void toggleRight("sources")}>출처</button
+            onclick={() => void selectRightPanel("sources")}>출처</button
           >
           <button
             class:active={rightPanel === "settings"}
-            onclick={() => (rightPanel = "settings")}>설정</button
+            onclick={() => void selectRightPanel("settings")}>설정</button
           >
         </div>
         <button class="close-button" onclick={() => (rightPanel = null)}
@@ -3087,34 +3240,14 @@
           </section>
         {:else}
           <section class="panel-section">
-            <p class="eyebrow">글자와 지면</p>
+            <p class="eyebrow">기본 설정</p>
             <label class="field">
-              <span>본문 글꼴</span>
-              <select
-                bind:value={preferences.fontFamily}
-                onchange={savePreferences}
-              >
-                {#each fonts as font}
-                  <option value={font.family}>
-                    {font.family}{font.bundled ? " · 기본 제공" : ""}
-                  </option>
-                {/each}
+              <span>화면</span>
+              <select bind:value={preferences.theme} onchange={savePreferences}>
+                <option value="system">시스템 설정</option>
+                <option value="light">밝은 작업대</option>
+                <option value="dark">어두운 작업대</option>
               </select>
-            </label>
-            <div class="settings-fact">
-              <strong>400자 행간 원고지</strong>
-              <span>20칸 × 20줄 · 줄마다 교정용 행간</span>
-            </div>
-            <label class="field">
-              <span>원고지 확대 {preferences.manuscriptZoom}%</span>
-              <input
-                type="range"
-                min="80"
-                max="140"
-                step="10"
-                bind:value={preferences.manuscriptZoom}
-                onchange={savePreferences}
-              />
             </label>
             <label class="field">
               <span>집중 모드</span>
@@ -3135,137 +3268,61 @@
                 onchange={savePreferences}
               />
             </label>
-            <label class="switch-row">
-              <div><strong>타자기 스크롤</strong><small>커서를 화면 42% 부근에 유지</small></div>
-              <input
-                type="checkbox"
-                bind:checked={preferences.typewriterMode}
-                onchange={savePreferences}
-              />
-            </label>
-            <label class="switch-row">
-              <div><strong>절제된 타건음</strong><small>기본값은 꺼짐</small></div>
-              <input
-                type="checkbox"
-                bind:checked={preferences.soundEnabled}
-                onchange={savePreferences}
-              />
-            </label>
-            <label class="field">
-              <span>화면</span>
-              <select bind:value={preferences.theme} onchange={savePreferences}>
-                <option value="system">시스템 설정</option>
-                <option value="light">밝은 작업대</option>
-                <option value="dark">어두운 작업대</option>
-              </select>
-            </label>
           </section>
 
           <section class="panel-section">
-            <p class="eyebrow">저장과 동기화</p>
             <button
-              class="path-button repository-path"
-              onclick={() => void chooseRepository()}
+              class:active={advancedSettingsOpen}
+              class="settings-advanced-toggle"
+              onclick={() => (advancedSettingsOpen = !advancedSettingsOpen)}
             >
-              <span title={repository?.path ?? ""}>
-                {repository?.path ?? "원고 저장소 열기"}
-              </span>
-              <small>{repository?.available ? "변경" : "열기"}</small>
+              <span>고급 설정</span>
+              <small>{advancedSettingsOpen ? "접기" : "타자기·연구 연결"}</small>
             </button>
-            {#if repository?.active && !repository.available}
-              <p class="danger-note">{repository.message}</p>
-            {:else}
+          </section>
+
+          {#if advancedSettingsOpen}
+            <section class="panel-section advanced-settings">
+              <p class="eyebrow">쓰기 감각</p>
+              <label class="switch-row">
+                <div><strong>타자기 스크롤</strong><small>커서를 화면 가운데에 유지</small></div>
+                <input type="checkbox" bind:checked={preferences.typewriterMode} onchange={savePreferences} />
+              </label>
+              <label class="switch-row">
+                <div><strong>절제된 타건음</strong><small>기본값은 꺼짐</small></div>
+                <input type="checkbox" bind:checked={preferences.soundEnabled} onchange={savePreferences} />
+              </label>
+            </section>
+
+            <section class="panel-section advanced-settings">
+              <p class="eyebrow">Research Agent 연결</p>
+              <button class="path-button" onclick={() => void chooseResearchWorkspace()}>
+                <span>{researchWorkspace?.path ? basename(researchWorkspace.path) : "로컬 Research 작업 폴더"}</span>
+                <small>{researchWorkspace?.available ? "변경" : "선택"}</small>
+              </button>
+              <label class="field">
+                <span>서버 주소</span>
+                <input bind:value={researchEndpoint} placeholder="https://…" />
+              </label>
+              <label class="field">
+                <span>Bearer 토큰</span>
+                <input type="password" bind:value={researchToken} placeholder={researchConnection?.authenticated ? "저장됨 · 변경할 때만 입력" : "토큰 입력"} />
+              </label>
+              <button class="wide-button" disabled={!researchEndpoint || !researchToken} onclick={() => void configureResearch()}>
+                안전하게 연결
+              </button>
+              {#if researchConnection?.configured}
+                <button class="wide-button" onclick={() => void disconnectResearch()}>연결 해제</button>
+              {/if}
+            </section>
+
+            <section class="panel-section advanced-settings">
+              <p class="eyebrow">AI 보안</p>
               <p class="panel-note">
-                어떤 폴더든 저장소로 열 수 있습니다. 새 원고와 검색은 열린
-                저장소의 루트에서 동작합니다.
+                {aiAccount?.message ?? "Codex 상태 확인 중"}. 토큰은 Codex와 운영체제 보안 저장소가 관리합니다.
               </p>
-            {/if}
-            {#if repository?.active}
-              <button class="wide-button" onclick={() => void closeRepository()}>
-                저장소 닫기
-              </button>
-            {/if}
-            <div class="settings-fact">
-              <strong>300ms 자동 저장</strong>
-              <span>임시 파일 · fsync · 원자 교체</span>
-            </div>
-            {#if repositorySyncProvider}
-              <div class="settings-fact">
-                <strong>{repositorySyncProvider} 관리 폴더</strong>
-                <span>
-                  실제 동기화와 상태 확인은 {repositorySyncProvider} 앱이 담당합니다.
-                </span>
-              </div>
-            {:else}
-              <div class="settings-fact">
-                <strong>Syncthing</strong>
-                <span>{sync?.message ?? "로컬 설치를 자동 감지합니다."}</span>
-              </div>
-            {/if}
-            {#if currentSyncProvider && sync?.folderId}
-              <p class="danger-note">
-                이 폴더는 다른 클라우드 동기화 도구와 Syncthing에 동시에 포함된
-                것으로 보입니다. 같은 폴더에는 하나의 동기화 도구만 사용하세요.
-              </p>
-            {/if}
-          </section>
-
-          <section class="panel-section">
-            <p class="eyebrow">Research Agent 연결</p>
-            <button class="path-button" onclick={() => void chooseResearchWorkspace()}>
-              <span>
-                {researchWorkspace?.path
-                  ? basename(researchWorkspace.path)
-                  : "로컬 Research 작업 폴더"}
-              </span>
-              <small>{researchWorkspace?.available ? "변경" : "선택"}</small>
-            </button>
-            <p class="panel-note">
-              같은 컴퓨터나 Syncthing에 복제된 작업 폴더가 있으면 서버의 출처
-              API가 없어도 검증 카드와 출처 색인을 읽습니다.
-            </p>
-            <label class="field">
-              <span>서버 주소</span>
-              <input bind:value={researchEndpoint} placeholder="https://…" />
-            </label>
-            <label class="field">
-              <span>Bearer 토큰</span>
-              <input
-                type="password"
-                bind:value={researchToken}
-                placeholder={researchConnection?.authenticated
-                  ? "저장됨 · 변경할 때만 입력"
-                  : "토큰 입력"}
-              />
-            </label>
-            <button
-              class="wide-button"
-              disabled={!researchEndpoint || !researchToken}
-              onclick={() => void configureResearch()}
-            >
-              보안 저장소에 연결 정보 보관
-            </button>
-            {#if researchConnection?.configured}
-              <button class="wide-button" onclick={() => void disconnectResearch()}>
-                서버 연결 해제
-              </button>
-            {/if}
-            <p class="panel-note">
-              토큰은 웹 화면이나 SQLite에 저장하지 않고 macOS Keychain,
-              Windows Credential Manager, Linux Secret Service를 사용합니다.
-            </p>
-          </section>
-
-          <section class="panel-section">
-            <p class="eyebrow">AI 보안</p>
-            <div class="settings-fact">
-              <strong>{aiAccount?.message ?? "Codex 상태 확인 중"}</strong>
-              <span
-                >토큰은 Codex가 관리하며 앱은 읽지 않습니다. AI는 빈 임시
-                폴더와 읽기 전용 샌드박스에서 선택한 문맥만 받습니다.</span
-              >
-            </div>
-          </section>
+            </section>
+          {/if}
         {/if}
       </div>
     </aside>
@@ -3715,10 +3772,11 @@
 
   .topbar {
     grid-area: top;
-    z-index: 20;
+    z-index: 30;
     display: grid;
-    grid-template-columns: 1fr minmax(0, auto) 1fr;
+    grid-template-columns: auto minmax(120px, 220px) minmax(0, 1fr) auto;
     align-items: center;
+    gap: 8px;
     min-width: 0;
     height: 46px;
     padding: 0 10px;
@@ -3728,18 +3786,9 @@
     transition: opacity 160ms ease;
   }
 
-  .topbar-side {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-
-  .topbar-right {
-    justify-content: flex-end;
-  }
-
-  .icon-button,
-  .text-button,
+  .panel-toggle,
+  .format-button,
+  .toolbar-text-button,
   .close-button,
   .link-button {
     border: 0;
@@ -3747,36 +3796,38 @@
     color: var(--ink-muted);
   }
 
-  .icon-button {
-    display: grid;
-    place-items: center;
-    width: 34px;
-    height: 32px;
-    border-radius: 7px;
-    font-size: 17px;
-  }
-
-  .text-button {
-    height: 32px;
-    padding: 0 10px;
+  .panel-toggle,
+  .toolbar-text-button {
+    height: 30px;
+    padding: 0 9px;
     border-radius: 7px;
     font-size: var(--type-control);
-    font-weight: 720;
-    letter-spacing: 0.08em;
+    font-weight: 680;
+    white-space: nowrap;
   }
 
-  .icon-button:hover,
-  .text-button:hover,
-  .icon-button.active,
-  .text-button.active {
+  .panel-toggle:hover,
+  .panel-toggle.active,
+  .format-button:hover:not(:disabled),
+  .format-button.active,
+  .toolbar-text-button:hover:not(:disabled),
+  .toolbar-text-button.active {
     color: var(--ink-strong);
     background: var(--paper-deep);
+  }
+
+  .panel-toggle {
+    min-width: 46px;
+  }
+
+  .tools-toggle {
+    justify-self: end;
   }
 
   .document-name {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     min-width: 0;
     gap: 8px;
     color: var(--ink-muted);
@@ -3832,6 +3883,152 @@
     background: var(--danger);
   }
 
+  .writing-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  .toolbar-select {
+    display: block;
+    min-width: 0;
+  }
+
+  .toolbar-select select {
+    height: 30px;
+    max-width: 126px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    padding: 0 24px 0 7px;
+    color: var(--ink-muted);
+    font-family: var(--ui-font);
+    font-size: var(--type-control);
+  }
+
+  .style-select select {
+    width: 92px;
+  }
+
+  .font-select select {
+    width: 124px;
+  }
+
+  .toolbar-select select:hover:not(:disabled),
+  .toolbar-select select:focus {
+    outline: 0;
+    background: var(--paper-deep);
+    color: var(--ink-strong);
+  }
+
+  .toolbar-divider {
+    width: 1px;
+    height: 18px;
+    margin: 0 3px;
+    background: var(--rule);
+  }
+
+  .format-button {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    font-size: 15px;
+  }
+
+  .italic-button {
+    font-style: italic;
+  }
+
+  .format-button:disabled,
+  .toolbar-text-button:disabled,
+  .toolbar-select select:disabled {
+    opacity: 0.38;
+  }
+
+  .toolbar-menu-host {
+    position: relative;
+    display: flex;
+  }
+
+  .toolbar-popover {
+    position: absolute;
+    z-index: 60;
+    top: 36px;
+    left: 50%;
+    min-width: 150px;
+    transform: translateX(-50%);
+    border: 1px solid var(--rule);
+    border-radius: 9px;
+    background: var(--paper-raised);
+    padding: 6px;
+    box-shadow: 0 12px 34px color-mix(in srgb, var(--ink-strong) 18%, transparent);
+  }
+
+  .toolbar-menu {
+    display: grid;
+    gap: 2px;
+  }
+
+  .toolbar-menu button {
+    height: 32px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    padding: 0 10px;
+    color: var(--ink-muted);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .toolbar-menu button:hover,
+  .toolbar-menu button.active {
+    background: var(--paper-deep);
+    color: var(--ink-strong);
+  }
+
+  .link-popover {
+    display: grid;
+    grid-template-columns: minmax(190px, 1fr) auto;
+    gap: 5px;
+    width: 300px;
+  }
+
+  .link-popover label {
+    grid-column: 1 / -1;
+    color: var(--ink-muted);
+    font-size: var(--type-caption);
+  }
+
+  .link-popover input,
+  .link-popover button {
+    height: 32px;
+  }
+
+  .link-popover input {
+    min-width: 0;
+  }
+
+  .link-popover button {
+    border: 0;
+    border-radius: 6px;
+    background: var(--accent);
+    padding: 0 11px;
+    color: white;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
   .writing-stage {
     grid-area: stage;
     position: relative;
@@ -3845,61 +4042,6 @@
         transparent 54%
       ),
       var(--paper);
-  }
-
-  .document-toolbar {
-    position: absolute;
-    z-index: 14;
-    top: 9px;
-    left: 50%;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    transform: translateX(-50%);
-    border: 1px solid color-mix(in srgb, var(--rule) 80%, transparent);
-    border-radius: 9px;
-    background: color-mix(in srgb, var(--paper-raised) 94%, transparent);
-    padding: 3px;
-    box-shadow: 0 5px 18px color-mix(in srgb, var(--ink-strong) 9%, transparent);
-    backdrop-filter: blur(10px);
-  }
-
-  .insert-tools,
-  .view-switcher {
-    display: flex;
-    align-items: center;
-    gap: 1px;
-  }
-
-  .view-switcher {
-    border-left: 1px solid var(--rule);
-    padding-left: 4px;
-  }
-
-  .document-toolbar button {
-    height: 28px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    padding: 0 8px;
-    color: var(--ink-muted);
-    font-size: var(--type-caption);
-    white-space: nowrap;
-  }
-
-  .document-toolbar button:hover:not(:disabled),
-  .document-toolbar button.active {
-    background: var(--paper-deep);
-    color: var(--ink-strong);
-  }
-
-  .document-toolbar .print-button {
-    color: var(--accent);
-    font-weight: 720;
-  }
-
-  .document-toolbar button:disabled {
-    opacity: 0.42;
   }
 
   .panel {
@@ -5219,6 +5361,31 @@
     line-height: 1.55;
   }
 
+  .settings-advanced-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 42px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--paper-raised);
+    padding: 0 11px;
+    color: var(--ink-strong);
+  }
+
+  .settings-advanced-toggle small {
+    color: var(--ink-faint);
+  }
+
+  .settings-advanced-toggle.active {
+    border-color: color-mix(in srgb, var(--accent) 48%, var(--rule));
+  }
+
+  .advanced-settings {
+    background: color-mix(in srgb, var(--paper-raised) 52%, transparent);
+  }
+
   .danger-note {
     border-left: 2px solid var(--danger);
     padding-left: 9px;
@@ -5611,25 +5778,49 @@
     }
   }
 
+  @media (max-width: 1100px) {
+    .topbar {
+      grid-template-columns: auto minmax(90px, 150px) minmax(0, 1fr) auto;
+    }
+
+    .font-select {
+      display: none;
+    }
+  }
+
   @media (max-width: 900px) {
     .app-shell.panel-left.panel-right .right-panel {
       display: none;
     }
 
-    .document-toolbar {
-      max-width: calc(100vw - 24px);
-      overflow-x: auto;
+    .topbar {
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      gap: 4px;
+      padding: 0 6px;
     }
 
-    .insert-tools button {
-      padding-right: 6px;
-      padding-left: 6px;
+    .document-name {
+      font-size: var(--type-caption);
+    }
+
+    .style-select,
+    .toolbar-divider,
+    .compact-menu {
+      display: none;
     }
   }
 
   @media (max-width: 680px) {
-    .insert-tools {
+    .document-name {
       display: none;
+    }
+
+    .topbar {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+
+    .writing-toolbar {
+      grid-column: 2;
     }
 
     .metadata-form {
@@ -5660,7 +5851,6 @@
 
     .topbar,
     .panel,
-    .document-toolbar,
     .encoding-banner,
     .selection-tools,
     .statusbar {

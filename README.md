@@ -54,9 +54,10 @@ chmod +x research-writer_amd64.AppImage
 
 - Pretendard를 원고 기본 글꼴로 제공, MaruBuri·NanumGothicCoding 및 설치된 시스템 글꼴 선택
 - Markdown 문법은 감추고 완성될 글을 조판하는 20×20 행간 원고지와 80–140% 확대·축소
+- 본문·제목·인용·목록, 굵게·기울임·링크만 담은 한 줄 의미 기반 Markdown 도구막대
 - 제목·부제·장르·소속·작성자를 첫 장에 전통 방식으로 배치하는 호환 가능한 YAML 원고 정보
 - 문단 첫 칸, 인용·목록 들여쓰기, 영문 소문자·숫자 두 자 한 칸, 줄 끝 문장 부호와 줄임표 안내
-- 글자와 띄어쓰기를 즉시 조판하고 입력이 250ms 멈추면 갱신하는 원고지·문장 부호 교정
+- 글자와 띄어쓰기를 즉시 투영하고 긴 원고의 전체 조판은 최신 입력만 백그라운드에서 갱신
 - 원고지·Markdown 원문·A4 완성본 보기, 안전한 미리보기와 인쇄·PDF 출력
 - 대화상자로 그림·표·KaTeX 수식·각주를 넣고 원고지에서는 편집 가능한 문서 카드로 표시
 - 어떤 폴더든 원고 저장소로 열고, 루트의 Markdown 원고를 생성·이름 변경·휴지통 삭제
@@ -113,11 +114,11 @@ sudo apt install \
 전체 CI, Linux x86_64 패키징, 체크섬 생성과 GitHub Release 공개를 수행합니다.
 
 ```bash
-pnpm release:version 0.2.1
+pnpm release:version 0.3.0
 git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "Release v0.2.1"
-git tag -a v0.2.1 -m "Research Writer v0.2.1"
-git push origin main v0.2.1
+git commit -m "Release v0.3.0"
+git tag -a v0.3.0 -m "Research Writer v0.3.0"
+git push origin main v0.3.0
 ```
 
 태그는 `v숫자.숫자.숫자` 형식이어야 하며 `main`에 포함된 커밋만 릴리스할 수
@@ -145,7 +146,9 @@ Dropbox·OneDrive·Google Drive·iCloud 폴더에 있다면 실제 업로드와 
 동시에 관리하지 마세요.
 
 주요 단축키는 `Ctrl/Cmd+Shift+O` 저장소 열기, `Ctrl/Cmd+O` 파일 열기,
-`Ctrl/Cmd+N` 새 원고, `Ctrl/Cmd+W` 현재 원고 닫기입니다.
+`Ctrl/Cmd+N` 새 원고, `Ctrl/Cmd+W` 현재 원고 닫기입니다. 글을 선택한 뒤
+`Ctrl/Cmd+B`는 굵게, `Ctrl/Cmd+I`는 기울임, `Ctrl/Cmd+K`는 링크를
+Markdown 의미 구조로 적용합니다.
 
 ## 원고지 작성 안내
 
@@ -177,7 +180,7 @@ research_writer:
 선택한 범위를 AI에 보내며, 원문과 수정문을 비교해 승인하기 전에는 파일을
 바꾸지 않습니다.
 
-상단의 `그림`, `표`, `수식`, `각주` 도구는 Markdown 문법을 몰라도 표준
+상단 `삽입` 메뉴의 `그림`, `표`, `수식`, `각주` 도구는 Markdown 문법을 몰라도 표준
 문서 요소를 만듭니다. 그림은 원본을 건드리지 않고 현재 원고 옆의
 `assets/`에 무작위 안전 이름으로 복사됩니다. 원고지에서는 긴 Markdown
 구문 대신 두 줄짜리 카드를 보여주고, `원문` 보기에서는 실제 저장 내용을,

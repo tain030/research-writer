@@ -26,6 +26,21 @@ export interface ManuscriptCell {
   compact?: boolean;
   style?: ManuscriptTextStyle;
   blockContinuation?: boolean;
+  caretStops?: number[];
+}
+
+export type ManuscriptCaretAffinity = "forward" | "backward";
+
+export interface ManuscriptCaretPlacement {
+  pageIndex: number;
+  cellIndex: number;
+  slot: number;
+  slotCount: number;
+}
+
+export interface ManuscriptCaretBoundary {
+  forward: ManuscriptCaretPlacement;
+  backward: ManuscriptCaretPlacement;
 }
 
 export interface ManuscriptBlockPlacement {
@@ -49,6 +64,7 @@ export interface ManuscriptPage {
 export interface ManuscriptLayout {
   pages: ManuscriptPage[];
   document: ParsedManuscript;
+  carets: ManuscriptCaretBoundary[];
 }
 
 interface Grapheme {
@@ -106,6 +122,7 @@ interface ProjectedUnit {
   compact: boolean;
   virtual?: boolean;
   continuation?: boolean;
+  stops?: number[];
 }
 
 const cards = new Set<ManuscriptBlockKind>([
@@ -131,8 +148,80 @@ export function layoutManuscript(
   let row = 0;
   let column = 0;
   let lastOffset = document.bodyStart;
+  const forwardCarets: Array<ManuscriptCaretPlacement | undefined> =
+    Array.from({ length: value.length + 1 });
+  const backwardCarets: Array<ManuscriptCaretPlacement | undefined> =
+    Array.from({ length: value.length + 1 });
 
   const currentPage = () => pages[pageIndex];
+  const placement = (
+    targetPage: number,
+    targetRow: number,
+    targetColumn: number,
+    slot = 0,
+    slotCount = 1,
+  ): ManuscriptCaretPlacement => ({
+    pageIndex: Math.max(0, Math.min(targetPage, pages.length - 1)),
+    cellIndex:
+      Math.max(0, Math.min(targetRow, MANUSCRIPT_ROWS - 1)) *
+        MANUSCRIPT_COLUMNS +
+      Math.max(0, Math.min(targetColumn, MANUSCRIPT_COLUMNS - 1)),
+    slot: Math.max(0, Math.min(slot, slotCount)),
+    slotCount: Math.max(1, slotCount),
+  });
+  const currentPlacement = (): ManuscriptCaretPlacement => {
+    if (column < MANUSCRIPT_COLUMNS) {
+      return placement(pageIndex, row, column);
+    }
+    if (row < MANUSCRIPT_ROWS - 1) {
+      return placement(pageIndex, row + 1, 0);
+    }
+    return placement(pageIndex, row, MANUSCRIPT_COLUMNS - 1, 1, 1);
+  };
+  const recordForward = (
+    offset: number,
+    target: ManuscriptCaretPlacement,
+  ) => {
+    const safeOffset = Math.max(0, Math.min(offset, value.length));
+    forwardCarets[safeOffset] = target;
+  };
+  const recordBackward = (
+    offset: number,
+    target: ManuscriptCaretPlacement,
+  ) => {
+    const safeOffset = Math.max(0, Math.min(offset, value.length));
+    backwardCarets[safeOffset] = target;
+  };
+  const recordCollapsed = (
+    offset: number,
+    target = currentPlacement(),
+  ) => {
+    recordForward(offset, target);
+    recordBackward(offset, target);
+  };
+  const mapCellStops = (
+    targetPage: number,
+    cell: ManuscriptCell,
+  ) => {
+    const stops = cell.caretStops;
+    if (!stops?.length) return;
+    const slotCount = Math.max(1, stops.length - 1);
+    for (let slot = 0; slot < stops.length; slot += 1) {
+      const target = placement(
+        targetPage,
+        cell.row,
+        cell.column,
+        slot,
+        slotCount,
+      );
+      if (slot > 0) recordBackward(stops[slot], target);
+      if (slot < stops.length - 1) recordForward(stops[slot], target);
+      if (slot > 0 && slot < stops.length - 1) {
+        recordForward(stops[slot], target);
+        recordBackward(stops[slot], target);
+      }
+    }
+  };
   const ensurePage = (offset = lastOffset) => {
     while (row >= MANUSCRIPT_ROWS) {
       finalizePage(currentPage(), offset);
@@ -158,6 +247,10 @@ export function layoutManuscript(
     cell.compact = unit.compact;
     cell.style = unit.style;
     cell.tabContinuation = Boolean(unit.continuation);
+    cell.caretStops =
+      unit.stops ??
+      (!unit.virtual && unit.to > unit.from ? [unit.from, unit.to] : undefined);
+    mapCellStops(pageIndex, cell);
   };
   const fillRowRemainder = (offset: number) => {
     if (column >= MANUSCRIPT_COLUMNS) return;
@@ -178,6 +271,7 @@ export function layoutManuscript(
     for (let index = 0; index < indent; index += 1) {
       placeVirtual("", offset, "normal");
     }
+    recordCollapsed(offset);
   };
   const startBlockRow = (offset: number) => {
     if (column > 0 || column >= MANUSCRIPT_COLUMNS) {
@@ -211,15 +305,25 @@ export function layoutManuscript(
     if (closingPunctuation.test(unit.text) && column === 0) {
       const previous = previousFilledCell(pages, pageIndex, row);
       if (previous) {
-        previous.text += unit.text;
-        previous.to = Math.max(previous.to, unit.to);
-        previous.compact = true;
+        previous.cell.text += unit.text;
+        previous.cell.to = Math.max(previous.cell.to, unit.to);
+        previous.cell.compact = true;
+        previous.cell.caretStops = Array.from(
+          new Set([
+            ...(previous.cell.caretStops ?? [previous.cell.from]),
+            unit.from,
+            unit.to,
+          ]),
+        ).sort((left, right) => left - right);
+        mapCellStops(previous.pageIndex, previous.cell);
+        recordForward(unit.to, currentPlacement());
         lastOffset = unit.to;
         return;
       }
     }
     setDirect(row, column, unit);
     column += 1;
+    recordForward(unit.to, currentPlacement());
     lastOffset = unit.to;
   };
 
@@ -239,9 +343,16 @@ export function layoutManuscript(
   row = headerEndRow;
   column = 0;
 
+  if (!document.blocks.length) {
+    placeVirtual("", document.bodyStart, "normal");
+    recordCollapsed(document.bodyStart);
+  }
+
+  let previousBlockTo = document.bodyStart;
   for (const block of document.blocks) {
     lastOffset = Math.max(lastOffset, block.from);
     if (cards.has(block.kind)) {
+      placeInterBlockGap(previousBlockTo, block.from, false);
       startBlockRow(block.from);
       if (row > MANUSCRIPT_ROWS - 2) {
         row = MANUSCRIPT_ROWS;
@@ -258,6 +369,9 @@ export function layoutManuscript(
         rows: 2,
       };
       currentPage().blocks.push(placement);
+      const blockCaret = placementAtBlock(pageIndex, row);
+      recordForward(block.from, blockCaret);
+      recordBackward(block.to, blockCaret);
       for (let blockRow = row; blockRow < row + 2; blockRow += 1) {
         for (let blockColumn = 0; blockColumn < MANUSCRIPT_COLUMNS; blockColumn += 1) {
           const cell = directCell(blockRow, blockColumn);
@@ -271,9 +385,11 @@ export function layoutManuscript(
       column = 0;
       ensurePage(block.to);
       lastOffset = Math.max(lastOffset, block.to);
+      previousBlockTo = block.to;
       continue;
     }
 
+    placeInterBlockGap(previousBlockTo, block.from, block.indent > 0);
     startBlockRow(block.from);
     for (let index = 0; index < block.indent; index += 1) {
       placeVirtual("", block.from, block.kind === "quote" ? "quote" : "normal");
@@ -282,6 +398,7 @@ export function layoutManuscript(
       placeVirtual(block.marker, block.from, "metadata");
       placeVirtual("", block.from, "normal");
     }
+    recordForward(block.from, currentPlacement());
     const units = unitsForBlock(block);
     for (const unit of units) {
       if (unit.text === "\n") {
@@ -291,17 +408,89 @@ export function layoutManuscript(
       }
       if (unit.text === "―") {
         placeUnit(unit, block);
-        placeUnit({ ...unit, from: unit.to, virtual: true, continuation: true }, block);
+        placeUnit(
+          {
+            ...unit,
+            from: unit.to,
+            virtual: true,
+            continuation: true,
+            stops: undefined,
+          },
+          block,
+        );
         continue;
       }
       placeUnit(unit, block);
     }
     lastOffset = Math.max(lastOffset, block.to);
+    recordForward(block.to, currentPlacement());
+    previousBlockTo = block.to;
   }
+
+  placeTrailingLineBreaks(previousBlockTo);
 
   finalizePage(currentPage(), lastOffset);
 
-  return { pages, document };
+  const carets = completeCaretMap(
+    value.length,
+    forwardCarets,
+    backwardCarets,
+    currentPlacement(),
+  );
+  return { pages, document, carets };
+
+  function placementAtBlock(
+    targetPage: number,
+    targetRow: number,
+  ): ManuscriptCaretPlacement {
+    return placement(targetPage, targetRow, 0);
+  }
+
+  function placeInterBlockGap(
+    from: number,
+    to: number,
+    indentEmptyRows: boolean,
+  ): void {
+    const lineBreakOffsets: number[] = [];
+    for (let offset = Math.max(document.bodyStart, from); offset < to; offset += 1) {
+      if (value[offset] === "\n") lineBreakOffsets.push(offset + 1);
+    }
+    for (let index = 0; index < lineBreakOffsets.length; index += 1) {
+      const caretOffset = lineBreakOffsets[index];
+      if (index === 0) {
+        if (column > 0 || column >= MANUSCRIPT_COLUMNS) {
+          advanceRow(caretOffset);
+        } else {
+          recordCollapsed(caretOffset);
+        }
+        continue;
+      }
+      if (index >= 2) advanceRow(caretOffset);
+      const isLast = index === lineBreakOffsets.length - 1;
+      if (!isLast && indentEmptyRows && column === 0) {
+        placeVirtual("", caretOffset, "normal");
+      }
+      recordCollapsed(caretOffset);
+    }
+  }
+
+  function placeTrailingLineBreaks(from: number): void {
+    let lineBreaks = 0;
+    for (let offset = Math.max(document.bodyStart, from); offset < value.length; offset += 1) {
+      if (value[offset] !== "\n") continue;
+      lineBreaks += 1;
+      const caretOffset = offset + 1;
+      if (lineBreaks === 1) {
+        advanceRow(caretOffset);
+      } else if (lineBreaks === 2) {
+        if (column === 0) placeVirtual("", caretOffset, "normal");
+        recordCollapsed(caretOffset);
+      } else {
+        advanceRow(caretOffset, 1);
+      }
+      lastOffset = caretOffset;
+    }
+  }
 }
 
 function finalizePage(page: ManuscriptPage, offset: number): void {
@@ -323,6 +512,67 @@ function finalizePage(page: ManuscriptPage, offset: number): void {
     endOffset = Math.max(endOffset, cell.to, cell.caretOffset);
   }
   page.endOffset = endOffset;
+}
+
+function completeCaretMap(
+  length: number,
+  forward: Array<ManuscriptCaretPlacement | undefined>,
+  backward: Array<ManuscriptCaretPlacement | undefined>,
+  fallback: ManuscriptCaretPlacement,
+): ManuscriptCaretBoundary[] {
+  const nextForward: Array<ManuscriptCaretPlacement | undefined> =
+    Array.from({ length: length + 1 });
+  const previousBackward: Array<ManuscriptCaretPlacement | undefined> =
+    Array.from({ length: length + 1 });
+  let next: ManuscriptCaretPlacement | undefined;
+  for (let offset = length; offset >= 0; offset -= 1) {
+    if (forward[offset]) next = forward[offset];
+    nextForward[offset] = next;
+  }
+  let previous: ManuscriptCaretPlacement | undefined;
+  for (let offset = 0; offset <= length; offset += 1) {
+    if (backward[offset]) previous = backward[offset];
+    previousBackward[offset] = previous;
+  }
+
+  return Array.from({ length: length + 1 }, (_, offset) => ({
+    forward:
+      forward[offset] ??
+      nextForward[offset] ??
+      previousBackward[offset] ??
+      fallback,
+    backward:
+      backward[offset] ??
+      previousBackward[offset] ??
+      nextForward[offset] ??
+      fallback,
+  }));
+}
+
+export function caretPlacementForOffset(
+  layout: ManuscriptLayout,
+  offset: number,
+  affinity: ManuscriptCaretAffinity = "forward",
+): ManuscriptCaretPlacement {
+  const safeOffset = Math.max(0, Math.min(offset, layout.carets.length - 1));
+  return layout.carets[safeOffset]?.[affinity] ?? {
+    pageIndex: 0,
+    cellIndex: 0,
+    slot: 0,
+    slotCount: 1,
+  };
+}
+
+export function sameCaretPlacement(
+  left: ManuscriptCaretPlacement,
+  right: ManuscriptCaretPlacement,
+): boolean {
+  return (
+    left.pageIndex === right.pageIndex &&
+    left.cellIndex === right.cellIndex &&
+    left.slot === right.slot &&
+    left.slotCount === right.slotCount
+  );
 }
 
 function placeHeader(
@@ -419,6 +669,9 @@ function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
         to: unit.to,
         style: previous.style,
         compact: true,
+        stops: Array.from(
+          new Set([...(previous.stops ?? [previous.from, previous.to]), unit.to]),
+        ).sort((left, right) => left - right),
       };
       return;
     }
@@ -433,6 +686,7 @@ function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
         to: inline.to,
         style: inline.style,
         compact: true,
+        stops: [inline.from, inline.to],
       });
       continue;
     }
@@ -444,6 +698,7 @@ function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
         to: offset + segment.segment.length,
         style: inline.style,
         compact: false,
+        stops: [offset, offset + segment.segment.length],
       });
       offset += segment.segment.length;
     }
@@ -455,7 +710,7 @@ function previousFilledCell(
   pages: ManuscriptPage[],
   pageIndex: number,
   row: number,
-): ManuscriptCell | null {
+): { pageIndex: number; cell: ManuscriptCell } | null {
   for (let currentPage = pageIndex; currentPage >= 0; currentPage -= 1) {
     const page = pages[currentPage];
     const lastIndex =
@@ -464,7 +719,9 @@ function previousFilledCell(
         : page.cells.length - 1;
     for (let index = lastIndex; index >= 0; index -= 1) {
       const cell = page.cells[index];
-      if (cell.filled && !cell.virtual) return cell;
+      if (cell.filled && !cell.virtual) {
+        return { pageIndex: currentPage, cell };
+      }
     }
   }
   return null;

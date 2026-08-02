@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  caretPlacementForOffset,
   cellIndexForOffset,
   MANUSCRIPT_CELLS_PER_PAGE,
   MANUSCRIPT_COLUMNS,
@@ -187,6 +188,69 @@ describe("semantic Korean manuscript layout", () => {
     expect(
       cellIndexForOffset(pages[0], source.length),
     ).toBeGreaterThan(5 * MANUSCRIPT_COLUMNS + 3);
+  });
+
+  it("keeps a source-aware caret for hard breaks and empty paragraphs", () => {
+    const firstBreak = layoutManuscript("가\n");
+    const emptyParagraph = layoutManuscript("가\n\n");
+    const nextEmptyParagraph = layoutManuscript("가\n\n\n");
+
+    const afterLetter = caretPlacementForOffset(firstBreak, 1, "backward");
+    const afterBreak = caretPlacementForOffset(firstBreak, 2, "forward");
+    const afterParagraph = caretPlacementForOffset(
+      emptyParagraph,
+      3,
+      "forward",
+    );
+    const afterSecondParagraph = caretPlacementForOffset(
+      nextEmptyParagraph,
+      4,
+      "forward",
+    );
+
+    expect(afterBreak.cellIndex).toBeGreaterThan(afterLetter.cellIndex);
+    expect(afterParagraph.cellIndex).toBe(afterBreak.cellIndex + 1);
+    expect(afterSecondParagraph.cellIndex).toBeGreaterThan(
+      afterParagraph.cellIndex,
+    );
+  });
+
+  it("keeps every empty-paragraph caret when text follows the blank lines", () => {
+    const source = "가\n\n\n나";
+    const layout = layoutManuscript(source);
+    const afterFirstBreak = caretPlacementForOffset(layout, 2, "forward");
+    const afterEmptyParagraph = caretPlacementForOffset(layout, 3, "forward");
+    const beforeNextParagraph = caretPlacementForOffset(layout, 4, "forward");
+
+    expect(afterFirstBreak.cellIndex % MANUSCRIPT_COLUMNS).toBe(0);
+    expect(afterEmptyParagraph.cellIndex % MANUSCRIPT_COLUMNS).toBe(1);
+    expect(beforeNextParagraph.cellIndex).toBeGreaterThan(
+      afterEmptyParagraph.cellIndex,
+    );
+    expect(beforeNextParagraph.cellIndex % MANUSCRIPT_COLUMNS).toBe(1);
+  });
+
+  it("exposes every half-cell source stop and skips hidden Markdown marks", () => {
+    const compactSource = "# 제목\n\nab";
+    const compact = layoutManuscript(compactSource);
+    const a = compactSource.indexOf("ab");
+    const first = caretPlacementForOffset(compact, a, "forward");
+    const middle = caretPlacementForOffset(compact, a + 1, "forward");
+    const last = caretPlacementForOffset(compact, a + 2, "backward");
+
+    expect([first.cellIndex, middle.cellIndex, last.cellIndex]).toEqual([
+      first.cellIndex,
+      first.cellIndex,
+      first.cellIndex,
+    ]);
+    expect([first.slot, middle.slot, last.slot]).toEqual([0, 1, 2]);
+
+    const markdownSource = "# 제목\n\n**강조**";
+    const markdown = layoutManuscript(markdownSource);
+    const opening = markdownSource.indexOf("**");
+    expect(
+      caretPlacementForOffset(markdown, opening, "forward"),
+    ).toEqual(caretPlacementForOffset(markdown, opening + 2, "forward"));
   });
 
   it("keeps page offset boundaries monotonic when a card moves to a new page", () => {
