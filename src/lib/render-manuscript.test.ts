@@ -14,7 +14,7 @@ describe("completed manuscript renderer", () => {
     ].join("\n");
     const html = renderManuscriptHtml(source);
 
-    expect(html).toContain("<table>");
+    expect(html).toContain("<table");
     expect(html).toContain("class=\"katex\"");
     expect(html).toContain("data-footnote-ref");
     expect(html).toContain("계산 근거");
@@ -41,5 +41,17 @@ describe("completed manuscript renderer", () => {
     expect(html).toContain(dataUrl);
     expect(html).toContain('data-asset-path="assets/chart.png"');
     expect(html).not.toContain("missing-image");
+  });
+
+  it("preserves source ranges and turns standalone images into figures", () => {
+    const source = "# 문서 제목\n\n앞 문단\n\n![도표](chart.png \"분석 결과\")";
+    const html = renderManuscriptHtml(source, {}, {
+      hiddenRanges: [{ from: 0, to: 7 }],
+    });
+
+    expect(html).not.toContain("<h1");
+    expect(html).toContain("data-source-from");
+    expect(html).toContain('class="manuscript-figure"');
+    expect(html).toContain("<figcaption>분석 결과</figcaption>");
   });
 });

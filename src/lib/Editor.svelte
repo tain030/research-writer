@@ -41,6 +41,7 @@
     EditorSelection as SelectionInfo,
     FocusMode,
     ManuscriptFitMode,
+    ScrollAnchor,
   } from "./types";
 
   export interface EditorApi {
@@ -52,6 +53,8 @@
     setSelection: (from: number, to: number) => void;
     scrollToOffset: (offset: number) => void;
     scrollToLine: (line: number) => void;
+    getScrollAnchor: () => ScrollAnchor;
+    scrollToAnchor: (anchor: ScrollAnchor) => void;
     setGhostText: (text: string) => void;
     clearGhostText: () => void;
   }
@@ -75,6 +78,8 @@
     onactivity?: () => void;
     onghostaccept?: (text: string) => void;
     onblockactivate?: (block: ManuscriptBlockPlacement) => void;
+    onscrollanchor?: (anchor: ScrollAnchor) => void;
+    onfocuschange?: (focused: boolean) => void;
   }
 
   let {
@@ -96,6 +101,8 @@
     onactivity,
     onghostaccept,
     onblockactivate,
+    onscrollanchor,
+    onfocuschange,
   }: Props = $props();
 
   let host: HTMLDivElement;
@@ -293,6 +300,8 @@
         }
         setSelection(offset, offset);
       },
+      getScrollAnchor: () => manuscriptScrollAnchor(),
+      scrollToAnchor: (anchor) => scrollManuscriptToOffset(anchor.offset),
       setGhostText: (text) => {
         ghostText = text;
         scheduleCaretPosition();
@@ -752,7 +761,54 @@
       visibleStart = Math.max(0, first - 2);
       visibleEnd = Math.min(pages.length - 1, first + count + 2);
       scheduleCaretPosition();
+      onscrollanchor?.(manuscriptScrollAnchor(first));
     });
+  }
+
+  function manuscriptScrollAnchor(pageIndex = visibleStart): ScrollAnchor {
+    const page = pages[Math.max(0, Math.min(pageIndex, pages.length - 1))];
+    const pageElement = scroller?.querySelector<HTMLElement>(
+      `[data-manuscript-page="${pageIndex}"]`,
+    );
+    const relativeTop = Math.max(
+      0,
+      (scroller?.scrollTop ?? 0) - (pageElement?.offsetTop ?? 0),
+    );
+    const row = Math.max(
+      0,
+      Math.min(
+        19,
+        Math.floor((relativeTop - 86 * manuscriptScale) / (52 * manuscriptScale)),
+      ),
+    );
+    const rowCells = page?.cells.slice(
+      row * MANUSCRIPT_COLUMNS,
+      (row + 1) * MANUSCRIPT_COLUMNS,
+    );
+    const cell = rowCells?.find(
+      (candidate) => candidate.filled && !candidate.virtual,
+    ) ?? page?.cells.find((candidate) => candidate.filled && !candidate.virtual);
+    return {
+      offset: cell?.from ?? page?.blocks[0]?.from ?? 0,
+      source: "manuscript",
+    };
+  }
+
+  function scrollManuscriptToOffset(offset: number): void {
+    if (!scroller) return;
+    const placement = caretPlacementForOffset(
+      manuscript,
+      Math.max(0, Math.min(offset, internalValue.length)),
+      "forward",
+    );
+    const page = scroller.querySelector<HTMLElement>(
+      `[data-manuscript-page="${placement.pageIndex}"]`,
+    );
+    if (page) {
+      const row = Math.floor(placement.cellIndex / MANUSCRIPT_COLUMNS);
+      const rowTop = (86 + row * 52) * manuscriptScale;
+      scroller.scrollTop = Math.max(0, page.offsetTop + rowTop - 42);
+    }
   }
 
   function pageIsRendered(index: number): boolean {
@@ -1161,9 +1217,13 @@
     onkeydown={handleKeydown}
     onfocus={() => {
       focused = true;
+      onfocuschange?.(true);
       scheduleCaretPosition();
     }}
-    onblur={() => (focused = false)}
+    onblur={() => {
+      focused = false;
+      onfocuschange?.(false);
+    }}
   ></textarea>
 
   <div
@@ -1178,6 +1238,7 @@
           class:active-page={pageIndex === activePageIndex}
           class="manuscript-page"
           aria-label={`원고지 ${page.number}쪽`}
+          data-manuscript-page={pageIndex}
           style={paperGrainStyle(page.number)}
         >
           <span class="page-number">

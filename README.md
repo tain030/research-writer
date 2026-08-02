@@ -56,10 +56,12 @@ chmod +x research-writer_amd64.AppImage
 - Markdown 문법은 감추고 완성될 글을 조판하는 20×20 행간 원고지와 페이지 전체·너비 자동 맞춤
 - 밝은 원고와 무광 한지 작업대를 분리하고, 매수 도장·종이 결·절제된 장 넘김을 더한 한 장 보기
 - 본문·제목·인용·목록, 굵게·기울임·링크만 담은 한 줄 의미 기반 Markdown 도구막대
+- 운영체제 제목 문자열을 감춘 통합 타이틀바와 Linux·Windows 창 제어, macOS 네이티브 신호등 버튼
 - 제목·부제·장르·소속·작성자를 첫 장에 전통 방식으로 배치하는 호환 가능한 YAML 원고 정보
 - 문단 첫 칸, 인용·목록 들여쓰기, 영문 소문자·숫자 두 자 한 칸, 줄 끝 문장 부호와 줄임표 안내
 - 글자와 띄어쓰기를 즉시 투영하고 긴 원고의 전체 조판은 최신 입력만 백그라운드에서 갱신
-- 원고지·Markdown 원문·A4 완성본 보기, 안전한 미리보기와 인쇄·PDF 출력
+- 원고지를 유지한 채 CodeMirror Markdown 원문 또는 완성본을 옆에 여는 조절 가능한 분할 편집
+- 실제 A4 페이지, 페이지 번호, 페이지 하단 각주, 반복 표 머리글을 공유하는 화면 미리보기와 인쇄·PDF 출력
 - 대화상자로 그림·표·KaTeX 수식·각주를 넣고 원고지에서는 편집 가능한 문서 카드로 표시
 - 어떤 폴더든 원고 저장소로 열고, 루트의 Markdown 원고를 생성·이름 변경·휴지통 삭제
 - 마지막 저장소와 마지막 원고 자동 복원, 저장소 밖 Markdown 파일의 독립 편집
@@ -115,11 +117,11 @@ sudo apt install \
 전체 CI, Linux x86_64 패키징, 체크섬 생성과 GitHub Release 공개를 수행합니다.
 
 ```bash
-pnpm release:version 0.4.0
+pnpm release:version 0.6.0
 git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "Release v0.4.0"
-git tag -a v0.4.0 -m "Research Writer v0.4.0"
-git push origin main v0.4.0
+git commit -m "Release v0.6.0"
+git tag -a v0.6.0 -m "Research Writer v0.6.0"
+git push origin main v0.6.0
 ```
 
 태그는 `v숫자.숫자.숫자` 형식이어야 하며 `main`에 포함된 커밋만 릴리스할 수
@@ -149,7 +151,8 @@ Dropbox·OneDrive·Google Drive·iCloud 폴더에 있다면 실제 업로드와 
 주요 단축키는 `Ctrl/Cmd+Shift+O` 저장소 열기, `Ctrl/Cmd+O` 파일 열기,
 `Ctrl/Cmd+N` 새 원고, `Ctrl/Cmd+W` 현재 원고 닫기입니다. 글을 선택한 뒤
 `Ctrl/Cmd+B`는 굵게, `Ctrl/Cmd+I`는 기울임, `Ctrl/Cmd+K`는 링크를
-Markdown 의미 구조로 적용합니다.
+Markdown 의미 구조로 적용합니다. `Ctrl/Cmd+Shift+V`는 완성본을 옆에 열고,
+`Ctrl/Cmd+P`는 같은 A4 조판으로 인쇄 또는 PDF 저장 창을 엽니다.
 
 ## 원고지 작성 안내
 
@@ -184,9 +187,9 @@ research_writer:
 상단 `삽입` 메뉴의 `그림`, `표`, `수식`, `각주` 도구는 Markdown 문법을 몰라도 표준
 문서 요소를 만듭니다. 그림은 원본을 건드리지 않고 현재 원고 옆의
 `assets/`에 무작위 안전 이름으로 복사됩니다. 원고지에서는 긴 Markdown
-구문 대신 두 줄짜리 카드를 보여주고, `원문` 보기에서는 실제 저장 내용을,
-`완성본` 보기에서는 표·그림·수식·각주가 조판된 A4 문서를 확인할 수
-있습니다.
+구문 대신 두 줄짜리 카드를 보여줍니다. 상단의 원문 또는 완성본 아이콘을
+누르면 원고지는 왼쪽에 유지되고 오른쪽에서 실제 저장 내용이나 표·그림·수식과
+페이지 하단 각주가 조판된 A4 문서를 함께 확인할 수 있습니다.
 
 ## 선택 기능 연결
 

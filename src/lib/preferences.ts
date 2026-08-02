@@ -12,6 +12,7 @@ export interface Preferences {
   immersiveChrome: boolean;
   typewriterImperfection: boolean;
   focusSheetMode: boolean;
+  companionSplitRatio: number;
 }
 
 export const defaultPreferences: Preferences = {
@@ -26,7 +27,14 @@ export const defaultPreferences: Preferences = {
   immersiveChrome: false,
   typewriterImperfection: false,
   focusSheetMode: false,
+  companionSplitRatio: 0.56,
 };
+
+function clampSplitRatio(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(0.7, Math.max(0.35, value))
+    : defaultPreferences.companionSplitRatio;
+}
 
 export function parsePreferences(stored: string | null): Preferences {
   if (!stored) return { ...defaultPreferences };
@@ -82,6 +90,7 @@ export function parsePreferences(stored: string | null): Preferences {
         typeof candidate.focusSheetMode === "boolean"
           ? candidate.focusSheetMode
           : defaultPreferences.focusSheetMode,
+      companionSplitRatio: clampSplitRatio(candidate.companionSplitRatio),
     };
   } catch {
     return { ...defaultPreferences };

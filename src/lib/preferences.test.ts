@@ -6,7 +6,21 @@ describe("writing preferences", () => {
     expect(defaultPreferences.fontFamily).toBe("Pretendard");
     expect(defaultPreferences.manuscriptFitMode).toBe("page");
     expect(defaultPreferences.manuscriptGuidance).toBe(true);
+    expect(defaultPreferences.companionSplitRatio).toBe(0.56);
     expect(parsePreferences(null).fontFamily).toBe("Pretendard");
+  });
+
+  it("migrates and clamps the companion split ratio", () => {
+    expect(parsePreferences("{}").companionSplitRatio).toBe(0.56);
+    expect(
+      parsePreferences('{"companionSplitRatio":0.62}').companionSplitRatio,
+    ).toBe(0.62);
+    expect(
+      parsePreferences('{"companionSplitRatio":0.9}').companionSplitRatio,
+    ).toBe(0.7);
+    expect(
+      parsePreferences('{"companionSplitRatio":0.1}').companionSplitRatio,
+    ).toBe(0.35);
   });
 
   it("preserves an existing explicit font choice", () => {

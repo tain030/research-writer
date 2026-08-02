@@ -54,6 +54,11 @@ struct ExitState {
     allow_exit: AtomicBool,
 }
 
+#[tauri::command]
+fn get_runtime_platform() -> &'static str {
+    std::env::consts::OS
+}
+
 fn should_guard_exit(guard_ready: bool, allow_exit: bool, has_main_window: bool) -> bool {
     guard_ready && !allow_exit && has_main_window
 }
@@ -359,7 +364,16 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                        | tauri_plugin_window_state::StateFlags::FULLSCREEN,
+                )
+                .build(),
+        )
         .setup(|app| {
             let data_directory = app
                 .path()
@@ -403,6 +417,7 @@ pub fn run() {
             clear_repository_last_document,
             register_exit_guard,
             complete_app_exit,
+            get_runtime_platform,
             index_workspace,
             search_workspace,
             ai_account_status,

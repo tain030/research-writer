@@ -202,6 +202,11 @@ export interface EditorSelection {
   column?: number;
 }
 
+export interface ScrollAnchor {
+  offset: number;
+  source: "manuscript" | "source" | "preview";
+}
+
 export type FocusMode = "off" | "paragraph" | "sentence";
 export type ManuscriptFitMode = "page" | "width";
 export type SidePanel = "repository" | "outline" | "search" | "versions" | null;
@@ -211,4 +216,4 @@ export type AssistantPanel =
   | "sources"
   | "settings"
   | null;
-export type DocumentViewMode = "manuscript" | "source" | "preview";
+export type CompanionView = "source" | "preview" | null;

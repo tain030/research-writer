@@ -5,11 +5,11 @@
 Research Writer는 “작은 데스크톱 셸 안의 로컬 Markdown 편집기”로 유지합니다. 파일 형식과 동기화 공급자를 소유하지 않고, OS가 이미 잘하는 일은 OS에 맡깁니다.
 
 ```text
-Svelte 5 UI + native textarea input
+Svelte 5 UI + native textarea manuscript input
   ├─ mdast semantic document model + writing diagnostics
   ├─ 20×20 manuscript-grid projection with correction spacing
-  ├─ raw Markdown source view
-  └─ sanitized, lazy-loaded completed-document preview
+  ├─ lazy-loaded CodeMirror Markdown source editor
+  └─ worker-rendered, sanitized A4 paged preview
           │ Tauri invoke/event
           ▼
 Rust application services
@@ -72,11 +72,17 @@ Markdown 문법 문자는 칸을 차지하지 않습니다. mdast가 문단 끝 
 확정적인 공백·문장 부호·원고지 관행 분석, 단어 수와 개요는 마지막 입력
 250ms 뒤 한 번만 계산하며 범위 인덱스로 현재 셀에 장식합니다. 분석 중에는
 오래된 위치의 밑줄이나 수정 버튼을 노출하지 않습니다. 안전한 수정만 일괄
-적용할 수 있습니다. 완성본 보기는 별도 지연 로딩 청크에서
-Markdown을 HTML로 바꾼 뒤 allowlist로 정화합니다. 원시 HTML은 버리고,
-원격 그림은 네트워크로 가져오지 않으며, 로컬 그림만 Rust가 검증해 넘긴
-data URL로 치환합니다. 원고의 진실은 여전히 하나의 Markdown 문자열뿐이어서
-리치 텍스트와 Markdown 사이의 왕복 변환이 없습니다.
+적용할 수 있습니다. 원고지는 항상 주 편집기로 남고 CodeMirror 원문 또는
+완성본 중 하나를 보조 편집 그룹에 엽니다. 세 화면은 원문 오프셋을 공통
+스크롤 앵커로 사용하며 원고지와 원문은 같은 Markdown 문자열을 직접 편집합니다.
+
+완성본은 별도 지연 로딩 청크와 Web Worker에서 Markdown을 HTML로 바꾼 뒤
+allowlist로 정화합니다. 메인 스레드에서는 실제 글꼴과 그림 크기로 A4 블록을
+측정하고, 긴 표·코드·일반 문단을 안전한 경계에서 나누며 최초 인용 각주를
+해당 페이지 하단에 예약합니다. 화면과 인쇄는 같은 페이지 DOM을 공유합니다.
+원시 HTML은 버리고 원격 그림은 네트워크로 가져오지 않으며, 로컬 그림만 Rust가
+검증해 넘긴 data URL로 치환합니다. 원고의 진실은 여전히 하나의 Markdown
+문자열뿐이어서 리치 텍스트와 Markdown 사이의 왕복 변환이 없습니다.
 
 ### 문서 요소와 그림
 

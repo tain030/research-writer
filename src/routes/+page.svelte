@@ -8,7 +8,6 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { diffChars, diffWords } from "diff";
   import Editor, { type EditorApi } from "$lib/Editor.svelte";
-  import MarkdownSourceEditor from "$lib/MarkdownSourceEditor.svelte";
   import {
     applyQuickFixes,
     parseManuscript,
@@ -56,8 +55,8 @@
     AiSourceContext,
     AiWritingResponse,
     AssistantPanel,
+    CompanionView,
     DocumentPayload,
-    DocumentViewMode,
     EditorChangeContext,
     EditorSelection,
     FontRecord,
@@ -71,6 +70,7 @@
     ResearchWorkspaceStatus,
     SaveDocumentResult,
     SearchResult,
+    ScrollAnchor,
     SidePanel,
     StoredVersion,
     SyncthingStatus,
@@ -83,7 +83,13 @@
   type ContextMode = "selection" | "section" | "document";
   type GrammarScope = "selection" | "paragraph" | "document";
   type PreviewComponent = typeof import("$lib/DocumentPreview.svelte").default;
+  type PreviewApi = import("$lib/DocumentPreview.svelte").PreviewApi;
+  type SourceComponent = typeof import("$lib/MarkdownSourceEditor.svelte").default;
   type ToolbarMenu = "insert" | "view" | "link" | null;
+  type RuntimePlatform = "linux" | "windows" | "macos" | "web";
+  type ResizeDirection = Parameters<
+    ReturnType<typeof getCurrentWindow>["startResizeDragging"]
+  >[0];
   type DocumentDialog =
     | "metadata"
     | "figure"
@@ -133,8 +139,18 @@
   let analysisPending = $state(false);
   let baseContent = $state("");
   let editorApi = $state<EditorApi | null>(null);
+  let manuscriptApi = $state<EditorApi | null>(null);
+  let sourceApi = $state<EditorApi | null>(null);
+  let previewApi = $state<PreviewApi | null>(null);
+  let activeEditor = $state<"manuscript" | "source">("manuscript");
   let Preview = $state<PreviewComponent | null>(null);
-  let viewMode = $state<DocumentViewMode>("manuscript");
+  let SourceEditor = $state<SourceComponent | null>(null);
+  let companionView = $state<CompanionView>(null);
+  let runtimePlatform = $state<RuntimePlatform>("web");
+  let windowMaximized = $state(false);
+  let writingStage = $state<HTMLElement>();
+  let stageWidth = $state(1180);
+  let splitDragging = $state(false);
   let selection = $state<EditorSelection>({
     from: 0,
     to: 0,
@@ -149,7 +165,6 @@
   let toolbarMenuTrigger: HTMLButtonElement | null = null;
   let linkUrl = $state("https://");
   let linkInput = $state<HTMLInputElement>();
-  let linkMenuButton = $state<HTMLButtonElement>();
   let advancedSettingsOpen = $state(false);
   let chromeSuppressed = $state(false);
   let saveState = $state<SaveState>("saved");
@@ -250,7 +265,7 @@
     currentBlockStyle(editorValue, selection.from),
   );
   let formattingDisabled = $derived(
-    !currentDocument || currentDocument.readOnly || viewMode === "preview",
+    !currentDocument || currentDocument.readOnly,
   );
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -261,6 +276,9 @@
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let externalTimer: ReturnType<typeof setTimeout> | null = null;
   let repositoryTimer: ReturnType<typeof setTimeout> | null = null;
+  let scrollSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  let stageObserver: ResizeObserver | null = null;
+  let suppressedScrollSource: ScrollAnchor["source"] | null = null;
   let versionPreviewRequest = 0;
   let versionReturnFocus: HTMLElement | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
@@ -316,6 +334,9 @@
       repository?.available === true &&
       !currentDocumentInRepository,
   );
+  let compactCompanion = $derived(
+    companionView !== null && stageWidth < 840,
+  );
   let sourceContexts = $derived(
     researchSources
       .filter((source) => selectedSourceIds.includes(source.id))
@@ -343,6 +364,75 @@
       typeof window !== "undefined" &&
       "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
     );
+  }
+
+  async function initializeWindowChrome(): Promise<void> {
+    if (!desktop) {
+      runtimePlatform = "web";
+      return;
+    }
+    runtimePlatform = await invoke<RuntimePlatform>("get_runtime_platform").catch(
+      () => "linux" as RuntimePlatform,
+    );
+    const appWindow = getCurrentWindow();
+    windowMaximized = await appWindow.isMaximized().catch(() => false);
+    unlisteners.push(
+      await appWindow.onResized(async () => {
+        windowMaximized = await appWindow.isMaximized().catch(
+          () => windowMaximized,
+        );
+      }),
+    );
+  }
+
+  async function minimizeWindow(): Promise<void> {
+    await getCurrentWindow().minimize().catch((error) =>
+      notify(`창을 최소화하지 못했습니다: ${errorMessage(error)}`, "error"),
+    );
+  }
+
+  async function toggleWindowMaximize(): Promise<void> {
+    await getCurrentWindow().toggleMaximize().catch((error) =>
+      notify(`창 크기를 바꾸지 못했습니다: ${errorMessage(error)}`, "error"),
+    );
+    windowMaximized = await getCurrentWindow()
+      .isMaximized()
+      .catch(() => windowMaximized);
+  }
+
+  function startWindowResize(
+    event: PointerEvent,
+    direction: ResizeDirection,
+  ): void {
+    if (!desktop || runtimePlatform === "macos" || event.button !== 0) return;
+    event.preventDefault();
+    void getCurrentWindow().startResizeDragging(direction);
+  }
+
+  function measureWritingStage(): void {
+    if (writingStage) stageWidth = writingStage.clientWidth;
+  }
+
+  function beginSplitResize(event: PointerEvent): void {
+    if (!writingStage || compactCompanion || event.button !== 0) return;
+    event.preventDefault();
+    splitDragging = true;
+    const move = (moveEvent: PointerEvent) => {
+      if (!writingStage) return;
+      const bounds = writingStage.getBoundingClientRect();
+      const ratio = (moveEvent.clientX - bounds.left) / Math.max(1, bounds.width);
+      preferences.companionSplitRatio = Math.min(0.7, Math.max(0.35, ratio));
+    };
+    const finish = () => {
+      splitDragging = false;
+      savePreferences();
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   }
 
   function notify(
@@ -437,7 +527,11 @@
     );
   }
 
-  function handleEditorSelection(value: EditorSelection): void {
+  function handleEditorSelection(
+    source: "manuscript" | "source",
+    value: EditorSelection,
+  ): void {
+    if (source !== activeEditor) return;
     selection = value;
     editorApi?.clearGhostText();
     if (completionTimer) {
@@ -446,27 +540,100 @@
     }
   }
 
-  async function switchDocumentView(mode: DocumentViewMode): Promise<void> {
-    if (mode === "preview" && !Preview) {
-      try {
-        Preview = (await import("$lib/DocumentPreview.svelte")).default;
-      } catch (error) {
-        notify(`완성본 보기를 불러오지 못했습니다: ${errorMessage(error)}`, "error");
-        return;
-      }
+  function setActiveEditor(source: "manuscript" | "source"): void {
+    activeEditor = source;
+    editorApi = source === "source" ? sourceApi : manuscriptApi;
+    const nextSelection = editorApi?.getSelection();
+    if (nextSelection) handleEditorSelection(source, nextSelection);
+  }
+
+  function handleManuscriptReady(api: EditorApi | null): void {
+    const wasActive = editorApi === manuscriptApi;
+    manuscriptApi = api;
+    if (api && (activeEditor === "manuscript" || !editorApi)) editorApi = api;
+    else if (!api && wasActive) editorApi = sourceApi;
+  }
+
+  function handleSourceReady(api: EditorApi | null): void {
+    const wasActive = editorApi === sourceApi;
+    sourceApi = api;
+    if (api && activeEditor === "source") editorApi = api;
+    else if (!api && wasActive) {
+      activeEditor = "manuscript";
+      editorApi = manuscriptApi;
     }
-    viewMode = mode;
+  }
+
+  async function toggleCompanionView(mode: Exclude<CompanionView, null>): Promise<void> {
+    if (companionView === mode) {
+      companionView = null;
+      if (activeEditor === "source") setActiveEditor("manuscript");
+      return;
+    }
+    try {
+      if (mode === "preview" && !Preview) {
+        Preview = (await import("$lib/DocumentPreview.svelte")).default;
+      }
+      if (mode === "source" && !SourceEditor) {
+        SourceEditor = (await import("$lib/MarkdownSourceEditor.svelte")).default;
+      }
+    } catch (error) {
+      notify(`보조 화면을 불러오지 못했습니다: ${errorMessage(error)}`, "error");
+      return;
+    }
+    if (mode !== "source" && activeEditor === "source") {
+      setActiveEditor("manuscript");
+    }
+    companionView = mode;
     await tick();
-    if (mode !== "preview") editorApi?.focus();
+    const anchor = manuscriptApi?.getScrollAnchor();
+    if (anchor) {
+      if (mode === "source") sourceApi?.scrollToAnchor(anchor);
+      else previewApi?.scrollToAnchor(anchor);
+    }
   }
 
   async function editableApi(): Promise<EditorApi | null> {
     if (!currentDocument || currentDocument.readOnly) return null;
-    if (viewMode === "preview") {
-      viewMode = "manuscript";
-      await tick();
+    return editorApi ?? manuscriptApi;
+  }
+
+  function handleScrollAnchor(anchor: ScrollAnchor): void {
+    if (anchor.source === suppressedScrollSource) return;
+    const target =
+      anchor.source === "manuscript"
+        ? companionView
+        : "manuscript";
+    if (!target) return;
+    suppressedScrollSource = target;
+    if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
+    requestAnimationFrame(() => {
+      if (target === "source") sourceApi?.scrollToAnchor(anchor);
+      else if (target === "preview") previewApi?.scrollToAnchor(anchor);
+      else manuscriptApi?.scrollToAnchor(anchor);
+      scrollSyncTimer = setTimeout(() => {
+        suppressedScrollSource = null;
+      }, 90);
+    });
+  }
+
+  async function loadPreviewComponent(): Promise<boolean> {
+    if (Preview) return true;
+    try {
+      Preview = (await import("$lib/DocumentPreview.svelte")).default;
+      return true;
+    } catch (error) {
+      notify(`완성본 보기를 불러오지 못했습니다: ${errorMessage(error)}`, "error");
+      return false;
     }
-    return editorApi;
+  }
+
+  async function showPreviewForPrint(): Promise<boolean> {
+    if (!(await loadPreviewComponent())) return false;
+    companionView = "preview";
+    if (activeEditor === "source") setActiveEditor("manuscript");
+    await tick();
+    return true;
   }
 
   async function applyEditorMarkdownEdit(edit: MarkdownEdit): Promise<void> {
@@ -500,7 +667,6 @@
       closeToolbarMenu(false);
       return;
     }
-    toolbarMenuTrigger = linkMenuButton ?? null;
     toolbarMenu = "link";
     linkUrl = "https://";
     await tick();
@@ -662,8 +828,8 @@
       openMetadataDialog();
       return;
     }
-    await switchDocumentView("manuscript");
-    editorApi?.setSelection(item.from, item.to);
+    setActiveEditor("manuscript");
+    manuscriptApi?.setSelection(item.from, item.to);
   }
 
   async function applyDiagnosticFix(item: WritingDiagnostic): Promise<void> {
@@ -974,8 +1140,17 @@
   }
 
   async function printCompletedDocument(): Promise<void> {
-    if (viewMode !== "preview") await switchDocumentView("preview");
+    if (!(await showPreviewForPrint())) return;
     await tick();
+    for (let attempt = 0; attempt < 12 && !previewApi; attempt += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    if (!previewApi) {
+      notify("인쇄용 완성본을 준비하지 못했습니다. 다시 시도해주세요.", "error");
+      return;
+    }
+    await previewApi.awaitLayout();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     window.print();
   }
 
@@ -1055,7 +1230,9 @@
     saveState = "saved";
     saveError = "";
     conflict = null;
-    viewMode = "manuscript";
+    companionView = null;
+    activeEditor = "manuscript";
+    editorApi = manuscriptApi;
     documentDialog = null;
     grammarSuggestion = null;
     sync = null;
@@ -1163,7 +1340,9 @@
     saveState = "saved";
     saveError = "";
     conflict = null;
-    viewMode = "manuscript";
+    companionView = null;
+    activeEditor = "manuscript";
+    editorApi = manuscriptApi;
     documentDialog = null;
     grammarSuggestion = null;
     selection = { from: 0, to: 0, text: "", line: 1 };
@@ -2438,9 +2617,15 @@
     } else if (event.key.toLowerCase() === "s") {
       event.preventDefault();
       void saveNow();
-    } else if (event.key.toLowerCase() === "p") {
+    } else if (event.key.toLowerCase() === "p" && event.shiftKey) {
       event.preventDefault();
       void toggleLeft("search");
+    } else if (event.key.toLowerCase() === "p") {
+      event.preventDefault();
+      void printCompletedDocument();
+    } else if (event.key.toLowerCase() === "v" && event.shiftKey) {
+      event.preventDefault();
+      void toggleCompanionView("preview");
     } else if (event.key === "\\") {
       event.preventDefault();
       void toggleLeft("outline");
@@ -2450,6 +2635,12 @@
   onMount(async () => {
     desktop = isDesktopRuntime();
     loadPreferences();
+    await initializeWindowChrome();
+    if (typeof ResizeObserver !== "undefined" && writingStage) {
+      stageObserver = new ResizeObserver(measureWritingStage);
+      stageObserver.observe(writingStage);
+      measureWritingStage();
+    }
     window.addEventListener("keydown", keyboardHandler);
     const toolbarClickAway = (event: PointerEvent) => {
       if (
@@ -2546,6 +2737,9 @@
     if (toastTimer) clearTimeout(toastTimer);
     if (externalTimer) clearTimeout(externalTimer);
     if (repositoryTimer) clearTimeout(repositoryTimer);
+    if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
+    stageObserver?.disconnect();
+    stageObserver = null;
     documentAnalysis.cancel();
     if (syncTimer) clearInterval(syncTimer);
   });
@@ -2558,14 +2752,17 @@
 <main
   class:panel-left={leftPanel !== null}
   class:panel-right={rightPanel !== null}
+  class:platform-macos={runtimePlatform === "macos"}
+  class:split-dragging={splitDragging}
   class="app-shell"
   onmousemove={revealChrome}
 >
   <header
     class:chrome-hidden={Boolean(currentDocument) &&
       ((chromeSuppressed && preferences.immersiveChrome) ||
-        (preferences.focusSheetMode && viewMode === "manuscript"))}
+        preferences.focusSheetMode)}
     class="topbar"
+    data-tauri-drag-region="deep"
   >
     <button
       class:active={leftPanel !== null}
@@ -2649,19 +2846,31 @@
         disabled={formattingDisabled}
         onclick={() => void formatInline("emphasis")}
       >가</button>
-      <div class="toolbar-menu-host">
+      <div class="toolbar-menu-host compact-menu">
         <button
-          bind:this={linkMenuButton}
-          class:active={toolbarMenu === "link"}
-          class="format-button"
-          title="링크 (Ctrl+K)"
-          aria-label="링크"
-          aria-haspopup="dialog"
-          aria-expanded={toolbarMenu === "link"}
+          class:active={toolbarMenu === "insert" || toolbarMenu === "link"}
+          class="toolbar-text-button"
+          aria-haspopup="menu"
+          aria-expanded={toolbarMenu === "insert" || toolbarMenu === "link"}
           disabled={formattingDisabled}
-          onclick={() => void openLinkMenu()}
-        >↗</button>
-        {#if toolbarMenu === "link"}
+          onclick={(event) => void toggleToolbarMenu("insert", event.currentTarget)}
+        >삽입⌄</button>
+        {#if toolbarMenu === "insert"}
+          <div
+            class="toolbar-popover toolbar-menu"
+            role="menu"
+            tabindex="-1"
+            data-menu="insert"
+            onkeydown={handleToolbarMenuKeydown}
+          >
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openMetadataDialog(); }}>원고 정보</button>
+            <button role="menuitem" onclick={() => void openLinkMenu()}>링크… <kbd>Ctrl K</kbd></button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openFigureDialog(); }}>그림</button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openTableDialog(); }}>표</button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openMathDialog(); }}>수식</button>
+            <button role="menuitem" onclick={() => { toolbarMenu = null; openFootnoteDialog(); }}>각주</button>
+          </div>
+        {:else if toolbarMenu === "link"}
           <form
             class="toolbar-popover link-popover"
             onsubmit={(event) => {
@@ -2683,31 +2892,6 @@
       </div>
       <div class="toolbar-menu-host compact-menu">
         <button
-          class:active={toolbarMenu === "insert"}
-          class="toolbar-text-button"
-          aria-haspopup="menu"
-          aria-expanded={toolbarMenu === "insert"}
-          disabled={formattingDisabled}
-          onclick={(event) => void toggleToolbarMenu("insert", event.currentTarget)}
-        >삽입⌄</button>
-        {#if toolbarMenu === "insert"}
-          <div
-            class="toolbar-popover toolbar-menu"
-            role="menu"
-            tabindex="-1"
-            data-menu="insert"
-            onkeydown={handleToolbarMenuKeydown}
-          >
-            <button role="menuitem" onclick={() => { toolbarMenu = null; openMetadataDialog(); }}>원고 정보</button>
-            <button role="menuitem" onclick={() => { toolbarMenu = null; openFigureDialog(); }}>그림</button>
-            <button role="menuitem" onclick={() => { toolbarMenu = null; openTableDialog(); }}>표</button>
-            <button role="menuitem" onclick={() => { toolbarMenu = null; openMathDialog(); }}>수식</button>
-            <button role="menuitem" onclick={() => { toolbarMenu = null; openFootnoteDialog(); }}>각주</button>
-          </div>
-        {/if}
-      </div>
-      <div class="toolbar-menu-host compact-menu">
-        <button
           class:active={toolbarMenu === "view"}
           class="toolbar-text-button"
           aria-haspopup="menu"
@@ -2723,64 +2907,94 @@
             data-menu="view"
             onkeydown={handleToolbarMenuKeydown}
           >
-            <button class:active={viewMode === "manuscript"} role="menuitemradio" aria-checked={viewMode === "manuscript"} onclick={() => { closeToolbarMenu(false); void switchDocumentView("manuscript"); }}>원고지</button>
-            <button class:active={viewMode === "source"} role="menuitemradio" aria-checked={viewMode === "source"} onclick={() => { closeToolbarMenu(false); void switchDocumentView("source"); }}>Markdown 원문</button>
-            <button class:active={viewMode === "preview"} role="menuitemradio" aria-checked={viewMode === "preview"} onclick={() => { closeToolbarMenu(false); void switchDocumentView("preview"); }}>완성본</button>
-            <button role="menuitem" onclick={() => { closeToolbarMenu(false); printCompletedDocument(); }}>인쇄·PDF</button>
-            <span class="toolbar-menu-divider"></span>
             <button
               class:active={preferences.manuscriptFitMode === "page"}
               role="menuitemradio"
               aria-checked={preferences.manuscriptFitMode === "page"}
-              disabled={viewMode !== "manuscript"}
               onclick={() => { closeToolbarMenu(false); setManuscriptFitMode("page"); }}
             >페이지에 맞추기</button>
             <button
               class:active={preferences.manuscriptFitMode === "width"}
               role="menuitemradio"
               aria-checked={preferences.manuscriptFitMode === "width"}
-              disabled={viewMode !== "manuscript"}
               onclick={() => { closeToolbarMenu(false); setManuscriptFitMode("width"); }}
             >페이지 너비에 맞추기</button>
-            <span class="toolbar-menu-divider"></span>
-            <button
-              class:active={preferences.focusSheetMode}
-              role="menuitemcheckbox"
-              aria-checked={preferences.focusSheetMode}
-              disabled={viewMode !== "manuscript"}
-              onclick={() => { closeToolbarMenu(false); toggleSingleSheetMode(); }}
-            >한 장만 보기</button>
           </div>
         {/if}
       </div>
       <button
-        class:active={rightPanel === "ai"}
-        class="toolbar-text-button ai-toolbar-button"
+        class:active={companionView === "source"}
+        class="toolbar-icon-button"
+        title="Markdown 원문을 옆에 열기"
+        aria-label="Markdown 원문을 옆에 열기"
+        aria-pressed={companionView === "source"}
         disabled={!currentDocument}
-        onclick={() => void toggleRight("ai")}
-      >AI</button>
+        onclick={() => void toggleCompanionView("source")}
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M14 5l-4 14"></path></svg>
+      </button>
+      <button
+        class:active={companionView === "preview"}
+        class="toolbar-icon-button"
+        title="완성본을 옆에 열기 (Ctrl+Shift+V)"
+        aria-label="완성본을 옆에 열기"
+        aria-pressed={companionView === "preview"}
+        disabled={!currentDocument}
+        onclick={() => void toggleCompanionView("preview")}
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v17H6.5A2.5 2.5 0 0 0 4 22V5.5ZM20 5.5A2.5 2.5 0 0 0 17.5 3H13v17h4.5A2.5 2.5 0 0 1 20 22V5.5Z"></path></svg>
+      </button>
+      <button
+        class="toolbar-icon-button"
+        title="인쇄/PDF 저장 (Ctrl+P)"
+        aria-label="인쇄 또는 PDF 저장"
+        disabled={!currentDocument}
+        onclick={() => void printCompletedDocument()}
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v7H7zM17 11h.01"></path></svg>
+      </button>
     </div>
 
-    <button
-      class:active={rightPanel !== null}
-      class="panel-toggle tools-toggle"
-      title={rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}
-      aria-label={`${rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}${diagnostics.length ? `, 규칙 문제 ${diagnostics.length}개` : ""}`}
-      aria-expanded={rightPanel !== null}
-      aria-controls="right-panel"
-      onclick={() => void togglePrimaryRight()}
-    >
-      <svg aria-hidden="true" viewBox="0 0 24 24">
-        <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-        <path d="M15 4v16M18 8h.01M18 12h.01M18 16h.01"></path>
-      </svg>
-      {#if diagnostics.length}
-        <span class="panel-count" aria-hidden="true">
-          {diagnostics.length > 99 ? "99+" : diagnostics.length}
-        </span>
+    <div class="topbar-actions">
+      <button
+        class:active={rightPanel !== null}
+        class="panel-toggle tools-toggle"
+        title={rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}
+        aria-label={`${rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}${diagnostics.length ? `, 규칙 문제 ${diagnostics.length}개` : ""}`}
+        aria-expanded={rightPanel !== null}
+        aria-controls="right-panel"
+        onclick={() => void togglePrimaryRight()}
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+          <path d="M15 4v16M18 8h.01M18 12h.01M18 16h.01"></path>
+        </svg>
+        {#if diagnostics.length}
+          <span class="panel-count" aria-hidden="true">{diagnostics.length > 99 ? "99+" : diagnostics.length}</span>
+        {/if}
+      </button>
+      {#if desktop && runtimePlatform !== "macos"}
+        <div class="window-controls" aria-label="창 제어">
+          <button title="최소화" aria-label="최소화" onclick={() => void minimizeWindow()}><svg aria-hidden="true" viewBox="0 0 12 12"><path d="M2 6h8"></path></svg></button>
+          <button title={windowMaximized ? "복원" : "최대화"} aria-label={windowMaximized ? "창 복원" : "최대화"} onclick={() => void toggleWindowMaximize()}>
+            {#if windowMaximized}<svg aria-hidden="true" viewBox="0 0 12 12"><path d="M3.5 1.5h7v7M1.5 3.5h7v7h-7z"></path></svg>{:else}<svg aria-hidden="true" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9"></rect></svg>{/if}
+          </button>
+          <button class="window-close" title="끝내기" aria-label="프로그램 끝내기" onclick={() => void requestAppExit()}><svg aria-hidden="true" viewBox="0 0 12 12"><path d="m2 2 8 8M10 2 2 10"></path></svg></button>
+        </div>
       {/if}
-    </button>
+    </div>
   </header>
+
+  {#if desktop && runtimePlatform !== "macos" && !windowMaximized}
+    <div class="window-resize-edge north" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "North")}></div>
+    <div class="window-resize-edge east" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "East")}></div>
+    <div class="window-resize-edge south" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "South")}></div>
+    <div class="window-resize-edge west" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "West")}></div>
+    <div class="window-resize-corner north-east" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "NorthEast")}></div>
+    <div class="window-resize-corner north-west" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "NorthWest")}></div>
+    <div class="window-resize-corner south-east" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "SouthEast")}></div>
+    <div class="window-resize-corner south-west" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "SouthWest")}></div>
+  {/if}
 
   {#if leftPanel}
     <aside id="left-panel" class="panel left-panel">
@@ -3005,7 +3219,7 @@
     </aside>
   {/if}
 
-  <section class="writing-stage">
+  <section class="writing-stage" bind:this={writingStage}>
     {#if currentDocument}
       {#if currentDocument.readOnly}
         <div class="encoding-banner">
@@ -3017,50 +3231,76 @@
         </div>
       {/if}
 
-      {#if viewMode === "manuscript"}
-        <Editor
-          value={editorValue}
-          readOnly={currentDocument.readOnly}
-          fallbackTitle={manuscriptFallbackTitle}
-          fontFamily={preferences.fontFamily}
-          manuscriptFitMode={preferences.manuscriptFitMode}
-          focusMode={preferences.focusMode}
-          typewriterMode={preferences.typewriterMode}
-          soundEnabled={preferences.soundEnabled}
-          singleSheetMode={preferences.focusSheetMode}
-          typewriterImperfection={preferences.typewriterImperfection}
-          showDiagnostics={preferences.manuscriptGuidance}
-          {diagnostics}
-          onready={(api) => (editorApi = api)}
-          onchange={onEditorChange}
-          onselection={handleEditorSelection}
-          onactivity={handleEditorActivity}
-          onghostaccept={() => notify("자동 완성을 반영했습니다.", "success")}
-          onblockactivate={editDocumentBlock}
-        />
-      {:else if viewMode === "source"}
-        <MarkdownSourceEditor
-          value={editorValue}
-          readOnly={currentDocument.readOnly}
-          onready={(api) => (editorApi = api)}
-          onchange={onEditorChange}
-          onselection={handleEditorSelection}
-          onactivity={handleEditorActivity}
-        />
-      {:else}
-        {#if Preview}
-          <Preview
-            content={editorValue}
-            documentPath={currentDocument.path}
+      <div
+        class:has-companion={companionView !== null}
+        class:compact-companion={compactCompanion}
+        class="writing-surface"
+        style={companionView && !compactCompanion
+          ? `grid-template-columns:calc(${preferences.companionSplitRatio * 100}% - 4px) 8px minmax(0, 1fr)`
+          : undefined}
+      >
+        <div class="manuscript-pane">
+          <Editor
+            value={editorValue}
+            readOnly={currentDocument.readOnly}
             fallbackTitle={manuscriptFallbackTitle}
             fontFamily={preferences.fontFamily}
-            {desktop}
-            onlink={(url) => void openExternalUrl(url)}
+            manuscriptFitMode={preferences.manuscriptFitMode}
+            focusMode={preferences.focusMode}
+            typewriterMode={preferences.typewriterMode}
+            soundEnabled={preferences.soundEnabled}
+            singleSheetMode={preferences.focusSheetMode}
+            typewriterImperfection={preferences.typewriterImperfection}
+            showDiagnostics={preferences.manuscriptGuidance}
+            {diagnostics}
+            onready={handleManuscriptReady}
+            onchange={onEditorChange}
+            onselection={(value) => handleEditorSelection("manuscript", value)}
+            onactivity={handleEditorActivity}
+            onfocuschange={(focused) => focused && setActiveEditor("manuscript")}
+            onscrollanchor={handleScrollAnchor}
+            onghostaccept={() => notify("자동 완성을 반영했습니다.", "success")}
+            onblockactivate={editDocumentBlock}
           />
+        </div>
+        {#if companionView}
+          <button
+            class="split-handle"
+            title="분할 너비 조절"
+            aria-label="원고지와 보조 화면 너비 조절"
+            onpointerdown={beginSplitResize}
+          ><span></span></button>
+          <div class:preview-pane={companionView === "preview"} class="companion-pane">
+            {#if companionView === "source" && SourceEditor}
+              <SourceEditor
+                value={editorValue}
+                readOnly={currentDocument.readOnly}
+                fontFamily={preferences.fontFamily}
+                onready={handleSourceReady}
+                onchange={onEditorChange}
+                onselection={(value) => handleEditorSelection("source", value)}
+                onactivity={handleEditorActivity}
+                onfocuschange={(focused) => focused && setActiveEditor("source")}
+                onscrollanchor={handleScrollAnchor}
+              />
+            {:else if companionView === "preview" && Preview}
+              <Preview
+                content={editorValue}
+                documentPath={currentDocument.path}
+                fallbackTitle={manuscriptFallbackTitle}
+                fontFamily={preferences.fontFamily}
+                fitMode={preferences.manuscriptFitMode}
+                {desktop}
+                onready={(api) => (previewApi = api)}
+                onscrollanchor={handleScrollAnchor}
+                onlink={(url) => void openExternalUrl(url)}
+              />
+            {/if}
+          </div>
         {/if}
-      {/if}
+      </div>
 
-      {#if viewMode !== "preview" && selection.text && !suggestion && !conflict}
+      {#if selection.text && !suggestion && !conflict}
         <div class="selection-tools">
           <button onclick={() => void runAi("rewrite")}>다듬기</button>
           <button onclick={() => void runAi("shorten")}>줄이기</button>
@@ -3074,14 +3314,12 @@
         <div>
           <span>{words.toLocaleString("ko-KR")}단어</span>
           <span>약 {minutes}분</span>
-          {#if viewMode === "manuscript"}
+          {#if activeEditor === "manuscript"}
             <span>
               {selection.page ?? 1}쪽 · {selection.row ?? 1}행 · {selection.column ?? 1}칸
             </span>
-          {:else if viewMode === "source"}
-            <span>{selection.line}행 · Markdown 원문</span>
           {:else}
-            <span>완성본 미리보기</span>
+            <span>{selection.line}행 · Markdown 원문</span>
           {/if}
           {#if diagnostics.length}
             <button
@@ -3645,6 +3883,10 @@
               <label class="switch-row">
                 <div><strong>타자기 스크롤</strong><small>커서를 화면 가운데에 유지</small></div>
                 <input type="checkbox" bind:checked={preferences.typewriterMode} onchange={savePreferences} />
+              </label>
+              <label class="switch-row">
+                <div><strong>한 장만 보기</strong><small>현재 작성 중인 원고지만 작업대에 표시</small></div>
+                <input type="checkbox" checked={preferences.focusSheetMode} onchange={toggleSingleSheetMode} />
               </label>
               <label class="switch-row">
                 <div><strong>절제된 타건음</strong><small>기본값은 꺼짐</small></div>
@@ -4292,6 +4534,11 @@
     box-shadow: inset 0 1px rgba(255, 255, 255, 0.25);
     backdrop-filter: blur(8px);
     transition: opacity 700ms ease;
+    user-select: none;
+  }
+
+  .platform-macos .topbar {
+    padding-left: 78px;
   }
 
   .topbar.chrome-hidden {
@@ -4307,6 +4554,7 @@
 
   .panel-toggle,
   .format-button,
+  .toolbar-icon-button,
   .toolbar-text-button,
   .close-button,
   .link-button {
@@ -4337,6 +4585,7 @@
 
   .panel-toggle.active,
   .format-button.active,
+  .toolbar-icon-button.active,
   .toolbar-text-button.active {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     box-shadow: inset 0 -2px var(--accent);
@@ -4385,6 +4634,63 @@
   .tools-toggle {
     justify-self: end;
   }
+
+  .topbar-actions {
+    display: flex;
+    align-items: center;
+    align-self: stretch;
+    gap: 4px;
+  }
+
+  .window-controls {
+    display: flex;
+    align-self: stretch;
+    margin: 0 -10px 0 2px;
+  }
+
+  .window-controls button {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--ink-muted);
+  }
+
+  .window-controls button:hover {
+    background: color-mix(in srgb, var(--ink-strong) 8%, transparent);
+    color: var(--ink-strong);
+  }
+
+  .window-controls .window-close:hover {
+    background: #c4473d;
+    color: white;
+  }
+
+  .window-controls svg {
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.1;
+  }
+
+  .window-resize-edge,
+  .window-resize-corner {
+    position: fixed;
+    z-index: 200;
+  }
+
+  .window-resize-edge.north { top: 0; right: 7px; left: 7px; height: 5px; cursor: n-resize; }
+  .window-resize-edge.east { top: 7px; right: 0; bottom: 7px; width: 5px; cursor: e-resize; }
+  .window-resize-edge.south { right: 7px; bottom: 0; left: 7px; height: 5px; cursor: s-resize; }
+  .window-resize-edge.west { top: 7px; bottom: 7px; left: 0; width: 5px; cursor: w-resize; }
+  .window-resize-corner { width: 9px; height: 9px; }
+  .window-resize-corner.north-east { top: 0; right: 0; cursor: ne-resize; }
+  .window-resize-corner.north-west { top: 0; left: 0; cursor: nw-resize; }
+  .window-resize-corner.south-east { right: 0; bottom: 0; cursor: se-resize; }
+  .window-resize-corner.south-west { bottom: 0; left: 0; cursor: sw-resize; }
 
   .document-name {
     display: flex;
@@ -4501,6 +4807,35 @@
     font-size: 15px;
   }
 
+  .toolbar-icon-button {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-muted);
+  }
+
+  .toolbar-icon-button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--ink-strong) 6%, transparent);
+    color: var(--ink-strong);
+  }
+
+  .toolbar-icon-button:disabled { opacity: 0.38; }
+
+  .toolbar-icon-button svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.6;
+  }
+
   .italic-button {
     font-style: italic;
   }
@@ -4547,6 +4882,14 @@
     color: var(--ink-muted);
     text-align: left;
     white-space: nowrap;
+  }
+
+  .toolbar-menu button kbd {
+    float: right;
+    margin-left: 20px;
+    color: var(--ink-faint);
+    font-family: var(--ui-font);
+    font-size: var(--type-micro);
   }
 
   .toolbar-menu button:hover,
@@ -4622,6 +4965,58 @@
     background-blend-mode: soft-light, normal, normal;
     background-size: 320px 320px, auto, auto;
   }
+
+  .writing-surface {
+    position: absolute;
+    inset: 0 0 28px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .manuscript-pane,
+  .companion-pane {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .split-handle {
+    position: relative;
+    z-index: 6;
+    display: grid;
+    place-items: center;
+    width: 8px;
+    min-width: 8px;
+    border: 0;
+    border-right: 1px solid color-mix(in srgb, var(--rule) 74%, transparent);
+    border-left: 1px solid color-mix(in srgb, var(--rule) 74%, transparent);
+    background: var(--chrome);
+    padding: 0;
+    cursor: col-resize;
+  }
+
+  .split-handle span {
+    width: 2px;
+    height: 34px;
+    border-radius: 2px;
+    background: var(--rule-strong);
+  }
+
+  .split-handle:hover span,
+  .split-dragging .split-handle span { background: var(--accent); }
+
+  .split-dragging,
+  .split-dragging * { cursor: col-resize !important; user-select: none !important; }
+
+  .writing-surface.compact-companion {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .writing-surface.compact-companion .manuscript-pane,
+  .writing-surface.compact-companion .split-handle { display: none; }
 
   .panel {
     z-index: 10;
@@ -6492,8 +6887,7 @@
     }
 
     .style-select,
-    .toolbar-divider,
-    .compact-menu {
+    .toolbar-divider {
       display: none;
     }
   }
@@ -6557,6 +6951,23 @@
       min-height: 0;
       overflow: visible;
       background: #fff;
+    }
+
+    .writing-surface {
+      position: static;
+      display: block;
+      overflow: visible;
+    }
+
+    .manuscript-pane,
+    .split-handle,
+    .companion-pane:not(.preview-pane) {
+      display: none !important;
+    }
+
+    .companion-pane.preview-pane {
+      display: block;
+      overflow: visible;
     }
   }
 </style>
