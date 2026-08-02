@@ -45,6 +45,10 @@
   import { SingleFlight } from "$lib/single-flight";
   import { DeferredLatest } from "$lib/deferred-latest";
   import { externalSyncProvider } from "$lib/storage";
+  import {
+    compareVersionContent,
+    type VersionComparison,
+  } from "$lib/version-comparison";
   import type {
     AiAccountStatus,
     AiGrammarResponse,
@@ -145,6 +149,7 @@
   let linkUrl = $state("https://");
   let linkInput = $state<HTMLInputElement>();
   let advancedSettingsOpen = $state(false);
+  let chromeSuppressed = $state(false);
   let saveState = $state<SaveState>("saved");
   let saveError = $state("");
   let conflict = $state<ConflictState | null>(null);
@@ -167,6 +172,16 @@
   let watchedRepositoryPath = "";
   let versions = $state<VersionSummary[]>([]);
   let namedVersion = $state("");
+  let versionPreview = $state<{
+    version: VersionSummary;
+    documentPath: string;
+    currentContent: string;
+    content: string;
+    comparison: VersionComparison;
+  } | null>(null);
+  let versionRestoreBusy = $state(false);
+  let versionDialog = $state<HTMLElement>();
+  let versionCloseButton = $state<HTMLButtonElement>();
   let workspaceRoot = $state("");
   let searchQuery = $state("");
   let searchResults = $state<SearchResult[]>([]);
@@ -239,9 +254,13 @@
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let completionTimer: ReturnType<typeof setTimeout> | null = null;
+  let chromeStreakTimer: ReturnType<typeof setTimeout> | null = null;
+  let chromePauseTimer: ReturnType<typeof setTimeout> | null = null;
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let externalTimer: ReturnType<typeof setTimeout> | null = null;
   let repositoryTimer: ReturnType<typeof setTimeout> | null = null;
+  let versionPreviewRequest = 0;
+  let versionReturnFocus: HTMLElement | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
   let unlisteners: UnlistenFn[] = [];
   let lastSnapshotAt = 0;
@@ -914,7 +933,9 @@
         path: currentDocument.path,
       }).catch(() => undefined);
     }
+    resetVersionPreview(false);
     currentDocument = null;
+    resetChromeSuppression();
     cancelDocumentAnalysis();
     editorValue = "";
     analyzedValue = "";
@@ -1017,7 +1038,9 @@
         path: currentDocument.path,
       }).catch(() => undefined);
     }
+    resetVersionPreview(false);
     currentDocument = document;
+    resetChromeSuppression();
     cancelDocumentAnalysis();
     editorValue = document.content;
     analyzedValue = document.content;
@@ -1538,6 +1561,16 @@
     await toggleRight(lastRightPanel);
   }
 
+  function toggleSingleSheetMode(): void {
+    resetChromeSuppression();
+    preferences.focusSheetMode = !preferences.focusSheetMode;
+    if (preferences.focusSheetMode) {
+      leftPanel = null;
+      rightPanel = null;
+    }
+    savePreferences();
+  }
+
   async function selectLeftPanel(
     panel: Exclude<SidePanel, null>,
   ): Promise<void> {
@@ -1574,20 +1607,127 @@
     }
   }
 
-  async function restoreVersion(version: VersionSummary): Promise<void> {
+  async function previewVersion(version: VersionSummary): Promise<void> {
     if (!desktop || !currentDocument) return;
-    if (!window.confirm("현재 원고를 보관하고 이 버전으로 되돌릴까요?")) return;
+    const request = ++versionPreviewRequest;
+    const documentPath = currentDocument.path;
+    const returnFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     try {
-      await createSnapshot("restore");
       const stored = await invoke<StoredVersion>("load_version", {
         id: version.id,
       });
-      editorValue = stored.content;
+      if (
+        request !== versionPreviewRequest ||
+        currentDocument?.path !== documentPath
+      ) {
+        return;
+      }
+      const currentContent = editorValue;
+      versionReturnFocus = returnFocus;
+      versionPreview = {
+        version,
+        documentPath,
+        currentContent,
+        content: stored.content,
+        comparison: compareVersionContent(currentContent, stored.content),
+      };
+      await tick();
+      versionCloseButton?.focus();
+    } catch (error) {
+      if (request === versionPreviewRequest) {
+        notify(errorMessage(error), "error");
+      }
+    }
+  }
+
+  function resetVersionPreview(restoreFocus: boolean): void {
+    versionPreviewRequest += 1;
+    const returnFocus = versionReturnFocus;
+    versionPreview = null;
+    versionRestoreBusy = false;
+    versionDialog = undefined;
+    versionCloseButton = undefined;
+    versionReturnFocus = null;
+    if (restoreFocus && returnFocus?.isConnected) {
+      void tick().then(() => returnFocus.focus());
+    }
+  }
+
+  function closeVersionPreview(): void {
+    if (versionRestoreBusy) return;
+    resetVersionPreview(true);
+  }
+
+  function trapVersionPreviewFocus(event: KeyboardEvent): void {
+    if (event.key !== "Tab" || !versionDialog) return;
+    const focusable = Array.from(
+      versionDialog.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  async function confirmRestoreVersion(): Promise<void> {
+    if (
+      !versionPreview ||
+      versionRestoreBusy ||
+      !desktop ||
+      !currentDocument
+    ) {
+      return;
+    }
+    const preview = versionPreview;
+    if (currentDocument.path !== preview.documentPath) {
+      resetVersionPreview(false);
+      notify("원고가 바뀌어 이전 버전 비교를 닫았습니다.", "error");
+      return;
+    }
+    if (currentDocument.readOnly) {
+      notify("읽기 전용 원고는 이전 버전으로 되돌릴 수 없습니다.", "error");
+      return;
+    }
+    if (editorValue !== preview.currentContent) {
+      const currentContent = editorValue;
+      versionPreview = {
+        ...preview,
+        currentContent,
+        comparison: compareVersionContent(currentContent, preview.content),
+      };
+      notify("현재 원고가 바뀌어 비교 내용을 새로 계산했습니다.");
+      return;
+    }
+    versionRestoreBusy = true;
+    try {
+      await createSnapshot("restore");
+      if (currentDocument?.path !== preview.documentPath) {
+        throw new Error("복원 중 원고가 바뀌었습니다.");
+      }
+      editorValue = preview.content;
       scheduleDocumentAnalysis(editorValue);
       saveState = "dirty";
+      saveError = "";
       scheduleSave();
       notify("선택한 버전을 편집 화면에 복원했습니다.", "success");
+      versionRestoreBusy = false;
+      resetVersionPreview(true);
     } catch (error) {
+      versionRestoreBusy = false;
       notify(errorMessage(error), "error");
     }
   }
@@ -1773,6 +1913,51 @@
     if (completionTimer) clearTimeout(completionTimer);
     if (!preferences.autoComplete || selection.text || !currentDocument) return;
     completionTimer = setTimeout(() => void runAi("complete", true), 700);
+  }
+
+  function noteWritingActivity(): void {
+    if (!preferences.immersiveChrome || !currentDocument) return;
+    if (chromePauseTimer) clearTimeout(chromePauseTimer);
+    chromePauseTimer = setTimeout(() => {
+      chromePauseTimer = null;
+      chromeSuppressed = false;
+      if (chromeStreakTimer) {
+        clearTimeout(chromeStreakTimer);
+        chromeStreakTimer = null;
+      }
+    }, 1500);
+    if (!chromeStreakTimer) {
+      chromeStreakTimer = setTimeout(() => {
+        chromeSuppressed = true;
+        chromeStreakTimer = null;
+      }, 1800);
+    }
+  }
+
+  function clearChromeTimers(): void {
+    if (chromeStreakTimer) clearTimeout(chromeStreakTimer);
+    if (chromePauseTimer) clearTimeout(chromePauseTimer);
+    chromeStreakTimer = null;
+    chromePauseTimer = null;
+  }
+
+  function resetChromeSuppression(): void {
+    chromeSuppressed = false;
+    clearChromeTimers();
+  }
+
+  function revealChrome(): void {
+    resetChromeSuppression();
+  }
+
+  function saveImmersiveChromePreference(): void {
+    if (!preferences.immersiveChrome) resetChromeSuppression();
+    savePreferences();
+  }
+
+  function handleEditorActivity(): void {
+    scheduleCompletion();
+    noteWritingActivity();
   }
 
   async function chooseStyleReference(): Promise<void> {
@@ -2031,6 +2216,16 @@
   }
 
   function keyboardHandler(event: KeyboardEvent): void {
+    if (versionPreview) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeVersionPreview();
+        return;
+      }
+      trapVersionPreviewFocus(event);
+      if (event.metaKey || event.ctrlKey) event.preventDefault();
+      return;
+    }
     const command = event.metaKey || event.ctrlKey;
     if (!command) {
       const focusedPath =
@@ -2244,6 +2439,8 @@
     if (saveTimer) clearTimeout(saveTimer);
     if (searchTimer) clearTimeout(searchTimer);
     if (completionTimer) clearTimeout(completionTimer);
+    clearChromeTimers();
+    resetVersionPreview(false);
     if (toastTimer) clearTimeout(toastTimer);
     if (externalTimer) clearTimeout(externalTimer);
     if (repositoryTimer) clearTimeout(repositoryTimer);
@@ -2260,8 +2457,14 @@
   class:panel-left={leftPanel !== null}
   class:panel-right={rightPanel !== null}
   class="app-shell"
+  onmousemove={revealChrome}
 >
-  <header class="topbar">
+  <header
+    class:chrome-hidden={Boolean(currentDocument) &&
+      ((chromeSuppressed && preferences.immersiveChrome) ||
+        (preferences.focusSheetMode && viewMode === "manuscript"))}
+    class="topbar"
+  >
     <button
       class:active={leftPanel !== null}
       class="panel-toggle"
@@ -2395,6 +2598,12 @@
             <button class:active={viewMode === "source"} onclick={() => { toolbarMenu = null; void switchDocumentView("source"); }}>Markdown 원문</button>
             <button class:active={viewMode === "preview"} onclick={() => { toolbarMenu = null; void switchDocumentView("preview"); }}>완성본</button>
             <button onclick={() => { toolbarMenu = null; printCompletedDocument(); }}>인쇄·PDF</button>
+            <span class="toolbar-menu-divider"></span>
+            <button
+              class:active={preferences.focusSheetMode}
+              disabled={viewMode !== "manuscript"}
+              onclick={() => { toolbarMenu = null; toggleSingleSheetMode(); }}
+            >한 장만 보기</button>
           </div>
         {/if}
       </div>
@@ -2614,7 +2823,7 @@
           </p>
           <div class="version-list">
             {#each versions as version}
-              <button onclick={() => void restoreVersion(version)}>
+              <button onclick={() => void previewVersion(version)}>
                 <span class={`version-kind ${version.kind}`}>
                   {version.kind === "named"
                     ? "이름"
@@ -2656,12 +2865,14 @@
           focusMode={preferences.focusMode}
           typewriterMode={preferences.typewriterMode}
           soundEnabled={preferences.soundEnabled}
+          singleSheetMode={preferences.focusSheetMode}
+          typewriterImperfection={preferences.typewriterImperfection}
           showDiagnostics={preferences.manuscriptGuidance}
           {diagnostics}
           onready={(api) => (editorApi = api)}
           onchange={onEditorChange}
           onselection={handleEditorSelection}
-          onactivity={scheduleCompletion}
+          onactivity={handleEditorActivity}
           onghostaccept={() => notify("자동 완성을 반영했습니다.", "success")}
           onblockactivate={editDocumentBlock}
         />
@@ -2672,7 +2883,7 @@
           onready={(api) => (editorApi = api)}
           onchange={onEditorChange}
           onselection={handleEditorSelection}
-          onactivity={scheduleCompletion}
+          onactivity={handleEditorActivity}
         />
       {:else}
         {#if Preview}
@@ -3292,6 +3503,14 @@
                 <div><strong>절제된 타건음</strong><small>기본값은 꺼짐</small></div>
                 <input type="checkbox" bind:checked={preferences.soundEnabled} onchange={savePreferences} />
               </label>
+              <label class="switch-row">
+                <div><strong>몰입 중 도구막대 숨기기</strong><small>계속 타이핑하면 옅어지고, 마우스를 움직이거나 멈추면 다시 보임</small></div>
+                <input type="checkbox" bind:checked={preferences.immersiveChrome} onchange={saveImmersiveChromePreference} />
+              </label>
+              <label class="switch-row">
+                <div><strong>타자기 활자 느낌</strong><small>글자마다 미세하게 기울고 흔들리는 잉크 농담 표현</small></div>
+                <input type="checkbox" bind:checked={preferences.typewriterImperfection} onchange={savePreferences} />
+              </label>
             </section>
 
             <section class="panel-section advanced-settings">
@@ -3674,6 +3893,75 @@
   </div>
 {/if}
 
+{#if versionPreview}
+  <div class="modal-backdrop" role="presentation">
+    <div
+      class="modal version-compare-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="version-preview-title"
+      aria-describedby="version-preview-description"
+      aria-busy={versionRestoreBusy}
+      bind:this={versionDialog}
+    >
+      <header>
+        <div>
+          <p class="eyebrow">
+            버전 비교 · {versionPreview.version.name ??
+              displayDate(versionPreview.version.createdAt)}
+          </p>
+          <h2 id="version-preview-title">이 버전으로 되돌리면 이렇게 바뀝니다</h2>
+        </div>
+        <button
+          class="close-button"
+          aria-label="버전 비교 닫기"
+          disabled={versionRestoreBusy}
+          bind:this={versionCloseButton}
+          onclick={closeVersionPreview}
+        >×</button>
+      </header>
+      <div class="proof-sheet">
+        <span class="proof-sheet-stamp">교정</span>
+        {#each versionPreview.comparison.parts as part}
+          {#if part.removed}<del>{part.value}</del
+            >{:else if part.added}<ins>{part.value}</ins
+            >{:else}<span>{part.value}</span>{/if}
+        {/each}
+      </div>
+      <p class="panel-note" id="version-preview-description">
+        빨간 취소선은 지금 원고에서 사라질 부분, 삽입 표시(⌃)는 이 버전에서
+        되돌아올 부분입니다. 되돌리기 전 지금 원고도 자동으로 한 벌
+        보관합니다.
+        {#if versionPreview.comparison.granularity === "line"}
+          긴 원고이므로 줄 단위로 비교했습니다.
+        {:else if versionPreview.comparison.granularity === "coarse"}
+          차이가 매우 커 전체 변경 단위로 간략히 표시했습니다.
+        {/if}
+      </p>
+      <footer>
+        <button
+          class="secondary-button"
+          disabled={versionRestoreBusy}
+          onclick={closeVersionPreview}
+          >취소</button
+        >
+        <button
+          class="primary-button"
+          disabled={versionRestoreBusy ||
+            !versionPreview.comparison.changed ||
+            currentDocument?.readOnly}
+          onclick={() => void confirmRestoreVersion()}
+          >{versionRestoreBusy
+            ? "복원 준비 중…"
+            : versionPreview.comparison.changed
+              ? "이 버전으로 되돌리기"
+              : "현재 원고와 같습니다"}</button
+        >
+      </footer>
+    </div>
+  </div>
+{/if}
+
 {#if conflict}
   <div class="modal-backdrop" role="presentation">
     <section class="modal conflict-modal" role="alertdialog" aria-modal="true">
@@ -3783,7 +4071,18 @@
     border-bottom: 1px solid color-mix(in srgb, var(--rule) 68%, transparent);
     background: color-mix(in srgb, var(--paper) 93%, transparent);
     backdrop-filter: blur(12px);
-    transition: opacity 160ms ease;
+    transition: opacity 700ms ease;
+  }
+
+  .topbar.chrome-hidden {
+    opacity: 0.06;
+    transition: opacity 900ms ease;
+  }
+
+  .topbar.chrome-hidden:hover,
+  .topbar.chrome-hidden:focus-within {
+    opacity: 1;
+    transition: opacity 120ms ease;
   }
 
   .panel-toggle,
@@ -3988,6 +4287,12 @@
   .toolbar-menu button.active {
     background: var(--paper-deep);
     color: var(--ink-strong);
+  }
+
+  .toolbar-menu-divider {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--rule);
   }
 
   .link-popover {
@@ -5631,6 +5936,73 @@
     background: color-mix(in srgb, var(--danger) 15%, transparent);
     color: var(--danger);
     text-decoration: line-through;
+  }
+
+  .version-compare-modal {
+    width: min(820px, 94vw);
+  }
+
+  .proof-sheet {
+    position: relative;
+    max-height: 46vh;
+    overflow: auto;
+    border: 1px solid rgba(92, 70, 55, 0.18);
+    border-radius: 4px;
+    background: #fffdf7;
+    padding: 24px 22px 22px 34px;
+    color: #342d29;
+    font-family: MaruBuri, Georgia, serif;
+    font-size: var(--type-reading);
+    line-height: 2;
+    white-space: pre-wrap;
+  }
+
+  .proof-sheet::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 22px;
+    width: 1px;
+    background: rgba(174, 79, 69, 0.4);
+  }
+
+  .proof-sheet del {
+    color: rgba(151, 61, 52, 0.85);
+    background: rgba(151, 61, 52, 0.07);
+    text-decoration: line-through;
+    text-decoration-color: rgba(151, 61, 52, 0.75);
+  }
+
+  .proof-sheet ins {
+    color: rgba(151, 61, 52, 0.92);
+    background: rgba(151, 61, 52, 0.09);
+    text-decoration: none;
+    border-bottom: 2px solid rgba(151, 61, 52, 0.55);
+  }
+
+  .proof-sheet ins::before {
+    content: "⌃";
+    display: inline-block;
+    margin-right: 1px;
+    color: rgba(151, 61, 52, 0.7);
+    font-size: 0.7em;
+    vertical-align: top;
+  }
+
+  .proof-sheet-stamp {
+    position: absolute;
+    top: 10px;
+    right: 14px;
+    border: 1.5px solid rgba(151, 61, 52, 0.55);
+    border-radius: 3px;
+    padding: 1px 8px;
+    color: rgba(151, 61, 52, 0.78);
+    font-family: var(--ui-font);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    transform: rotate(-2deg);
   }
 
   .rationale,

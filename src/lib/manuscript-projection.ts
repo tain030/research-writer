@@ -2,8 +2,10 @@ import {
   caretPlacementForOffset,
   MANUSCRIPT_CELLS_PER_PAGE,
   MANUSCRIPT_COLUMNS,
+  type ManuscriptCell,
   type ManuscriptCaretPlacement,
   type ManuscriptLayout,
+  type ManuscriptPage,
 } from "./manuscript-layout";
 
 export interface ManuscriptOptimisticProjection {
@@ -62,6 +64,15 @@ export function projectManuscriptEdit(
   const start = caretPlacementForOffset(layout, edit.from, "forward");
   let absoluteCell =
     start.pageIndex * MANUSCRIPT_CELLS_PER_PAGE + start.cellIndex;
+  const startCell = layout.pages[start.pageIndex]?.cells[start.cellIndex];
+  if (
+    startCell?.filled &&
+    !startCell.virtual &&
+    !startCell.blockContinuation &&
+    start.slot >= start.slotCount
+  ) {
+    absoluteCell += 1;
+  }
   const cells: Record<number, string> = {};
   let cellsUsed = 0;
   let lineBreakRun = 0;
@@ -105,19 +116,61 @@ export function projectManuscriptEdit(
   }
   if (pendingHalfCell) advanceCell();
 
-  const safeAbsolute = Math.max(0, absoluteCell);
+  let safeAbsolute = Math.max(0, absoluteCell);
+  let caretSlot = 0;
+  if (
+    safeAbsolute > 0 &&
+    safeAbsolute % MANUSCRIPT_CELLS_PER_PAGE === 0 &&
+    !edit.inserted.includes("\n")
+  ) {
+    safeAbsolute -= 1;
+    caretSlot = 1;
+  }
   return {
     cells,
     caret: {
       pageIndex: Math.floor(safeAbsolute / MANUSCRIPT_CELLS_PER_PAGE),
       cellIndex: safeAbsolute % MANUSCRIPT_CELLS_PER_PAGE,
-      slot: 0,
+      slot: caretSlot,
       slotCount: 1,
     },
     caretOffset,
     deletedFrom: edit.from,
     deletedTo: edit.deletedTo,
   };
+}
+
+export function projectedPagesForRender(
+  canonical: ManuscriptPage[],
+  projection: ManuscriptOptimisticProjection | null,
+): ManuscriptPage[] {
+  if (!projection || projection.caret.pageIndex < canonical.length) {
+    return canonical;
+  }
+  const result = [...canonical];
+  const caretOffset = projection.caretOffset;
+  while (result.length <= projection.caret.pageIndex) {
+    result.push({
+      number: result.length + 1,
+      blocks: [],
+      endOffset: caretOffset,
+      cells: Array.from(
+        { length: MANUSCRIPT_CELLS_PER_PAGE },
+        (_, index): ManuscriptCell => ({
+          index,
+          row: Math.floor(index / MANUSCRIPT_COLUMNS),
+          column: index % MANUSCRIPT_COLUMNS,
+          text: "",
+          from: caretOffset,
+          to: caretOffset,
+          caretOffset,
+          filled: false,
+          tabContinuation: false,
+        }),
+      ),
+    });
+  }
+  return result;
 }
 
 function graphemes(value: string): string[] {

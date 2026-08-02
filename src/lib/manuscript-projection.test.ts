@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { layoutManuscript, MANUSCRIPT_COLUMNS } from "./manuscript-layout";
-import { contiguousEdit, projectManuscriptEdit } from "./manuscript-projection";
+import {
+  contiguousEdit,
+  projectManuscriptEdit,
+  projectedPagesForRender,
+} from "./manuscript-projection";
 
 describe("optimistic manuscript projection", () => {
   it("finds one contiguous edit without parsing Markdown", () => {
@@ -38,5 +42,44 @@ describe("optimistic manuscript projection", () => {
     )!;
 
     expect(projection.caret.cellIndex % MANUSCRIPT_COLUMNS).toBe(1);
+  });
+
+  it("projects an appended character onto a new page after a full sheet", () => {
+    const source = "가".repeat(299);
+    const layout = layoutManuscript(source);
+    const projection = projectManuscriptEdit(
+      layout,
+      source,
+      `${source}나`,
+      source.length + 1,
+    )!;
+
+    expect(projection.cells[400]).toBe("나");
+    expect(projection.cells[399]).toBeUndefined();
+    expect(projection.caret.pageIndex).toBe(1);
+    expect(projection.caret.cellIndex).toBe(1);
+    const rendered = projectedPagesForRender(layout.pages, projection);
+    expect(rendered).toHaveLength(2);
+    expect(rendered[1].cells).toHaveLength(400);
+    expect(rendered[1].number).toBe(2);
+  });
+
+  it("keeps the caret on the last cell when an edit only fills that sheet", () => {
+    const source = "가".repeat(298);
+    const layout = layoutManuscript(source);
+    const projection = projectManuscriptEdit(
+      layout,
+      source,
+      `${source}나`,
+      source.length + 1,
+    )!;
+
+    expect(projection.cells[399]).toBe("나");
+    expect(projection.caret).toMatchObject({
+      pageIndex: 0,
+      cellIndex: 399,
+      slot: 1,
+    });
+    expect(projectedPagesForRender(layout.pages, projection)).toHaveLength(1);
   });
 });

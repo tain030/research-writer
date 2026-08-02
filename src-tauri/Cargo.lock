@@ -3532,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "research-writer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",

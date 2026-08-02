@@ -95,6 +95,73 @@ describe("manuscript editor input", () => {
     unmount(component);
   });
 
+  it("plays one keystroke sound when Korean IME composition finishes", async () => {
+    const oscillatorStart = vi.fn();
+    class FakeAudioContext {
+      state = "running";
+      currentTime = 0;
+      destination = {};
+      createOscillator() {
+        return {
+          type: "triangle",
+          frequency: {
+            value: 0,
+            setValueAtTime: vi.fn(),
+            exponentialRampToValueAtTime: vi.fn(),
+          },
+          connect: vi.fn(),
+          start: oscillatorStart,
+          stop: vi.fn(),
+        };
+      }
+      createGain() {
+        return {
+          gain: {
+            setValueAtTime: vi.fn(),
+            linearRampToValueAtTime: vi.fn(),
+            exponentialRampToValueAtTime: vi.fn(),
+          },
+          connect: vi.fn(),
+        };
+      }
+      resume() {
+        return Promise.resolve();
+      }
+      close() {
+        return Promise.resolve();
+      }
+    }
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Editor, {
+      target,
+      props: {
+        value: "",
+        fallbackTitle: "제목",
+        soundEnabled: true,
+      },
+    });
+    await tick();
+
+    const input = target.querySelector("textarea")!;
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    input.value = "한";
+    const composingInput = new InputEvent("input", {
+      bubbles: true,
+      data: "한",
+      inputType: "insertCompositionText",
+    });
+    Object.defineProperty(composingInput, "isComposing", { value: true });
+    input.dispatchEvent(composingInput);
+    expect(oscillatorStart).not.toHaveBeenCalled();
+
+    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    expect(oscillatorStart).toHaveBeenCalledTimes(1);
+    unmount(component);
+  });
+
   it("moves repeated Enter breaks to distinct manuscript rows", async () => {
     const changes: string[] = [];
     const target = document.createElement("div");
@@ -220,4 +287,5 @@ describe("manuscript editor input", () => {
     expect(worker.requests[1].source).toBe(`${initial}나다`);
     unmount(component);
   });
+
 });

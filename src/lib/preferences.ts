@@ -9,6 +9,9 @@ export interface Preferences {
   autoComplete: boolean;
   manuscriptGuidance: boolean;
   theme: "system" | "light" | "dark";
+  immersiveChrome: boolean;
+  typewriterImperfection: boolean;
+  focusSheetMode: boolean;
 }
 
 export const defaultPreferences: Preferences = {
@@ -20,6 +23,9 @@ export const defaultPreferences: Preferences = {
   autoComplete: false,
   manuscriptGuidance: true,
   theme: "system",
+  immersiveChrome: false,
+  typewriterImperfection: false,
+  focusSheetMode: false,
 };
 
 export function parsePreferences(stored: string | null): Preferences {
@@ -65,6 +71,18 @@ export function parsePreferences(stored: string | null): Preferences {
       theme: ["system", "light", "dark"].includes(candidate.theme ?? "")
         ? (candidate.theme as Preferences["theme"])
         : defaultPreferences.theme,
+      immersiveChrome:
+        typeof candidate.immersiveChrome === "boolean"
+          ? candidate.immersiveChrome
+          : defaultPreferences.immersiveChrome,
+      typewriterImperfection:
+        typeof candidate.typewriterImperfection === "boolean"
+          ? candidate.typewriterImperfection
+          : defaultPreferences.typewriterImperfection,
+      focusSheetMode:
+        typeof candidate.focusSheetMode === "boolean"
+          ? candidate.focusSheetMode
+          : defaultPreferences.focusSheetMode,
     };
   } catch {
     return { ...defaultPreferences };

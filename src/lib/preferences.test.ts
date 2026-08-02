@@ -40,4 +40,25 @@ describe("writing preferences", () => {
       parsePreferences('{"manuscriptGuidance":false}').manuscriptGuidance,
     ).toBe(false);
   });
+
+  it("migrates immersive writing options without changing old profiles", () => {
+    expect(parsePreferences("{}")).toMatchObject({
+      immersiveChrome: false,
+      typewriterImperfection: false,
+      focusSheetMode: false,
+    });
+    expect(
+      parsePreferences(
+        JSON.stringify({
+          immersiveChrome: true,
+          typewriterImperfection: true,
+          focusSheetMode: true,
+        }),
+      ),
+    ).toMatchObject({
+      immersiveChrome: true,
+      typewriterImperfection: true,
+      focusSheetMode: true,
+    });
+  });
 });

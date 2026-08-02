@@ -54,6 +54,7 @@ chmod +x research-writer_amd64.AppImage
 
 - Pretendard를 원고 기본 글꼴로 제공, MaruBuri·NanumGothicCoding 및 설치된 시스템 글꼴 선택
 - Markdown 문법은 감추고 완성될 글을 조판하는 20×20 행간 원고지와 80–140% 확대·축소
+- 현재 장만 중앙에 두고 매수 도장·종이 결·절제된 장 넘김을 더하는 한 장 보기
 - 본문·제목·인용·목록, 굵게·기울임·링크만 담은 한 줄 의미 기반 Markdown 도구막대
 - 제목·부제·장르·소속·작성자를 첫 장에 전통 방식으로 배치하는 호환 가능한 YAML 원고 정보
 - 문단 첫 칸, 인용·목록 들여쓰기, 영문 소문자·숫자 두 자 한 칸, 줄 끝 문장 부호와 줄임표 안내
@@ -65,8 +66,8 @@ chmod +x research-writer_amd64.AppImage
 - 직렬화된 300ms 자동 저장, 원래 줄바꿈과 UTF-8 BOM 보존, 임시 파일·fsync·원자 교체
 - 자동 저장과 종료가 겹쳐도 마지막 편집까지 저장한 뒤 끝내는 안전한 종료 절차
 - 외부 변경 감지, 해시 기반 낙관적 잠금, 3-way 병합과 충돌 양쪽 버전 보관
-- 문단·문장 집중 모드, 타자기 스크롤, 선택 가능한 절제된 타건음
-- 로컬 SQLite 압축 버전 기록, 이름 있는 버전, Markdown 폴더 전체 검색
+- 문단·문장 집중 모드, 타자기 스크롤, 몰입 중 도구막대 숨김과 선택 가능한 활자 불균일·타건음
+- 로컬 SQLite 압축 버전 기록, 이름 있는 버전, 복원 전 교정지 비교와 Markdown 폴더 전체 검색
 - Codex App Server와 ChatGPT OAuth를 이용한 다듬기·축약·확장·논리 점검·반론·근거 강화·자동 이어쓰기
 - 선택·현재 문단·전체 범위를 명시적으로 보내는 AI 맞춤법·문법 검사와 변경별 diff 승인
 - AI 적용 전 버전 보관, 원문과 제안의 diff 확인, 명시적 수락 전 원고 불변
@@ -114,11 +115,11 @@ sudo apt install \
 전체 CI, Linux x86_64 패키징, 체크섬 생성과 GitHub Release 공개를 수행합니다.
 
 ```bash
-pnpm release:version 0.3.0
+pnpm release:version 0.4.0
 git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "Release v0.3.0"
-git tag -a v0.3.0 -m "Research Writer v0.3.0"
-git push origin main v0.3.0
+git commit -m "Release v0.4.0"
+git tag -a v0.4.0 -m "Research Writer v0.4.0"
+git push origin main v0.4.0
 ```
 
 태그는 `v숫자.숫자.숫자` 형식이어야 하며 `main`에 포함된 커밋만 릴리스할 수

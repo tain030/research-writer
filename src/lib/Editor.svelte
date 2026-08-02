@@ -18,6 +18,7 @@
   } from "./manuscript-layout.worker";
   import {
     projectManuscriptEdit,
+    projectedPagesForRender,
     type ManuscriptOptimisticProjection,
   } from "./manuscript-projection";
   import {
@@ -54,6 +55,8 @@
     focusMode?: FocusMode;
     typewriterMode?: boolean;
     soundEnabled?: boolean;
+    singleSheetMode?: boolean;
+    typewriterImperfection?: boolean;
     showDiagnostics?: boolean;
     diagnostics?: WritingDiagnostic[];
     onready?: (api: EditorApi | null) => void;
@@ -73,6 +76,8 @@
     focusMode = "off",
     typewriterMode = true,
     soundEnabled = false,
+    singleSheetMode = false,
+    typewriterImperfection = false,
     showDiagnostics = true,
     diagnostics = [],
     onready,
@@ -106,6 +111,7 @@
   let contentRevision = 0;
   let lastSelectionSignature = "";
   let audioContext: AudioContext | null = null;
+  let pendingPageAnnounce = false;
   let manuscript = $state<ManuscriptLayout>(
     layoutManuscript("", "제목 없는 원고"),
   );
@@ -125,6 +131,7 @@
     Math.min(140, Math.max(80, manuscriptZoom)) / 100,
   );
   let pages = $derived(manuscript.pages);
+  let renderPages = $derived(projectedPagesForRender(pages, optimisticProjection));
   let lineStarts = $derived(lineStartOffsets(internalValue));
   let diagnosticIndex = $derived(
     createDiagnosticIndex(showDiagnostics ? diagnostics : []),
@@ -156,7 +163,7 @@
       selectionDirection === "backward" ? selectionFrom : selectionTo;
     const line = lineNumberAtOffset(lineStarts, head);
     const page = activePageIndex + 1;
-    const cell = pages[activePageIndex]?.cells[activeCellIndex];
+    const cell = renderPages[activePageIndex]?.cells[activeCellIndex];
     return {
       from,
       to,
@@ -195,6 +202,7 @@
       internalValue = input.value;
       contentRevision += 1;
       caretAffinity = "forward";
+      pendingPageAnnounce = true;
       requestManuscriptLayout(
         internalValue,
         input.selectionDirection === "backward"
@@ -206,7 +214,9 @@
     syncSelection();
     if (changed || forceNotify) onchange?.(internalValue, context);
     if (!context.composing && (changed || forceNotify)) onactivity?.();
-    if (playSound && changed && !context.composing) playKeystroke();
+    if (playSound && (changed || forceNotify) && !context.composing) {
+      playKeystroke();
+    }
     scheduleCaretScroll();
   }
 
@@ -279,7 +289,7 @@
 
   function handleCompositionEnd(): void {
     composing = false;
-    commitInput(false, { composing: false }, true);
+    commitInput(true, { composing: false }, true);
   }
 
   const ASYNC_LAYOUT_THRESHOLD = 4_000;
@@ -297,7 +307,7 @@
         layoutWorkerBusy = false;
         const response = event.data;
         if (response.revision === layoutRevision) {
-          manuscript = response.layout;
+          commitManuscript(response.layout);
           manuscriptSource = response.source;
           layoutPending = false;
           optimisticProjection = null;
@@ -325,8 +335,17 @@
     layoutWorker.postMessage(request);
   }
 
+  function commitManuscript(next: ManuscriptLayout): void {
+    const shouldAnnounce = pendingPageAnnounce;
+    pendingPageAnnounce = false;
+    if (shouldAnnounce && next.pages.length > manuscript.pages.length) {
+      playPageComplete();
+    }
+    manuscript = next;
+  }
+
   function applyLayoutSynchronously(source: string, title: string): void {
-    manuscript = layoutManuscript(source, title);
+    commitManuscript(layoutManuscript(source, title));
     manuscriptSource = source;
     requestedLayoutSource = source;
     requestedLayoutTitle = title;
@@ -554,6 +573,8 @@
         ? "\n"
         : paragraphBreakAt(selectionFrom, selectionTo);
       applyReplacement(selectionFrom, selectionTo, insertion);
+      if (event.shiftKey) playKeystroke();
+      else playCarriageReturn();
       return;
     }
     if (
@@ -690,6 +711,7 @@
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = null;
+      if (!scroller) return;
       const firstPage =
         scroller.querySelector<HTMLElement>(".manuscript-page");
       const pageStride = firstPage
@@ -811,20 +833,26 @@
     });
   }
 
+  function ensureAudioContext(): AudioContext | null {
+    const AudioContextClass =
+      window.AudioContext ??
+      (
+        window as typeof window & {
+          webkitAudioContext?: typeof AudioContext;
+        }
+      ).webkitAudioContext;
+    if (!AudioContextClass) return null;
+    const context = audioContext ?? new AudioContextClass();
+    audioContext = context;
+    if (context.state === "suspended") void context.resume();
+    return context;
+  }
+
   function playKeystroke(): void {
     if (!soundEnabled) return;
     try {
-      const AudioContextClass =
-        window.AudioContext ??
-        (
-          window as typeof window & {
-            webkitAudioContext?: typeof AudioContext;
-          }
-        ).webkitAudioContext;
-      if (!AudioContextClass) return;
-      const context = audioContext ?? new AudioContextClass();
-      audioContext = context;
-      if (context.state === "suspended") void context.resume();
+      const context = ensureAudioContext();
+      if (!context) return;
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.type = "triangle";
@@ -843,6 +871,57 @@
     }
   }
 
+  function playCarriageReturn(): void {
+    if (!soundEnabled) return;
+    try {
+      const context = ensureAudioContext();
+      if (!context) return;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "triangle";
+      oscillator.frequency.setValueAtTime(260, context.currentTime);
+      oscillator.frequency.exponentialRampToValueAtTime(
+        120,
+        context.currentTime + 0.11,
+      );
+      gain.gain.setValueAtTime(0.05, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        context.currentTime + 0.13,
+      );
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.14);
+    } catch {
+      // Carriage-return sound is optional and must never block writing.
+    }
+  }
+
+  function playPageComplete(): void {
+    if (!soundEnabled) return;
+    try {
+      const context = ensureAudioContext();
+      if (!context) return;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 920;
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.linearRampToValueAtTime(0.045, context.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        context.currentTime + 0.5,
+      );
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.52);
+    } catch {
+      // Page-complete chime is optional and must never block writing.
+    }
+  }
+
   function segmentGraphemes(text: string): string[] {
     if (!text) return [];
     if (graphemeSegmenter) {
@@ -852,6 +931,38 @@
       );
     }
     return Array.from(text);
+  }
+
+  function paperGrainSeed(pageNumber: number, salt: number): number {
+    const value = Math.sin(pageNumber * 12.9898 + salt * 78.233) * 43758.5453;
+    return value - Math.floor(value);
+  }
+
+  function paperGrainStyle(pageNumber: number): string {
+    const x1 = (6 + paperGrainSeed(pageNumber, 1) * 18).toFixed(1);
+    const y1 = (8 + paperGrainSeed(pageNumber, 2) * 22).toFixed(1);
+    const x2 = (66 + paperGrainSeed(pageNumber, 3) * 22).toFixed(1);
+    const y2 = (58 + paperGrainSeed(pageNumber, 4) * 26).toFixed(1);
+    const stampTilt = (paperGrainSeed(pageNumber, 5) * 3 - 1.5).toFixed(2);
+    return `--blot-1: ${x1}% ${y1}%; --blot-2: ${x2}% ${y2}%; --stamp-tilt: ${stampTilt}deg;`;
+  }
+
+  const glyphJitterVariants = Array.from({ length: 64 }, (_, seed) => {
+    const dx = (paperGrainSeed(seed, 8) - 0.5) * 1.4;
+    const dy = (paperGrainSeed(seed, 9) - 0.5) * 2.6;
+    const rotation = (paperGrainSeed(seed, 10) - 0.5) * 3.2;
+    const inkStrength = (0.86 + paperGrainSeed(seed, 11) * 0.14).toFixed(2);
+    return `transform: translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px) rotate(${rotation.toFixed(2)}deg); opacity: ${inkStrength};`;
+  });
+
+  function glyphJitterStyle(
+    pageIndex: number,
+    cellIndex: number,
+  ): string | undefined {
+    if (!typewriterImperfection) return undefined;
+    return glyphJitterVariants[
+      (pageIndex * 17 + cellIndex) % glyphJitterVariants.length
+    ];
   }
 
   function lineStartOffsets(content: string): number[] {
@@ -1002,14 +1113,19 @@
     bind:this={scroller}
     onscroll={handleScroll}
   >
-    <div class="page-stack">
-      {#each pages as page, pageIndex (page.number)}
+    <div class:single-sheet={singleSheetMode} class="page-stack">
+      {#each renderPages as page, pageIndex (page.number)}
+        {#if !singleSheetMode || pageIndex === activePageIndex}
         <section
           class:active-page={pageIndex === activePageIndex}
           class="manuscript-page"
           aria-label={`원고지 ${page.number}쪽`}
+          style={paperGrainStyle(page.number)}
         >
-          <span class="page-number">NO. {page.number}</span>
+          <span class="page-number">
+            <span class="page-number-stamp">제 {page.number}매</span>
+            <span class="page-number-total">/ 총 {renderPages.length}매</span>
+          </span>
           <div class="page-caption">20 × 20</div>
           <div class="manuscript-grid">
             {#if pageIsRendered(pageIndex)}
@@ -1061,7 +1177,10 @@
                   {#if optimistic}
                     <span class="cell-text optimistic-text">{optimistic}</span>
                   {:else if cell.text}
-                    <span class="cell-text">{cell.text}</span>
+                    <span
+                      class="cell-text"
+                      style={glyphJitterStyle(pageIndex, cellIndex)}
+                    >{cell.text}</span>
                   {:else if ghost}
                     <span class="ghost-text">{ghost}</span>
                   {/if}
@@ -1100,6 +1219,7 @@
             {/if}
           </div>
         </section>
+        {/if}
       {/each}
     </div>
   </div>
@@ -1166,6 +1286,20 @@
     padding: 56px 42px 120px;
   }
 
+  .page-stack.single-sheet {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: max-content;
+    min-height: 100%;
+    padding: 32px;
+  }
+
+  .page-stack.single-sheet .manuscript-page {
+    margin: 0;
+    animation: page-feed 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
   .manuscript-page {
     position: relative;
     width: var(--paper-width);
@@ -1174,8 +1308,8 @@
     border: 1px solid rgba(92, 70, 55, 0.18);
     border-radius: 2px;
     background:
-      radial-gradient(circle at 12% 18%, rgba(125, 101, 75, 0.025), transparent 28%),
-      radial-gradient(circle at 78% 72%, rgba(125, 101, 75, 0.022), transparent 32%),
+      radial-gradient(circle at var(--blot-1, 12% 18%), rgba(125, 101, 75, 0.025), transparent 28%),
+      radial-gradient(circle at var(--blot-2, 78% 72%), rgba(125, 101, 75, 0.022), transparent 32%),
       #fffdf7;
     box-shadow:
       0 2px 4px rgba(49, 39, 29, 0.09),
@@ -1189,10 +1323,10 @@
       0 20px 55px rgba(49, 39, 29, 0.2);
   }
 
-  .page-number,
   .page-caption {
     position: absolute;
     top: calc(var(--grid-top) / 2);
+    left: var(--grid-left);
     color: rgba(135, 64, 57, 0.72);
     font-family: var(--ui-font);
     font-size: 11px;
@@ -1200,11 +1334,31 @@
   }
 
   .page-number {
+    position: absolute;
+    top: calc(var(--grid-top) / 2 - 3px);
     right: var(--grid-left);
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: var(--ui-font);
   }
 
-  .page-caption {
-    left: var(--grid-left);
+  .page-number-stamp {
+    display: inline-block;
+    border: 1.5px solid rgba(151, 61, 52, 0.55);
+    border-radius: 3px;
+    padding: 1px 7px;
+    color: rgba(151, 61, 52, 0.78);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    transform: rotate(var(--stamp-tilt, -1deg));
+  }
+
+  .page-number-total {
+    color: rgba(135, 64, 57, 0.5);
+    font-size: 10px;
+    letter-spacing: 0.08em;
   }
 
   .manuscript-grid {
@@ -1473,12 +1627,23 @@
     }
   }
 
+  @keyframes page-feed {
+    from {
+      transform: translateY(46px);
+      opacity: 0;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .manuscript-cell {
       transition: none;
     }
 
     .manuscript-cell.active-cell::after {
+      animation: none;
+    }
+
+    .page-stack.single-sheet .manuscript-page {
       animation: none;
     }
   }
