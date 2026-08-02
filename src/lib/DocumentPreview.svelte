@@ -19,6 +19,11 @@
     PreviewRenderResponse,
   } from "./preview-render.worker";
   import { renderManuscriptHtml } from "./render-manuscript";
+  import {
+    calculateContainedPageScale,
+    PAGE_FIT_INSET,
+    PAGE_FIT_SAFETY,
+  } from "./manuscript-fit";
   import type { ManuscriptFitMode, ScrollAnchor } from "./types";
 
   interface AssetData {
@@ -68,6 +73,7 @@
   let viewportWidth = $state(A4_WIDTH_PX);
   let viewportHeight = $state(A4_HEIGHT_PX);
   let viewportObserver: ResizeObserver | null = null;
+  let viewedPageIndex = $state(0);
   let renderWorker: Worker | null = null;
   let renderTimer: ReturnType<typeof setTimeout> | null = null;
   let layoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -92,16 +98,26 @@
   let previewScale = $derived(
     calculatePreviewScale(viewportWidth, viewportHeight, fitMode),
   );
+  let displayedPageIndex = $derived(
+    Math.max(0, Math.min(viewedPageIndex, pages.length - 1)),
+  );
 
   function calculatePreviewScale(
     width: number,
     height: number,
     mode: ManuscriptFitMode,
   ): number {
-    const widthScale = (Math.max(240, width) - 30) / A4_WIDTH_PX;
-    if (mode === "width") return Math.max(0.28, Math.min(1.35, widthScale));
-    const heightScale = (Math.max(300, height) - 64) / A4_HEIGHT_PX;
-    return Math.max(0.28, Math.min(1, widthScale, heightScale));
+    if (mode === "page") {
+      return calculateContainedPageScale({
+        viewport: { width, height },
+        page: { width: A4_WIDTH_PX, height: A4_HEIGHT_PX },
+      });
+    }
+    const widthScale =
+      (Math.max(1, width) - PAGE_FIT_INSET * 2 - PAGE_FIT_SAFETY) /
+      A4_WIDTH_PX;
+    if (mode === "width") return Math.max(0.001, Math.min(1.35, widthScale));
+    return widthScale;
   }
 
   function startRenderWorker(): void {
@@ -593,6 +609,12 @@
 
   function currentScrollAnchor(): ScrollAnchor {
     if (!scroller) return { offset: 0, source: "preview" };
+    if (fitMode === "page") {
+      return {
+        offset: pages[displayedPageIndex]?.sourceFrom ?? 0,
+        source: "preview",
+      };
+    }
     const scrollerRect = scroller.getBoundingClientRect();
     const elements = Array.from(
       scroller.querySelectorAll<HTMLElement>("[data-source-from]"),
@@ -612,6 +634,7 @@
   }
 
   function handleScroll(): void {
+    if (fitMode === "page") return;
     if (scrollFrame !== null) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = null;
@@ -621,6 +644,14 @@
 
   function scrollToAnchor(anchor: ScrollAnchor): void {
     if (!scroller) return;
+    if (fitMode === "page") {
+      const containingPage = pages.findIndex(
+        (page) =>
+          anchor.offset >= page.sourceFrom && anchor.offset <= page.sourceTo,
+      );
+      if (containingPage >= 0) viewedPageIndex = containingPage;
+      return;
+    }
     const elements = Array.from(
       scroller.querySelectorAll<HTMLElement>("[data-source-from]"),
     );
@@ -640,6 +671,26 @@
     if (!target) return;
     const scrollerTop = scroller.getBoundingClientRect().top;
     scroller.scrollTop += target.getBoundingClientRect().top - scrollerTop - 54;
+  }
+
+  function changePage(direction: -1 | 1): void {
+    const nextPage = Math.max(
+      0,
+      Math.min(displayedPageIndex + direction, pages.length - 1),
+    );
+    if (nextPage === displayedPageIndex) return;
+    viewedPageIndex = nextPage;
+    onscrollanchor?.({
+      offset: pages[nextPage]?.sourceFrom ?? 0,
+      source: "preview",
+    });
+  }
+
+  function handlePageKeydown(event: KeyboardEvent): void {
+    if (fitMode !== "page") return;
+    if (event.key !== "PageUp" && event.key !== "PageDown") return;
+    event.preventDefault();
+    changePage(event.key === "PageUp" ? -1 : 1);
   }
 
   function handleClick(event: MouseEvent): void {
@@ -707,6 +758,12 @@
     schedulePagination();
   });
 
+  $effect(() => {
+    const pageCount = pages.length;
+    const current = viewedPageIndex;
+    if (current >= pageCount) viewedPageIndex = Math.max(0, pageCount - 1);
+  });
+
   onDestroy(() => {
     mounted = false;
     if (renderTimer) clearTimeout(renderTimer);
@@ -722,8 +779,11 @@
 </script>
 
 <div
+  class:fit-page={fitMode === "page"}
   class="preview-scroll"
   class:layout-busy={layoutBusy || renderBusy}
+  role="region"
+  aria-label="완성본 미리보기"
   bind:this={scroller}
   onscroll={handleScroll}
   use:interceptLinks
@@ -733,10 +793,12 @@
     <span>완성본 · A4</span>
     {#if layoutBusy || renderBusy}<small>조판 중…</small>{/if}
   </div>
-  <div class="preview-page-stack">
+  <div class:fit-page={fitMode === "page"} class="preview-page-stack">
     {#each pages as page, index (`${index}:${page.sourceFrom}:${page.sourceTo}`)}
       <div
+        class:page-fit-hidden={fitMode === "page" && index !== displayedPageIndex}
         class="preview-page-slot"
+        aria-hidden={fitMode === "page" && index !== displayedPageIndex}
         style={`width:${A4_WIDTH_PX * previewScale}px;height:${A4_HEIGHT_PX * previewScale}px`}
       >
         <article
@@ -773,6 +835,26 @@
     {/each}
   </div>
 
+  {#if fitMode === "page"}
+    <nav class="preview-page-navigator" aria-label="완성본 쪽 이동">
+      <button
+        aria-label="이전 쪽"
+        title="이전 쪽 (Page Up)"
+        disabled={displayedPageIndex === 0}
+        onkeydown={handlePageKeydown}
+        onclick={() => changePage(-1)}
+      >‹</button>
+      <span aria-live="polite">{displayedPageIndex + 1} / {pages.length}</span>
+      <button
+        aria-label="다음 쪽"
+        title="다음 쪽 (Page Down)"
+        disabled={displayedPageIndex >= pages.length - 1}
+        onkeydown={handlePageKeydown}
+        onclick={() => changePage(1)}
+      >›</button>
+    </nav>
+  {/if}
+
   <div class="preview-measure" aria-hidden="true">
     <article class="preview-page">
       <div class="preview-page-inner" bind:this={measureInner}>
@@ -796,6 +878,7 @@
 
 <style>
   .preview-scroll {
+    position: relative;
     height: 100%;
     min-width: 0;
     overflow: auto;
@@ -806,13 +889,20 @@
     scrollbar-gutter: stable;
   }
 
+  .preview-scroll.fit-page {
+    overflow: hidden;
+    scrollbar-gutter: auto;
+    outline: none;
+  }
+
   .preview-toolbar-note {
-    position: sticky;
+    position: absolute;
     z-index: 5;
-    top: 8px;
+    top: 10px;
+    right: 12px;
     display: flex;
     width: max-content;
-    margin: 8px 12px -34px auto;
+    margin: 0;
     gap: 8px;
     border: 1px solid color-mix(in srgb, var(--rule) 75%, transparent);
     border-radius: 999px;
@@ -834,6 +924,60 @@
     gap: 28px;
     min-width: max-content;
     padding: 48px 20px 100px;
+  }
+
+  .preview-page-stack.fit-page {
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    gap: 0;
+    padding: 16px;
+  }
+
+  .preview-page-slot.page-fit-hidden {
+    display: none;
+  }
+
+  .preview-page-navigator {
+    position: absolute;
+    z-index: 6;
+    bottom: 10px;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    transform: translateX(-50%);
+    border: 1px solid color-mix(in srgb, var(--control-border) 76%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--control-bg) 92%, transparent);
+    padding: 3px;
+    box-shadow: var(--shadow-contact);
+    color: var(--control-fg-muted);
+    font-family: var(--ui-font);
+    font-size: var(--type-micro);
+    backdrop-filter: blur(7px);
+  }
+
+  .preview-page-navigator button {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 24px;
+    border-radius: 999px;
+    color: var(--control-fg-muted);
+    font-size: 19px;
+    line-height: 1;
+  }
+
+  .preview-page-navigator button:hover:not(:disabled) {
+    background: var(--control-bg-hover);
+    color: var(--control-fg);
+  }
+
+  .preview-page-navigator span {
+    min-width: 46px;
+    text-align: center;
   }
 
   .preview-page-slot { position: relative; flex: 0 0 auto; }
@@ -1051,8 +1195,18 @@
       overflow: visible;
       background: white;
     }
+    .preview-scroll.fit-page { height: auto; overflow: visible; }
     .preview-toolbar-note, .preview-measure { display: none; }
-    .preview-page-stack { display: block; min-width: 0; padding: 0; }
+    .preview-page-navigator { display: none; }
+    .preview-page-stack,
+    .preview-page-stack.fit-page {
+      display: block;
+      width: auto;
+      min-width: 0;
+      height: auto;
+      padding: 0;
+    }
+    .preview-page-slot.page-fit-hidden { display: block; }
     .preview-page-slot { width: 210mm !important; height: 297mm !important; }
     .preview-page {
       position: relative;

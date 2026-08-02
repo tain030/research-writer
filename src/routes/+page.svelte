@@ -2800,7 +2800,7 @@
       {/if}
     </div>
 
-    <div class="writing-toolbar" aria-label="글쓰기 도구">
+    <div class="formatting-toolbar" aria-label="글쓰기 서식">
       <label class="toolbar-select style-select" title="문단의 의미 구조">
         <span class="sr-only">문단 스타일</span>
         <select
@@ -2846,15 +2846,24 @@
         disabled={formattingDisabled}
         onclick={() => void formatInline("emphasis")}
       >가</button>
+    </div>
+
+    <div class="document-toolbar" aria-label="문서 작업">
       <div class="toolbar-menu-host compact-menu">
         <button
           class:active={toolbarMenu === "insert" || toolbarMenu === "link"}
-          class="toolbar-text-button"
+          class="toolbar-text-button toolbar-menu-button"
+          aria-label="삽입 메뉴"
+          title="삽입"
           aria-haspopup="menu"
           aria-expanded={toolbarMenu === "insert" || toolbarMenu === "link"}
           disabled={formattingDisabled}
           onclick={(event) => void toggleToolbarMenu("insert", event.currentTarget)}
-        >삽입⌄</button>
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
+          <span class="toolbar-menu-label">삽입</span>
+          <svg class="toolbar-chevron" aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
+        </button>
         {#if toolbarMenu === "insert"}
           <div
             class="toolbar-popover toolbar-menu"
@@ -2893,12 +2902,18 @@
       <div class="toolbar-menu-host compact-menu">
         <button
           class:active={toolbarMenu === "view"}
-          class="toolbar-text-button"
+          class="toolbar-text-button toolbar-menu-button"
+          aria-label="보기 메뉴"
+          title="보기 설정"
           aria-haspopup="menu"
           aria-expanded={toolbarMenu === "view"}
           disabled={!currentDocument}
           onclick={(event) => void toggleToolbarMenu("view", event.currentTarget)}
-        >보기⌄</button>
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 12s3.1-5 8.5-5 8.5 5 8.5 5-3.1 5-8.5 5-8.5-5-8.5-5Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+          <span class="toolbar-menu-label">보기</span>
+          <svg class="toolbar-chevron" aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
+        </button>
         {#if toolbarMenu === "view"}
           <div
             class="toolbar-popover toolbar-menu view-menu"
@@ -2922,6 +2937,7 @@
           </div>
         {/if}
       </div>
+      <span class="toolbar-divider document-divider"></span>
       <button
         class:active={companionView === "source"}
         class="toolbar-icon-button"
@@ -3885,7 +3901,7 @@
                 <input type="checkbox" bind:checked={preferences.typewriterMode} onchange={savePreferences} />
               </label>
               <label class="switch-row">
-                <div><strong>한 장만 보기</strong><small>현재 작성 중인 원고지만 작업대에 표시</small></div>
+                <div><strong>집중 집필</strong><small>현재 장만 남기고 패널과 헤더를 조용히 감춤</small></div>
                 <input type="checkbox" checked={preferences.focusSheetMode} onchange={toggleSingleSheetMode} />
               </label>
               <label class="switch-row">
@@ -4520,7 +4536,8 @@
     grid-area: top;
     z-index: 30;
     display: grid;
-    grid-template-columns: auto minmax(120px, 220px) minmax(0, 1fr) auto;
+    grid-template-columns:
+      auto minmax(100px, 220px) minmax(250px, 1fr) auto auto;
     align-items: center;
     gap: 8px;
     min-width: 0;
@@ -4625,7 +4642,7 @@
     border-radius: 8px;
     background: var(--warning);
     padding: 0 3px;
-    color: white;
+    color: var(--control-on-warning);
     font-size: 9px;
     font-weight: 750;
     line-height: 1;
@@ -4751,12 +4768,22 @@
     background: var(--danger);
   }
 
-  .writing-toolbar {
+  .formatting-toolbar,
+  .document-toolbar {
     display: flex;
     align-items: center;
-    justify-content: center;
     min-width: 0;
     gap: 2px;
+  }
+
+  .formatting-toolbar {
+    justify-content: center;
+  }
+
+  .document-toolbar {
+    justify-self: end;
+    padding-left: 9px;
+    border-left: 1px solid color-mix(in srgb, var(--rule) 78%, transparent);
   }
 
   .toolbar-select {
@@ -4824,7 +4851,7 @@
     color: var(--ink-strong);
   }
 
-  .toolbar-icon-button:disabled { opacity: 0.38; }
+  .toolbar-icon-button:disabled { opacity: 0.55; }
 
   .toolbar-icon-button svg {
     width: 18px;
@@ -4836,6 +4863,39 @@
     stroke-width: 1.6;
   }
 
+  .toolbar-menu-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 7px;
+  }
+
+  .toolbar-menu-button > svg:first-child {
+    width: 17px;
+    height: 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.65;
+  }
+
+  .toolbar-menu-button .toolbar-chevron {
+    width: 11px;
+    height: 11px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.4;
+  }
+
+  .document-divider {
+    margin-right: 4px;
+    margin-left: 5px;
+  }
+
   .italic-button {
     font-style: italic;
   }
@@ -4843,7 +4903,7 @@
   .format-button:disabled,
   .toolbar-text-button:disabled,
   .toolbar-select select:disabled {
-    opacity: 0.38;
+    opacity: 0.55;
   }
 
   .toolbar-menu-host {
@@ -4931,7 +4991,7 @@
     border-radius: 6px;
     background: var(--accent);
     padding: 0 11px;
-    color: white;
+    color: var(--control-on-accent);
   }
 
   .sr-only {
@@ -5622,10 +5682,11 @@
 
   .named-version button,
   .source-search button {
-    border: 1px solid var(--rule-strong);
+    border: 1px solid var(--control-border);
     border-radius: 7px;
-    background: var(--paper-raised);
+    background: var(--control-bg);
     padding: 0 12px;
+    color: var(--control-fg);
     font-size: var(--type-control);
   }
 
@@ -5679,8 +5740,9 @@
   .encoding-banner button {
     border: 0;
     border-radius: 5px;
-    background: var(--paper-deep);
+    background: var(--control-bg);
     padding: 5px 8px;
+    color: var(--control-fg);
     font-size: var(--type-control);
   }
 
@@ -5907,7 +5969,7 @@
   .primary-button {
     border: 1px solid var(--accent);
     background: var(--accent);
-    color: #fff9f3;
+    color: var(--control-on-accent);
   }
 
   .primary-button:hover:not(:disabled),
@@ -5916,9 +5978,23 @@
     box-shadow: var(--shadow-contact);
   }
 
+  .secondary-button:hover:not(:disabled),
+  .wide-button:not(.accent):hover:not(:disabled),
+  .named-version button:hover:not(:disabled),
+  .source-search button:hover:not(:disabled),
+  .button-row button:hover:not(:disabled),
+  .article-actions button:hover:not(:disabled),
+  .source-list article > button:hover:not(:disabled),
+  .table-size-controls button:hover:not(:disabled),
+  .conflict-modal footer button:hover:not(:disabled) {
+    background: var(--control-bg-hover);
+    color: var(--control-fg);
+  }
+
   .secondary-button {
-    border: 1px solid var(--rule-strong);
-    background: var(--paper-raised);
+    border: 1px solid var(--control-border);
+    background: var(--control-bg);
+    color: var(--control-fg);
   }
 
   .welcome-repository {
@@ -6069,10 +6145,11 @@
   .button-row button,
   .article-actions button,
   .source-list article > button {
-    border: 1px solid var(--rule);
+    border: 1px solid var(--control-border);
     border-radius: 6px;
-    background: var(--paper);
+    background: var(--control-bg);
     padding: 6px 9px;
+    color: var(--control-fg);
     font-size: var(--type-control);
   }
 
@@ -6315,17 +6392,18 @@
   .wide-button {
     width: 100%;
     margin-top: 7px;
-    border: 1px solid var(--rule-strong);
+    border: 1px solid var(--control-border);
     border-radius: 7px;
-    background: var(--paper-raised);
+    background: var(--control-bg);
     padding: 8px 10px;
+    color: var(--control-fg);
     font-size: var(--type-control);
   }
 
   .wide-button.accent {
     border-color: var(--accent);
     background: var(--accent);
-    color: #fff9f3;
+    color: var(--control-on-accent);
   }
 
   .field {
@@ -6498,11 +6576,11 @@
   }
 
   .table-size-controls button {
-    border: 1px solid var(--rule);
+    border: 1px solid var(--control-border);
     border-radius: 5px;
-    background: var(--paper);
+    background: var(--control-bg);
     padding: 5px 7px;
-    color: var(--ink-muted);
+    color: var(--control-fg-muted);
     font-size: var(--type-caption);
   }
 
@@ -6750,10 +6828,11 @@
   }
 
   .conflict-modal footer button {
-    border: 1px solid var(--rule-strong);
+    border: 1px solid var(--control-border);
     border-radius: 7px;
-    background: var(--paper);
+    background: var(--control-bg);
     padding: 8px 12px;
+    color: var(--control-fg);
     font-size: var(--type-control);
   }
 
@@ -6863,11 +6942,12 @@
 
   @media (max-width: 1100px) {
     .topbar {
-      grid-template-columns: auto minmax(90px, 150px) minmax(0, 1fr) auto;
+      grid-template-columns:
+        auto minmax(80px, 140px) minmax(220px, 1fr) auto auto;
     }
 
-    .font-select {
-      display: none;
+    .font-select select {
+      width: 108px;
     }
   }
 
@@ -6883,26 +6963,63 @@
     }
 
     .document-name {
-      font-size: var(--type-caption);
+      display: none;
     }
 
-    .style-select,
-    .toolbar-divider {
+    .toolbar-menu-label,
+    .toolbar-chevron {
       display: none;
+    }
+
+    .toolbar-menu-button {
+      width: 30px;
+      min-width: 30px;
+      padding: 0;
+    }
+
+    .formatting-toolbar {
+      justify-content: flex-start;
+    }
+
+    .style-select select {
+      width: 80px;
+    }
+
+    .font-select select {
+      width: 104px;
+    }
+
+    .document-toolbar {
+      padding-left: 5px;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .topbar {
+      gap: 2px;
+      padding: 0 4px;
+    }
+
+    .style-select select {
+      width: 76px;
+    }
+
+    .font-select select {
+      width: 96px;
+    }
+
+    .document-toolbar {
+      padding-left: 3px;
+    }
+
+    .window-controls {
+      margin-left: 0;
     }
   }
 
   @media (max-width: 680px) {
-    .document-name {
+    .font-select {
       display: none;
-    }
-
-    .topbar {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-    }
-
-    .writing-toolbar {
-      grid-column: 2;
     }
 
     .metadata-form {

@@ -39,6 +39,7 @@
 }
 
 :root {
+  color-scheme: light;
   font-family:
     Pretendard, "Noto Sans KR", system-ui, -apple-system, sans-serif;
   color: var(--ink);
@@ -77,6 +78,13 @@
   --success: #4f7561;
   --warning: #926020;
   --danger: #9b443d;
+  --control-bg: #faf6ee;
+  --control-bg-hover: #eee6da;
+  --control-fg: #37312c;
+  --control-fg-muted: #625a52;
+  --control-border: #8f8275;
+  --control-on-accent: #fff9f3;
+  --control-on-warning: #fffaf4;
   --shadow-contact: 0 1px 2px rgba(46, 37, 29, 0.14);
   --shadow-float: 0 12px 30px rgba(46, 37, 29, 0.15);
   --shadow-paper:
@@ -88,6 +96,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
+    color-scheme: dark;
     --desk: #171613;
     --chrome: #24211d;
     --panel: #1e1c19;
@@ -109,6 +118,13 @@
     --success: #84ad92;
     --warning: #d5a566;
     --danger: #dd8077;
+    --control-bg: #2d2924;
+    --control-bg-hover: #3a342e;
+    --control-fg: #f3eadf;
+    --control-fg-muted: #b2a79a;
+    --control-border: #807466;
+    --control-on-accent: #201a17;
+    --control-on-warning: #201a17;
     --shadow-contact: 0 1px 2px rgba(0, 0, 0, 0.34);
     --shadow-float: 0 14px 34px rgba(0, 0, 0, 0.34);
     --shadow-paper:
@@ -119,6 +135,7 @@
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --desk: #171613;
   --chrome: #24211d;
   --panel: #1e1c19;
@@ -140,6 +157,13 @@
   --success: #84ad92;
   --warning: #d5a566;
   --danger: #dd8077;
+  --control-bg: #2d2924;
+  --control-bg-hover: #3a342e;
+  --control-fg: #f3eadf;
+  --control-fg-muted: #b2a79a;
+  --control-border: #807466;
+  --control-on-accent: #201a17;
+  --control-on-warning: #201a17;
   --shadow-contact: 0 1px 2px rgba(0, 0, 0, 0.34);
   --shadow-float: 0 14px 34px rgba(0, 0, 0, 0.34);
   --shadow-paper:
@@ -184,12 +208,16 @@ textarea {
 }
 
 button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--control-fg);
   cursor: pointer;
 }
 
 button:disabled {
   cursor: default;
-  opacity: 0.45;
+  opacity: 0.58;
 }
 
 input,
@@ -197,9 +225,15 @@ select,
 textarea {
   border: 1px solid var(--rule);
   border-radius: 7px;
-  background: var(--paper-raised);
+  background: var(--control-bg);
+  color: var(--control-fg);
   padding: 0.65rem 0.72rem;
   outline: none;
+}
+
+select option {
+  background: var(--control-bg);
+  color: var(--control-fg);
 }
 
 input:focus,

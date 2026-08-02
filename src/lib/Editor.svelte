@@ -35,6 +35,7 @@
     MANUSCRIPT_PAGE_BORDER,
     MANUSCRIPT_PAPER_HEIGHT,
     MANUSCRIPT_PAPER_WIDTH,
+    PAGE_FIT_INSET,
   } from "./manuscript-fit";
   import type {
     EditorChangeContext,
@@ -118,6 +119,7 @@
   let ghostText = $state("");
   let visibleStart = $state(0);
   let visibleEnd = $state(4);
+  let viewedPageIndex = $state(0);
   let inputLeft = $state(0);
   let inputTop = $state(0);
   let dragAnchor: number | null = null;
@@ -163,6 +165,9 @@
   );
   let pages = $derived(manuscript.pages);
   let renderPages = $derived(projectedPagesForRender(pages, optimisticProjection));
+  let displayedPageIndex = $derived(
+    Math.max(0, Math.min(viewedPageIndex, renderPages.length - 1)),
+  );
   let lineStarts = $derived(lineStartOffsets(internalValue));
   let diagnosticIndex = $derived(
     createDiagnosticIndex(showDiagnostics ? diagnostics : []),
@@ -741,6 +746,7 @@
   }
 
   function handleScroll(): void {
+    if (manuscriptFitMode === "page") return;
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = null;
@@ -765,8 +771,24 @@
     });
   }
 
-  function manuscriptScrollAnchor(pageIndex = visibleStart): ScrollAnchor {
+  function manuscriptScrollAnchor(
+    pageIndex = manuscriptFitMode === "page"
+      ? displayedPageIndex
+      : visibleStart,
+  ): ScrollAnchor {
     const page = pages[Math.max(0, Math.min(pageIndex, pages.length - 1))];
+    if (manuscriptFitMode === "page") {
+      const cell = page?.cells.find(
+        (candidate) => candidate.filled && !candidate.virtual,
+      );
+      return {
+        offset:
+          pageIndex === activePageIndex
+            ? selectionHead()
+            : cell?.from ?? page?.blocks[0]?.from ?? 0,
+        source: "manuscript",
+      };
+    }
     const pageElement = scroller?.querySelector<HTMLElement>(
       `[data-manuscript-page="${pageIndex}"]`,
     );
@@ -801,6 +823,10 @@
       Math.max(0, Math.min(offset, internalValue.length)),
       "forward",
     );
+    if (manuscriptFitMode === "page") {
+      viewedPageIndex = placement.pageIndex;
+      return;
+    }
     const page = scroller.querySelector<HTMLElement>(
       `[data-manuscript-page="${placement.pageIndex}"]`,
     );
@@ -814,8 +840,24 @@
   function pageIsRendered(index: number): boolean {
     return (
       (index >= visibleStart && index <= visibleEnd) ||
-      index === activePageIndex
+      index === activePageIndex ||
+      index === displayedPageIndex
     );
+  }
+
+  function changePage(direction: -1 | 1): void {
+    const targetPage = Math.max(
+      0,
+      Math.min(displayedPageIndex + direction, pages.length - 1),
+    );
+    if (targetPage === displayedPageIndex) return;
+    const current = caretPlacementForOffset(
+      manuscript,
+      selectionHead(),
+      caretAffinity,
+    );
+    moveVertical((targetPage - current.pageIndex) * 20, false);
+    viewedPageIndex = targetPage;
   }
 
   function cellIsSelected(cell: ManuscriptCell): boolean {
@@ -1165,6 +1207,22 @@
     });
   });
 
+  $effect(() => {
+    const nextPage = activePageIndex;
+    const mode = manuscriptFitMode;
+    const pageCount = pages.length;
+    if (mode === "page") {
+      viewedPageIndex = Math.max(0, Math.min(nextPage, pageCount - 1));
+    }
+  });
+
+  $effect(() => {
+    const pageIndex = displayedPageIndex;
+    const mode = manuscriptFitMode;
+    if (!mounted || mode !== "page") return;
+    onscrollanchor?.(manuscriptScrollAnchor(pageIndex));
+  });
+
   onDestroy(() => {
     mounted = false;
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
@@ -1186,9 +1244,9 @@
   bind:this={host}
   style={[
     `--manuscript-font: "${fontFamily.replaceAll('"', '\\"')}", Pretendard, sans-serif`,
-    `--page-gutter-x: ${MANUSCRIPT_GUTTER_X}px`,
-    `--page-gutter-top: ${MANUSCRIPT_GUTTER_TOP}px`,
-    `--page-gutter-bottom: ${MANUSCRIPT_GUTTER_BOTTOM}px`,
+    `--page-gutter-x: ${manuscriptFitMode === "page" ? PAGE_FIT_INSET : MANUSCRIPT_GUTTER_X}px`,
+    `--page-gutter-top: ${manuscriptFitMode === "page" ? PAGE_FIT_INSET : MANUSCRIPT_GUTTER_TOP}px`,
+    `--page-gutter-bottom: ${manuscriptFitMode === "page" ? PAGE_FIT_INSET : MANUSCRIPT_GUTTER_BOTTOM}px`,
     `--cell-size: ${40 * manuscriptScale}px`,
     `--row-gap: ${12 * manuscriptScale}px`,
     `--paper-width: ${960 * manuscriptScale}px`,
@@ -1197,7 +1255,7 @@
     `--grid-height: ${1028 * manuscriptScale}px`,
     `--grid-left: ${80 * manuscriptScale}px`,
     `--grid-top: ${86 * manuscriptScale}px`,
-    `--page-gap: ${36 * manuscriptScale}px`,
+    `--page-gap: ${manuscriptFitMode === "page" ? 0 : 36 * manuscriptScale}px`,
     `--writing-font-size: ${26 * manuscriptScale}px`,
     `--tab-font-size: ${14 * manuscriptScale}px`,
   ].join("; ")}
@@ -1227,13 +1285,20 @@
   ></textarea>
 
   <div
+    class:fit-page={manuscriptFitMode === "page"}
     class="manuscript-scroll"
     bind:this={scroller}
     onscroll={handleScroll}
   >
-    <div class:single-sheet={singleSheetMode} class="page-stack">
+    <div
+      class:fit-page={manuscriptFitMode === "page"}
+      class:single-sheet={singleSheetMode}
+      class="page-stack"
+    >
       {#each renderPages as page, pageIndex (page.number)}
-        {#if !singleSheetMode || pageIndex === activePageIndex}
+        {#if manuscriptFitMode === "page"
+          ? pageIndex === displayedPageIndex
+          : !singleSheetMode || pageIndex === activePageIndex}
         <section
           class:active-page={pageIndex === activePageIndex}
           class="manuscript-page"
@@ -1342,6 +1407,23 @@
       {/each}
     </div>
   </div>
+  {#if manuscriptFitMode === "page"}
+    <nav class="page-navigator" aria-label="원고지 쪽 이동">
+      <button
+        aria-label="이전 쪽"
+        title="이전 쪽 (Page Up)"
+        disabled={displayedPageIndex === 0}
+        onclick={() => changePage(-1)}
+      >‹</button>
+      <span aria-live="polite">{displayedPageIndex + 1} / {renderPages.length}</span>
+      <button
+        aria-label="다음 쪽"
+        title="다음 쪽 (Page Down)"
+        disabled={displayedPageIndex >= renderPages.length - 1}
+        onclick={() => changePage(1)}
+      >›</button>
+    </nav>
+  {/if}
 </div>
 
 <style>
@@ -1408,6 +1490,11 @@
     background-size: 320px 320px, auto, auto;
   }
 
+  .manuscript-scroll.fit-page {
+    overflow: hidden;
+    scrollbar-gutter: auto;
+  }
+
   .page-stack {
     box-sizing: border-box;
     width: max-content;
@@ -1422,6 +1509,62 @@
     justify-content: center;
     width: max-content;
     min-height: 100%;
+  }
+
+  .page-stack.fit-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .page-stack.fit-page .manuscript-page {
+    flex: 0 0 auto;
+    margin: 0;
+  }
+
+  .page-navigator {
+    position: absolute;
+    z-index: 28;
+    bottom: 10px;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    transform: translateX(-50%);
+    border: 1px solid color-mix(in srgb, var(--control-border) 76%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--control-bg) 92%, transparent);
+    padding: 3px;
+    box-shadow: var(--shadow-contact);
+    color: var(--control-fg-muted);
+    font-family: var(--ui-font);
+    font-size: var(--type-micro);
+    backdrop-filter: blur(7px);
+  }
+
+  .page-navigator button {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 24px;
+    border-radius: 999px;
+    color: var(--control-fg-muted);
+    font-size: 19px;
+    line-height: 1;
+  }
+
+  .page-navigator button:hover:not(:disabled) {
+    background: var(--control-bg-hover);
+    color: var(--control-fg);
+  }
+
+  .page-navigator span {
+    min-width: 46px;
+    text-align: center;
   }
 
   .page-stack.single-sheet .manuscript-page {

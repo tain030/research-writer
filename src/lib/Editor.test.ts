@@ -344,4 +344,51 @@ describe("manuscript editor input", () => {
     unmount(component);
   });
 
+  it("shows one contained sheet at a time and pages with controls or PageDown", async () => {
+    const source = "가".repeat(1_200);
+    expect(layoutManuscript(source, "긴 원고").pages.length).toBeGreaterThan(2);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Editor, {
+      target,
+      props: {
+        value: source,
+        fallbackTitle: "긴 원고",
+        manuscriptFitMode: "page",
+      },
+    });
+    await tick();
+
+    const scroller = target.querySelector<HTMLElement>(".manuscript-scroll")!;
+    expect(scroller.classList).toContain("fit-page");
+    expect(target.querySelectorAll(".manuscript-page")).toHaveLength(1);
+    expect(
+      target.querySelector("[data-manuscript-page='0']"),
+    ).not.toBeNull();
+
+    target
+      .querySelector<HTMLButtonElement>(
+        '.page-navigator button[aria-label="다음 쪽"]',
+      )!
+      .click();
+    await tick();
+    expect(target.querySelectorAll(".manuscript-page")).toHaveLength(1);
+    expect(
+      target.querySelector("[data-manuscript-page='1']"),
+    ).not.toBeNull();
+
+    target.querySelector("textarea")!.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "PageDown",
+      }),
+    );
+    await tick();
+    expect(
+      target.querySelector("[data-manuscript-page='2']"),
+    ).not.toBeNull();
+    unmount(component);
+  });
+
 });

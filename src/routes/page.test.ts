@@ -64,8 +64,27 @@ describe("writing workspace toolbar", () => {
       ),
     ).toBe(false);
 
-    const insert = Array.from(topbar.querySelectorAll("button")).find((button) =>
-      button.textContent?.startsWith("삽입"),
+    const formatting = topbar.querySelector(".formatting-toolbar")!;
+    const documentTools = topbar.querySelector(".document-toolbar")!;
+    expect(formatting.querySelector(".style-select")).not.toBeNull();
+    expect(formatting.querySelector(".font-select")).not.toBeNull();
+    expect(documentTools.querySelector('[aria-label="삽입 메뉴"]')).not.toBeNull();
+    expect(documentTools.querySelector('[aria-label="보기 메뉴"]')).not.toBeNull();
+    expect(
+      Array.from(
+        documentTools.querySelectorAll<HTMLButtonElement>(":scope > button, :scope > .toolbar-menu-host > button"),
+        (button) => button.getAttribute("aria-label"),
+      ),
+    ).toEqual([
+      "삽입 메뉴",
+      "보기 메뉴",
+      "Markdown 원문을 옆에 열기",
+      "완성본을 옆에 열기",
+      "인쇄 또는 PDF 저장",
+    ]);
+
+    const insert = topbar.querySelector<HTMLButtonElement>(
+      'button[aria-label="삽입 메뉴"]',
     )!;
     insert.click();
     await tick();
@@ -73,8 +92,8 @@ describe("writing workspace toolbar", () => {
       "링크",
     );
 
-    const view = Array.from(topbar.querySelectorAll("button")).find((button) =>
-      button.textContent?.startsWith("보기"),
+    const view = topbar.querySelector<HTMLButtonElement>(
+      'button[aria-label="보기 메뉴"]',
     )!;
     view.click();
     await tick();

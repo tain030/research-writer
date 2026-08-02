@@ -55,6 +55,10 @@ describe("editorial theme accessibility", () => {
   it.each([
     [":root {", ["chrome", "panel", "surface-raised"]],
     [':root[data-theme="dark"] {', ["chrome", "panel", "surface-raised"]],
+    [
+      ':root[data-theme="system"] {',
+      ["chrome", "panel", "surface-raised"],
+    ],
   ])("keeps text tokens readable in %s", (selector, backgroundTokens) => {
     const block = cssBlock(selector);
     for (const foregroundToken of ["ink", "ink-muted", "ink-faint", "accent"]) {
@@ -68,6 +72,56 @@ describe("editorial theme accessibility", () => {
         ).toBeGreaterThanOrEqual(4.5);
       }
     }
+  });
+
+  it.each([
+    ":root {",
+    ':root[data-theme="dark"] {',
+    ':root[data-theme="system"] {',
+  ])(
+    "keeps semantic controls readable in %s",
+    (selector) => {
+      const block = cssBlock(selector);
+      for (const foregroundToken of ["control-fg", "control-fg-muted"]) {
+        for (const backgroundToken of ["control-bg", "control-bg-hover"]) {
+          expect(
+            contrast(
+              hexToken(block, foregroundToken),
+              hexToken(block, backgroundToken),
+            ),
+            `${foregroundToken} on ${backgroundToken}`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+      expect(
+        contrast(
+          hexToken(block, "control-on-accent"),
+          hexToken(block, "accent"),
+        ),
+        "control-on-accent on accent",
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(
+          hexToken(block, "control-on-warning"),
+          hexToken(block, "warning"),
+        ),
+        "control-on-warning on warning",
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(
+          hexToken(block, "control-border"),
+          hexToken(block, "control-bg"),
+        ),
+        "control-border on control-bg",
+      ).toBeGreaterThanOrEqual(3);
+    },
+  );
+
+  it("resets native button chrome before applying semantic variants", () => {
+    const button = cssBlock("button {");
+    expect(button).toContain("appearance: none");
+    expect(button).toContain("background: transparent");
+    expect(button).toContain("color: var(--control-fg)");
   });
 
   it("keeps informative microcopy at twelve pixels or larger", () => {
