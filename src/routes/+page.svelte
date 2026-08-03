@@ -164,12 +164,13 @@
   let conflict = $state<ConflictState | null>(null);
   let recents = $state<RecentDocument[]>([]);
   const bundledFonts: FontRecord[] = [
-    { family: "Pretendard", monospaced: false, bundled: true },
     { family: "MaruBuri", monospaced: false, bundled: true },
+    { family: "Pretendard", monospaced: false, bundled: true },
     { family: "NanumGothicCoding", monospaced: true, bundled: true },
   ];
   let fonts = $state<FontRecord[]>([...bundledFonts]);
   let preferences = $state<Preferences>({ ...defaultPreferences });
+  let systemPrefersDark = $state(false);
   let toast = $state("");
   let toastKind = $state<"info" | "error" | "success">("info");
   let sync = $state<SyncthingStatus | null>(null);
@@ -302,6 +303,10 @@
   let repositorySyncProvider = $derived(
     externalSyncProvider(repository?.path ?? ""),
   );
+  let darkThemeActive = $derived(
+    preferences.theme === "dark" ||
+      (preferences.theme === "system" && systemPrefersDark),
+  );
   let currentDocumentInRepository = $derived(
     currentDocument !== null &&
       repositoryDocuments.some((document) => document.path === currentDocument?.path),
@@ -433,9 +438,12 @@
   }
 
   function loadPreferences(): void {
-    preferences = parsePreferences(
-      localStorage.getItem("research-writer.preferences"),
-    );
+    const stored = localStorage.getItem("research-writer.preferences");
+    preferences = parsePreferences(stored);
+    const normalized = JSON.stringify(preferences);
+    if (stored !== normalized) {
+      localStorage.setItem("research-writer.preferences", normalized);
+    }
     document.documentElement.dataset.theme = preferences.theme;
   }
 
@@ -445,6 +453,22 @@
       JSON.stringify(preferences),
     );
     document.documentElement.dataset.theme = preferences.theme;
+  }
+
+  function toggleTheme(): void {
+    preferences.theme = darkThemeActive ? "light" : "dark";
+    savePreferences();
+  }
+
+  function watchSystemTheme(): void {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    systemPrefersDark = media.matches;
+    const update = (event: MediaQueryListEvent) => {
+      systemPrefersDark = event.matches;
+    };
+    media.addEventListener("change", update);
+    unlisteners.push(() => media.removeEventListener("change", update));
   }
 
   async function installRepositoryFonts(records: FontRecord[]): Promise<void> {
@@ -2569,6 +2593,7 @@
   onMount(async () => {
     desktop = isDesktopRuntime();
     loadPreferences();
+    watchSystemTheme();
     await initializeWindowChrome();
     if (typeof ResizeObserver !== "undefined" && writingStage) {
       stageObserver = new ResizeObserver(measureWritingStage);
@@ -2894,6 +2919,24 @@
     </div>
 
     <div class="topbar-actions">
+      <button
+        class="panel-toggle theme-toggle"
+        title={darkThemeActive ? "밝은 모드로 전환" : "어두운 모드로 전환"}
+        aria-label={darkThemeActive ? "밝은 모드로 전환" : "어두운 모드로 전환"}
+        aria-pressed={darkThemeActive}
+        onclick={toggleTheme}
+      >
+        {#if darkThemeActive}
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="3.5"></circle>
+            <path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"></path>
+          </svg>
+        {:else}
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="M20.2 15.1A8.5 8.5 0 0 1 8.9 3.8 8.5 8.5 0 1 0 20.2 15.1Z"></path>
+          </svg>
+        {/if}
+      </button>
       <button
         class:active={rightPanel !== null}
         class="panel-toggle tools-toggle"
@@ -3678,14 +3721,6 @@
         {:else}
           <section class="panel-section">
             <p class="eyebrow">기본 설정</p>
-            <label class="field">
-              <span>화면</span>
-              <select bind:value={preferences.theme} onchange={savePreferences}>
-                <option value="system">시스템 설정</option>
-                <option value="light">밝은 작업대</option>
-                <option value="dark">어두운 작업대</option>
-              </select>
-            </label>
             <button
               class="wide-button"
               disabled={!repository?.available}

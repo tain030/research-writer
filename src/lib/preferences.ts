@@ -2,7 +2,10 @@ import type { FocusMode } from "./types";
 
 export type PageFitMode = "page" | "width";
 
+export const PREFERENCES_SCHEMA_VERSION = 1;
+
 export interface Preferences {
+  schemaVersion: number;
   fontFamily: string;
   pageFitMode: PageFitMode;
   focusMode: FocusMode;
@@ -16,7 +19,8 @@ export interface Preferences {
 }
 
 export const defaultPreferences: Preferences = {
-  fontFamily: "Pretendard",
+  schemaVersion: PREFERENCES_SCHEMA_VERSION,
+  fontFamily: "MaruBuri",
   pageFitMode: "width",
   focusMode: "off",
   typewriterMode: true,
@@ -28,7 +32,8 @@ export const defaultPreferences: Preferences = {
   companionSplitRatio: 0.56,
 };
 
-type StoredPreferences = Partial<Preferences> & {
+type StoredPreferences = Omit<Partial<Preferences>, "schemaVersion"> & {
+  schemaVersion?: unknown;
   manuscriptFitMode?: unknown;
   manuscriptGuidance?: unknown;
   typewriterImperfection?: unknown;
@@ -49,13 +54,28 @@ export function parsePreferences(stored: string | null): Preferences {
       return { ...defaultPreferences };
     }
     const candidate = parsed as StoredPreferences;
+    const storedSchemaVersion =
+      typeof candidate.schemaVersion === "number" &&
+      Number.isInteger(candidate.schemaVersion) &&
+      candidate.schemaVersion >= 0
+        ? candidate.schemaVersion
+        : 0;
+    const storedFontFamily =
+      typeof candidate.fontFamily === "string" && candidate.fontFamily.trim()
+        ? candidate.fontFamily
+        : defaultPreferences.fontFamily;
     const storedPageFitMode =
       candidate.pageFitMode ?? candidate.manuscriptFitMode;
     return {
+      schemaVersion: Math.max(
+        PREFERENCES_SCHEMA_VERSION,
+        storedSchemaVersion,
+      ),
       fontFamily:
-        typeof candidate.fontFamily === "string" && candidate.fontFamily.trim()
-          ? candidate.fontFamily
-          : defaultPreferences.fontFamily,
+        storedSchemaVersion < PREFERENCES_SCHEMA_VERSION &&
+        storedFontFamily === "Pretendard"
+          ? defaultPreferences.fontFamily
+          : storedFontFamily,
       pageFitMode:
         storedPageFitMode === "page" || storedPageFitMode === "width"
         ? storedPageFitMode

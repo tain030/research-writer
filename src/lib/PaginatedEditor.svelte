@@ -58,7 +58,7 @@
     readOnly = false,
     fallbackTitle = "제목 없는 원고",
     documentPath = "",
-    fontFamily = "Pretendard",
+    fontFamily = "MaruBuri",
     fitMode = "width",
     focusMode = "off",
     typewriterMode = true,
@@ -95,12 +95,14 @@
   let layoutFrame: number | null = null;
   let layoutTimer: ReturnType<typeof setTimeout> | null = null;
   let scrollFrame: number | null = null;
+  let activeLineFrame: number | null = null;
   let pageCount = $state(1);
   let viewedPageIndex = $state(0);
   let viewportWidth = $state(PAGE_WIDTH + 48);
   let viewportHeight = $state(PAGE_HEIGHT + 48);
   let layoutBusy = $state(false);
   let activeSyntax = $state("");
+  let activeWritingLine = $state<{ top: number; height: number } | null>(null);
   let layoutWaiters: Array<() => void> = [];
   let resolvedImageDocument = "";
   let imageDocumentInitialized = false;
@@ -225,8 +227,61 @@
     else activeSyntax = "";
   }
 
+  function updateActiveWritingLine(): void {
+    if (
+      !editor ||
+      !editor.isFocused ||
+      readOnly ||
+      !(editor.state.selection instanceof TextSelection) ||
+      !editor.state.selection.empty
+    ) {
+      activeWritingLine = null;
+      return;
+    }
+    const stack = editorMount.closest<HTMLElement>(".paper-stack");
+    if (!stack || pageScale <= 0) {
+      activeWritingLine = null;
+      return;
+    }
+    try {
+      const caret = editor.view.coordsAtPos(editor.state.selection.head);
+      const stackRect = stack.getBoundingClientRect();
+      const dom = editor.view.domAtPos(editor.state.selection.head).node;
+      const element = dom instanceof Element ? dom : dom.parentElement;
+      const block = element?.closest<HTMLElement>(
+        "h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,td,th",
+      );
+      const computedLineHeight = Number.parseFloat(
+        getComputedStyle(block ?? editor.view.dom).lineHeight,
+      );
+      const top = (caret.top - stackRect.top) / pageScale;
+      const measuredHeight = (caret.bottom - caret.top) / pageScale;
+      const height = Math.max(
+        1,
+        measuredHeight,
+        Number.isFinite(computedLineHeight) ? computedLineHeight : 26,
+      );
+      if (!Number.isFinite(top) || !Number.isFinite(height)) {
+        activeWritingLine = null;
+        return;
+      }
+      activeWritingLine = { top: Math.max(0, top), height };
+    } catch {
+      activeWritingLine = null;
+    }
+  }
+
+  function scheduleActiveWritingLine(): void {
+    if (activeLineFrame !== null) cancelAnimationFrame(activeLineFrame);
+    activeLineFrame = requestAnimationFrame(() => {
+      activeLineFrame = null;
+      updateActiveWritingLine();
+    });
+  }
+
   function notifySelection(): void {
     updateActiveBlock();
+    scheduleActiveWritingLine();
     const selected = selectionInfo();
     viewedPageIndex = Math.max(0, (selected.page ?? 1) - 1);
     onselection?.(selected);
@@ -602,6 +657,8 @@
     pageCount = Math.max(1, breaks.length + 1);
     viewedPageIndex = Math.min(viewedPageIndex, pageCount - 1);
     measureHost.replaceChildren();
+    await tick();
+    updateActiveWritingLine();
     layoutBusy = false;
     resolveLayoutWaiters();
   }
@@ -737,6 +794,7 @@
     if (!viewport) return;
     viewportWidth = viewport.clientWidth || PAGE_WIDTH + 48;
     viewportHeight = viewport.clientHeight || PAGE_HEIGHT + 48;
+    void tick().then(scheduleActiveWritingLine);
   }
 
   function handleScroll(): void {
@@ -806,6 +864,7 @@
             return false;
           },
           blur: () => {
+            activeWritingLine = null;
             onfocuschange?.(false);
             return false;
           },
@@ -833,6 +892,7 @@
         emitChange();
         if (!composing) playKeystroke();
         scheduleLayout();
+        scheduleActiveWritingLine();
       },
       onSelectionUpdate: notifySelection,
       onTransaction: ({ transaction }) => {
@@ -867,14 +927,21 @@
 
   $effect(() => {
     const editable = !readOnly;
-    if (mounted && editor) editor.setEditable(editable, false);
+    if (mounted && editor) {
+      editor.setEditable(editable, false);
+      if (readOnly) activeWritingLine = null;
+      else scheduleActiveWritingLine();
+    }
   });
 
   $effect(() => {
     fontFamily;
     fitMode;
     focusMode;
-    void tick().then(scheduleLayout);
+    void tick().then(() => {
+      scheduleLayout();
+      scheduleActiveWritingLine();
+    });
   });
 
   $effect(() => {
@@ -895,6 +962,7 @@
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     if (layoutTimer !== null) clearTimeout(layoutTimer);
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
+    if (activeLineFrame !== null) cancelAnimationFrame(activeLineFrame);
     resizeObserver?.disconnect();
     resizeObserver = null;
     editor?.destroy();
@@ -912,7 +980,7 @@
   class:focus-paragraph={focusMode === "paragraph"}
   class:focus-sentence={focusMode === "sentence"}
   class="paper-editor-shell"
-  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", Pretendard, sans-serif;--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px`}
+  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", MaruBuri, Pretendard, serif;--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px`}
 >
   <div class="paper-toolbar-note" aria-live="polite">
     <span>에디토리얼 A4</span>
@@ -941,6 +1009,13 @@
               <div class="paper-sheet"><span>{index + 1}</span></div>
             {/each}
           </div>
+          {#if activeWritingLine}
+            <div
+              class="active-writing-line"
+              style={`top:${activeWritingLine.top}px;height:${activeWritingLine.height}px`}
+              aria-hidden="true"
+            ></div>
+          {/if}
           <div class="paper-editor-mount" bind:this={editorMount}></div>
         </div>
       </div>
@@ -960,6 +1035,7 @@
 
 <style>
   .paper-editor-shell {
+    --writing-ink: #315f68;
     position: relative;
     height: 100%;
     min-width: 0;
@@ -1048,9 +1124,44 @@
 
   .paper-editor-mount {
     position: relative;
-    z-index: 1;
+    z-index: 2;
     width: 210mm;
     min-height: 297mm;
+  }
+
+  .active-writing-line {
+    position: absolute;
+    z-index: 1;
+    left: 18mm;
+    width: 174mm;
+    border-bottom: 0.65px solid color-mix(in srgb, var(--writing-ink) 24%, transparent);
+    border-radius: 2px;
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--writing-ink) 7%, transparent),
+      color-mix(in srgb, var(--writing-ink) 4%, transparent) 78%,
+      transparent
+    );
+    pointer-events: none;
+  }
+
+  .active-writing-line::before {
+    position: absolute;
+    top: calc(50% - 0.6px);
+    right: calc(100% + 2mm);
+    width: 7mm;
+    height: 1.2px;
+    border-radius: 999px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--writing-ink) 38%, transparent) 24%,
+      color-mix(in srgb, var(--writing-ink) 68%, transparent) 72%,
+      transparent
+    );
+    content: "";
+    transform: rotate(-1.5deg);
+    transform-origin: right center;
   }
 
   .paper-editor-mount :global(.ProseMirror),
@@ -1063,7 +1174,7 @@
     background: transparent;
     padding: 22mm 20mm 18mm;
     color: #28231f;
-    caret-color: var(--accent);
+    caret-color: var(--writing-ink);
     font-family: var(--paper-font);
     font-size: 11.5pt;
     font-variant-ligatures: contextual common-ligatures;
@@ -1379,6 +1490,6 @@
       break-after: page;
     }
     .paper-editor-mount :global(.paper-page-break) { height: var(--page-rest); }
-    .paper-toolbar-note, .paper-page-navigator, .paper-measure-host { display: none; }
+    .paper-toolbar-note, .paper-page-navigator, .paper-measure-host, .active-writing-line { display: none; }
   }
 </style>

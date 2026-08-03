@@ -6,6 +6,22 @@ import Page from "./+page.svelte";
 
 beforeEach(() => {
   localStorage.clear();
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(
+      (query: string) =>
+        ({
+          matches: false,
+          media: query,
+          onchange: null,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          dispatchEvent: vi.fn(() => true),
+        }) as unknown as MediaQueryList,
+    ),
+  );
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
     window.setTimeout(() => callback(performance.now()), 0),
   );
@@ -44,6 +60,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.replaceChildren();
+  delete document.documentElement.dataset.theme;
   vi.unstubAllGlobals();
 });
 
@@ -116,6 +133,76 @@ describe("writing workspace toolbar", () => {
         ).not.toBeNull(),
       { timeout: 2_000 },
     );
+    unmount(component);
+  });
+
+  it("toggles the effective theme outside the tools panel", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Page, { target });
+    await tick();
+
+    const theme = target.querySelector<HTMLButtonElement>(
+      ".topbar-actions > .theme-toggle",
+    )!;
+    expect(theme.getAttribute("aria-label")).toBe("어두운 모드로 전환");
+    expect(theme.getAttribute("aria-pressed")).toBe("false");
+
+    theme.click();
+    await tick();
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(theme.getAttribute("aria-label")).toBe("밝은 모드로 전환");
+    expect(
+      JSON.parse(localStorage.getItem("research-writer.preferences")!).theme,
+    ).toBe("dark");
+
+    theme.click();
+    await tick();
+    expect(document.documentElement.dataset.theme).toBe("light");
+
+    target
+      .querySelector<HTMLButtonElement>(
+        '.topbar-actions button[aria-controls="right-panel"]',
+      )!
+      .click();
+    await tick();
+    const settings = Array.from(
+      target.querySelectorAll<HTMLButtonElement>("#right-panel .panel-tabs button"),
+    ).find((button) => button.textContent?.trim() === "설정")!;
+    settings.click();
+    await tick();
+    expect(target.querySelector('#right-panel option[value="system"]')).toBeNull();
+    unmount(component);
+  });
+
+  it("uses the operating-system theme until the first explicit toggle", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(
+        (query: string) =>
+          ({
+            matches: true,
+            media: query,
+            onchange: null,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+            addListener: vi.fn(),
+            removeListener: vi.fn(),
+            dispatchEvent: vi.fn(() => true),
+          }) as unknown as MediaQueryList,
+      ),
+    );
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Page, { target });
+    await tick();
+
+    const theme = target.querySelector<HTMLButtonElement>(".theme-toggle")!;
+    expect(document.documentElement.dataset.theme).toBe("system");
+    expect(theme.getAttribute("aria-label")).toBe("밝은 모드로 전환");
+    theme.click();
+    await tick();
+    expect(document.documentElement.dataset.theme).toBe("light");
     unmount(component);
   });
 });

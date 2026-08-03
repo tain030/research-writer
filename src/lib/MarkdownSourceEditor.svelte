@@ -52,7 +52,7 @@
   let {
     value,
     readOnly = false,
-    fontFamily = "Pretendard",
+    fontFamily = "MaruBuri",
     onready,
     onchange,
     onselection,

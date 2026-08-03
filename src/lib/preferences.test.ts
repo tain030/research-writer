@@ -1,12 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { defaultPreferences, parsePreferences } from "./preferences";
+import {
+  PREFERENCES_SCHEMA_VERSION,
+  defaultPreferences,
+  parsePreferences,
+} from "./preferences";
 
 describe("writing preferences", () => {
-  it("uses Pretendard for a fresh profile", () => {
-    expect(defaultPreferences.fontFamily).toBe("Pretendard");
+  it("uses MaruBuri for a fresh profile", () => {
+    expect(defaultPreferences.schemaVersion).toBe(PREFERENCES_SCHEMA_VERSION);
+    expect(defaultPreferences.fontFamily).toBe("MaruBuri");
     expect(defaultPreferences.pageFitMode).toBe("width");
     expect(defaultPreferences.companionSplitRatio).toBe(0.56);
-    expect(parsePreferences(null).fontFamily).toBe("Pretendard");
+    expect(parsePreferences(null).fontFamily).toBe("MaruBuri");
+  });
+
+  it("migrates the legacy Pretendard default exactly once", () => {
+    expect(parsePreferences('{"fontFamily":"Pretendard"}')).toMatchObject({
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      fontFamily: "MaruBuri",
+    });
+    expect(
+      parsePreferences(
+        JSON.stringify({
+          schemaVersion: PREFERENCES_SCHEMA_VERSION,
+          fontFamily: "Pretendard",
+        }),
+      ),
+    ).toMatchObject({
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      fontFamily: "Pretendard",
+    });
   });
 
   it("migrates and clamps the companion split ratio", () => {

@@ -124,6 +124,46 @@ describe("paginated editorial editor", () => {
     unmount(component);
   });
 
+  it("shows an ink guide only for a focused collapsed caret", async () => {
+    let api: EditorApi | null = null;
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "첫 문장과 다음 문장을 이어서 씁니다.",
+        onready: (value) => (api = value),
+      },
+    });
+    await tick();
+
+    const shell = target.querySelector<HTMLElement>(".paper-editor-shell")!;
+    const editable = target.querySelector<HTMLElement>(".ProseMirror")!;
+    expect(shell.style.getPropertyValue("--paper-font")).toContain(
+      '"MaruBuri"',
+    );
+
+    api!.focus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+    expect(target.querySelector(".active-writing-line")).not.toBeNull();
+
+    api!.setSelection(0, 4);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+    expect(target.querySelector(".active-writing-line")).toBeNull();
+
+    api!.setSelection(4, 4);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+    expect(target.querySelector(".active-writing-line")).not.toBeNull();
+
+    editable.blur();
+    await tick();
+    expect(target.querySelector(".active-writing-line")).toBeNull();
+    unmount(component);
+  });
+
   it("shows AI continuation as ghost text and accepts it with Tab", async () => {
     let api: EditorApi | null = null;
     const target = document.createElement("div");
