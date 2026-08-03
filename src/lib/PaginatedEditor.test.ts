@@ -124,7 +124,7 @@ describe("paginated editorial editor", () => {
     unmount(component);
   });
 
-  it("shows an ink guide only for a focused collapsed caret", async () => {
+  it("shows the typewriter guide only for a focused collapsed caret", async () => {
     let api: EditorApi | null = null;
     const target = document.createElement("div");
     document.body.append(target);
@@ -140,8 +140,9 @@ describe("paginated editorial editor", () => {
     const shell = target.querySelector<HTMLElement>(".paper-editor-shell")!;
     const editable = target.querySelector<HTMLElement>(".ProseMirror")!;
     expect(shell.style.getPropertyValue("--paper-font")).toContain(
-      '"MaruBuri"',
+      '"NanumGothicCoding"',
     );
+    expect(shell.classList.contains("writing-typewriter")).toBe(true);
 
     api!.focus();
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -161,6 +162,33 @@ describe("paginated editorial editor", () => {
     editable.blur();
     await tick();
     expect(target.querySelector(".active-writing-line")).toBeNull();
+    unmount(component);
+  });
+
+  it("renders the literary style with its paired font and guide", async () => {
+    let api: EditorApi | null = null;
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "문학형 원고를 차분하게 이어 씁니다.",
+        fontFamily: "MaruBuri",
+        writingStyle: "literary",
+        onready: (value) => (api = value),
+      },
+    });
+    await tick();
+
+    const shell = target.querySelector<HTMLElement>(".paper-editor-shell")!;
+    expect(shell.style.getPropertyValue("--paper-font")).toContain('"MaruBuri"');
+    expect(shell.classList.contains("writing-literary")).toBe(true);
+    expect(shell.classList.contains("writing-typewriter")).toBe(false);
+
+    api!.focus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+    expect(target.querySelector(".active-writing-line")).not.toBeNull();
     unmount(component);
   });
 

@@ -30,6 +30,7 @@
     EditorSelection,
     FocusMode,
     ScrollAnchor,
+    WritingStyle,
   } from "./types";
 
   export type PageFitMode = "page" | "width";
@@ -40,6 +41,7 @@
     fallbackTitle?: string;
     documentPath?: string;
     fontFamily?: string;
+    writingStyle?: WritingStyle;
     fitMode?: PageFitMode;
     focusMode?: FocusMode;
     typewriterMode?: boolean;
@@ -58,7 +60,8 @@
     readOnly = false,
     fallbackTitle = "제목 없는 원고",
     documentPath = "",
-    fontFamily = "MaruBuri",
+    fontFamily = "NanumGothicCoding",
+    writingStyle = "typewriter",
     fitMode = "width",
     focusMode = "off",
     typewriterMode = true,
@@ -120,6 +123,11 @@
   let pagePeriod = $derived(PAGE_HEIGHT + PAGE_GAP);
   let stackHeight = $derived(PAGE_HEIGHT * pageCount + PAGE_GAP * (pageCount - 1));
   let visibleHeight = $derived(fitMode === "page" ? PAGE_HEIGHT : stackHeight);
+  let paperFontFallback = $derived(
+    writingStyle === "typewriter"
+      ? "NanumGothicCoding, monospace"
+      : "MaruBuri, Pretendard, serif",
+  );
 
   function splitFrontmatter(source: string): { prefix: string; body: string } {
     const block = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/u.exec(source);
@@ -256,16 +264,21 @@
       );
       const top = (caret.top - stackRect.top) / pageScale;
       const measuredHeight = (caret.bottom - caret.top) / pageScale;
-      const height = Math.max(
+      const naturalHeight = Math.max(
         1,
         measuredHeight,
         Number.isFinite(computedLineHeight) ? computedLineHeight : 26,
       );
-      if (!Number.isFinite(top) || !Number.isFinite(height)) {
+      if (!Number.isFinite(top) || !Number.isFinite(naturalHeight)) {
         activeWritingLine = null;
         return;
       }
-      activeWritingLine = { top: Math.max(0, top), height };
+      const height =
+        writingStyle === "typewriter"
+          ? Math.min(naturalHeight, 27)
+          : naturalHeight;
+      const guideTop = top + (naturalHeight - height) / 2;
+      activeWritingLine = { top: Math.max(0, guideTop), height };
     } catch {
       activeWritingLine = null;
     }
@@ -864,8 +877,11 @@
             return false;
           },
           blur: () => {
-            activeWritingLine = null;
-            onfocuschange?.(false);
+            queueMicrotask(() => {
+              if (!mounted || editor?.isFocused) return;
+              activeWritingLine = null;
+              onfocuschange?.(false);
+            });
             return false;
           },
         },
@@ -936,6 +952,7 @@
 
   $effect(() => {
     fontFamily;
+    writingStyle;
     fitMode;
     focusMode;
     void tick().then(() => {
@@ -979,8 +996,10 @@
   class:fit-page={fitMode === "page"}
   class:focus-paragraph={focusMode === "paragraph"}
   class:focus-sentence={focusMode === "sentence"}
+  class:writing-literary={writingStyle === "literary"}
+  class:writing-typewriter={writingStyle === "typewriter"}
   class="paper-editor-shell"
-  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", MaruBuri, Pretendard, serif;--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px`}
+  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", ${paperFontFallback};--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px`}
 >
   <div class="paper-toolbar-note" aria-live="polite">
     <span>에디토리얼 A4</span>
@@ -1035,7 +1054,9 @@
 
 <style>
   .paper-editor-shell {
-    --writing-ink: #315f68;
+    --writing-caret: #8d493e;
+    --writing-graphite: #3b3530;
+    --writing-margin: #9a7868;
     position: relative;
     height: 100%;
     min-width: 0;
@@ -1132,36 +1153,39 @@
   .active-writing-line {
     position: absolute;
     z-index: 1;
-    left: 18mm;
-    width: 174mm;
-    border-bottom: 0.65px solid color-mix(in srgb, var(--writing-ink) 24%, transparent);
-    border-radius: 2px;
-    background: linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--writing-ink) 7%, transparent),
-      color-mix(in srgb, var(--writing-ink) 4%, transparent) 78%,
-      transparent
-    );
+    left: 20mm;
+    box-sizing: border-box;
+    width: 170mm;
     pointer-events: none;
   }
 
-  .active-writing-line::before {
+  .writing-typewriter .active-writing-line {
+    border-top: 0.5px solid color-mix(in srgb, var(--writing-graphite) 10%, transparent);
+    border-bottom: 0.5px solid color-mix(in srgb, var(--writing-graphite) 12%, transparent);
+    background: color-mix(in srgb, var(--writing-graphite) 3%, transparent);
+  }
+
+  .writing-typewriter .active-writing-line::before,
+  .writing-typewriter .active-writing-line::after {
     position: absolute;
-    top: calc(50% - 0.6px);
-    right: calc(100% + 2mm);
-    width: 7mm;
-    height: 1.2px;
-    border-radius: 999px;
-    background: linear-gradient(
-      90deg,
-      transparent,
-      color-mix(in srgb, var(--writing-ink) 38%, transparent) 24%,
-      color-mix(in srgb, var(--writing-ink) 68%, transparent) 72%,
-      transparent
-    );
+    top: 50%;
+    width: 2mm;
+    height: 0.5px;
+    background: color-mix(in srgb, var(--writing-graphite) 22%, transparent);
     content: "";
-    transform: rotate(-1.5deg);
-    transform-origin: right center;
+  }
+
+  .writing-typewriter .active-writing-line::before { right: 100%; }
+  .writing-typewriter .active-writing-line::after { left: 100%; }
+
+  .writing-literary .active-writing-line::before {
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 2mm);
+    width: 4mm;
+    height: 0.65px;
+    background: color-mix(in srgb, var(--writing-margin) 66%, transparent);
+    content: "";
   }
 
   .paper-editor-mount :global(.ProseMirror),
@@ -1174,7 +1198,7 @@
     background: transparent;
     padding: 22mm 20mm 18mm;
     color: #28231f;
-    caret-color: var(--writing-ink);
+    caret-color: var(--writing-caret);
     font-family: var(--paper-font);
     font-size: 11.5pt;
     font-variant-ligatures: contextual common-ligatures;
@@ -1183,6 +1207,15 @@
     text-rendering: optimizeLegibility;
     word-break: normal;
     overflow-wrap: break-word;
+  }
+
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror),
+  .writing-typewriter .paper-measure-host :global(.ProseMirror) {
+    font-size: 10.75pt;
+    font-synthesis: weight;
+    font-variant-ligatures: none;
+    letter-spacing: 0.01em;
+    line-height: 1.85;
   }
 
   .paper-editor-mount :global(.ProseMirror > *:first-child) { margin-top: 0; }
@@ -1201,6 +1234,13 @@
     font-weight: 700;
     letter-spacing: -0.025em;
     text-wrap: balance;
+  }
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror h1),
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror h2),
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror h3),
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror h4) {
+    font-weight: 600;
+    letter-spacing: 0.025em;
   }
   .paper-editor-mount :global(.ProseMirror h1) {
     margin: 4mm 0 12mm;

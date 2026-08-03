@@ -52,7 +52,7 @@
   let {
     value,
     readOnly = false,
-    fontFamily = "MaruBuri",
+    fontFamily = "NanumGothicCoding",
     onready,
     onchange,
     onselection,

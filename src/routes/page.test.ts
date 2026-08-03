@@ -85,6 +85,7 @@ describe("writing workspace toolbar", () => {
     const documentTools = topbar.querySelector(".document-toolbar")!;
     expect(formatting.querySelector(".style-select")).not.toBeNull();
     expect(formatting.querySelector(".font-select")).not.toBeNull();
+    expect(formatting.querySelector(".writing-style-toggle")).not.toBeNull();
     expect(documentTools.querySelector('[aria-label="삽입 메뉴"]')).not.toBeNull();
     expect(documentTools.querySelector('[aria-label="보기 메뉴"]')).not.toBeNull();
     expect(
@@ -133,6 +134,50 @@ describe("writing workspace toolbar", () => {
         ).not.toBeNull(),
       { timeout: 2_000 },
     );
+    unmount(component);
+  });
+
+  it("switches between paired typewriter and literary writing styles", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Page, { target });
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+
+    const toggle = target.querySelector<HTMLButtonElement>(
+      ".formatting-toolbar .writing-style-toggle",
+    )!;
+    const font = target.querySelector<HTMLSelectElement>(
+      ".formatting-toolbar .font-select select",
+    )!;
+    const paper = target.querySelector<HTMLElement>(".paper-editor-shell")!;
+
+    expect(font.value).toBe("NanumGothicCoding");
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(toggle.getAttribute("aria-label")).toBe(
+      "문학형 집필 스타일로 전환",
+    );
+    expect(paper.classList.contains("writing-typewriter")).toBe(true);
+
+    toggle.click();
+    await tick();
+    expect(font.value).toBe("MaruBuri");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(toggle.getAttribute("aria-label")).toBe(
+      "타자기형 집필 스타일로 전환",
+    );
+    expect(paper.classList.contains("writing-literary")).toBe(true);
+    expect(
+      JSON.parse(localStorage.getItem("research-writer.preferences")!)
+        .fontFamily,
+    ).toBe("MaruBuri");
+
+    font.value = "NanumGothicCoding";
+    font.dispatchEvent(new Event("change", { bubbles: true }));
+    await tick();
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(paper.classList.contains("writing-typewriter")).toBe(true);
     unmount(component);
   });
 

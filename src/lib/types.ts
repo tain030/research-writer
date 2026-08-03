@@ -61,6 +61,8 @@ export interface FontRecord {
   dataUrl?: string | null;
 }
 
+export type WritingStyle = "literary" | "typewriter";
+
 export interface SyncthingStatus {
   available: boolean;
   folderId: string | null;

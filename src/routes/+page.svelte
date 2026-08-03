@@ -77,6 +77,7 @@
     StoredVersion,
     SyncthingStatus,
     VersionSummary,
+    WritingStyle,
     ZoteroItem,
     ZoteroStatus,
   } from "$lib/types";
@@ -257,6 +258,12 @@
   );
   let formattingDisabled = $derived(
     !currentDocument || currentDocument.readOnly,
+  );
+  let writingStyle = $derived.by(
+    (): WritingStyle =>
+      fonts.find((font) => font.family === preferences.fontFamily)?.monospaced
+        ? "typewriter"
+        : "literary",
   );
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -457,6 +464,12 @@
 
   function toggleTheme(): void {
     preferences.theme = darkThemeActive ? "light" : "dark";
+    savePreferences();
+  }
+
+  function toggleWritingStyle(): void {
+    preferences.fontFamily =
+      writingStyle === "typewriter" ? "MaruBuri" : "NanumGothicCoding";
     savePreferences();
   }
 
@@ -2789,6 +2802,23 @@
           {/each}
         </select>
       </label>
+      <button
+        class:active={writingStyle === "typewriter"}
+        class="toolbar-icon-button writing-style-toggle"
+        title={writingStyle === "typewriter"
+          ? "현재 타자기형 · 문학형으로 전환"
+          : "현재 문학형 · 타자기형으로 전환"}
+        aria-label={writingStyle === "typewriter"
+          ? "문학형 집필 스타일로 전환"
+          : "타자기형 집필 스타일로 전환"}
+        aria-pressed={writingStyle === "typewriter"}
+        disabled={!currentDocument}
+        onclick={toggleWritingStyle}
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M7 3h10v6H7zM3 9h18M5 12h14l2 8H3l2-8ZM7 15h.01M10.3 15h.01M13.7 15h.01M17 15h.01M6 18h12"></path>
+        </svg>
+      </button>
       <span class="toolbar-divider"></span>
       <button
         class="format-button"
@@ -3213,6 +3243,7 @@
             fallbackTitle={documentFallbackTitle}
             documentPath={currentDocument.path}
             fontFamily={preferences.fontFamily}
+            {writingStyle}
             fitMode={preferences.pageFitMode}
             focusMode={preferences.focusMode}
             typewriterMode={preferences.typewriterMode}

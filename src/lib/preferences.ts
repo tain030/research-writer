@@ -2,7 +2,7 @@ import type { FocusMode } from "./types";
 
 export type PageFitMode = "page" | "width";
 
-export const PREFERENCES_SCHEMA_VERSION = 1;
+export const PREFERENCES_SCHEMA_VERSION = 2;
 
 export interface Preferences {
   schemaVersion: number;
@@ -20,7 +20,7 @@ export interface Preferences {
 
 export const defaultPreferences: Preferences = {
   schemaVersion: PREFERENCES_SCHEMA_VERSION,
-  fontFamily: "MaruBuri",
+  fontFamily: "NanumGothicCoding",
   pageFitMode: "width",
   focusMode: "off",
   typewriterMode: true,
@@ -44,6 +44,18 @@ function clampSplitRatio(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.min(0.7, Math.max(0.35, value))
     : defaultPreferences.companionSplitRatio;
+}
+
+function migrateFontFamily(
+  fontFamily: string,
+  storedSchemaVersion: number,
+): string {
+  if (storedSchemaVersion >= PREFERENCES_SCHEMA_VERSION) return fontFamily;
+  if (fontFamily === "MaruBuri") return defaultPreferences.fontFamily;
+  if (storedSchemaVersion < 1 && fontFamily === "Pretendard") {
+    return defaultPreferences.fontFamily;
+  }
+  return fontFamily;
 }
 
 export function parsePreferences(stored: string | null): Preferences {
@@ -71,11 +83,7 @@ export function parsePreferences(stored: string | null): Preferences {
         PREFERENCES_SCHEMA_VERSION,
         storedSchemaVersion,
       ),
-      fontFamily:
-        storedSchemaVersion < PREFERENCES_SCHEMA_VERSION &&
-        storedFontFamily === "Pretendard"
-          ? defaultPreferences.fontFamily
-          : storedFontFamily,
+      fontFamily: migrateFontFamily(storedFontFamily, storedSchemaVersion),
       pageFitMode:
         storedPageFitMode === "page" || storedPageFitMode === "width"
         ? storedPageFitMode

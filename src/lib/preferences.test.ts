@@ -6,29 +6,40 @@ import {
 } from "./preferences";
 
 describe("writing preferences", () => {
-  it("uses MaruBuri for a fresh profile", () => {
+  it("uses the typewriter font for a fresh profile", () => {
     expect(defaultPreferences.schemaVersion).toBe(PREFERENCES_SCHEMA_VERSION);
-    expect(defaultPreferences.fontFamily).toBe("MaruBuri");
+    expect(defaultPreferences.fontFamily).toBe("NanumGothicCoding");
     expect(defaultPreferences.pageFitMode).toBe("width");
     expect(defaultPreferences.companionSplitRatio).toBe(0.56);
-    expect(parsePreferences(null).fontFamily).toBe("MaruBuri");
+    expect(parsePreferences(null).fontFamily).toBe("NanumGothicCoding");
   });
 
-  it("migrates the legacy Pretendard default exactly once", () => {
+  it("migrates the previous bundled defaults exactly once", () => {
     expect(parsePreferences('{"fontFamily":"Pretendard"}')).toMatchObject({
       schemaVersion: PREFERENCES_SCHEMA_VERSION,
-      fontFamily: "MaruBuri",
+      fontFamily: "NanumGothicCoding",
+    });
+    expect(
+      parsePreferences(
+        JSON.stringify({
+          schemaVersion: 1,
+          fontFamily: "MaruBuri",
+        }),
+      ),
+    ).toMatchObject({
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      fontFamily: "NanumGothicCoding",
     });
     expect(
       parsePreferences(
         JSON.stringify({
           schemaVersion: PREFERENCES_SCHEMA_VERSION,
-          fontFamily: "Pretendard",
+          fontFamily: "MaruBuri",
         }),
       ),
     ).toMatchObject({
       schemaVersion: PREFERENCES_SCHEMA_VERSION,
-      fontFamily: "Pretendard",
+      fontFamily: "MaruBuri",
     });
   });
 
@@ -45,17 +56,23 @@ describe("writing preferences", () => {
     ).toBe(0.35);
   });
 
-  it("preserves an existing explicit font choice", () => {
+  it("preserves existing explicit and repository font choices", () => {
     const stored = JSON.stringify({
-      fontFamily: "MaruBuri",
+      schemaVersion: 1,
+      fontFamily: "Pretendard",
       measure: 72,
     });
 
     expect(parsePreferences(stored)).toMatchObject({
-      fontFamily: "MaruBuri",
+      fontFamily: "Pretendard",
       pageFitMode: "width",
       typewriterMode: true,
     });
+    expect(
+      parsePreferences(
+        JSON.stringify({ schemaVersion: 1, fontFamily: "Custom Mono" }),
+      ).fontFamily,
+    ).toBe("Custom Mono");
     expect("measure" in parsePreferences(stored)).toBe(false);
   });
 
