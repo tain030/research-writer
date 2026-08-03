@@ -132,9 +132,9 @@
   let currentDocument = $state<DocumentPayload | null>(null);
   let editorValue = $state("");
   let baseContent = $state("");
-  let editorApi = $state<EditorApi | null>(null);
-  let paperApi = $state<EditorApi | null>(null);
-  let sourceApi = $state<EditorApi | null>(null);
+  let editorApi = $state.raw<EditorApi | null>(null);
+  let paperApi = $state.raw<EditorApi | null>(null);
+  let sourceApi = $state.raw<EditorApi | null>(null);
   let activeEditor = $state<"paper" | "source">("paper");
   let SourceEditor = $state<SourceComponent | null>(null);
   let companionView = $state<CompanionView>(null);
