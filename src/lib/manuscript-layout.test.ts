@@ -109,6 +109,106 @@ describe("semantic Korean manuscript layout", () => {
     expect(page.cells[5 * MANUSCRIPT_COLUMNS + 1].text).toBe("첫");
   });
 
+  it("uses the same compact Latin-cell rules for titles and authors", () => {
+    const { pages } = layoutManuscript(
+      [
+        "---",
+        "title: My research 2026",
+        "author: Jane Doe",
+        "---",
+        "",
+        "본문",
+      ].join("\n"),
+    );
+    const page = pages[0];
+    const title = page.cells
+      .slice(MANUSCRIPT_COLUMNS, 2 * MANUSCRIPT_COLUMNS)
+      .filter((cell) => cell.filled);
+    const author = page.cells
+      .slice(3 * MANUSCRIPT_COLUMNS, 4 * MANUSCRIPT_COLUMNS)
+      .filter((cell) => cell.filled);
+
+    expect(title.map((cell) => cell.text)).toEqual([
+      "M",
+      "y",
+      " ",
+      "re",
+      "se",
+      "ar",
+      "ch",
+      " ",
+      "20",
+      "26",
+    ]);
+    expect(title[0].column).toBe(5);
+    expect(title.filter((cell) => cell.compact)).toHaveLength(6);
+    expect(author.map((cell) => cell.text)).toEqual([
+      "J",
+      "an",
+      "e",
+      " ",
+      "D",
+      "oe",
+    ]);
+    expect(author[0].column).toBe(12);
+  });
+
+  it("places edit-only guides for document and section headings", () => {
+    const source = "# 문서 제목\n\n## ";
+    const { pages } = layoutManuscript(source);
+
+    expect(pages[0].headingGuides).toEqual([
+      {
+        from: 0,
+        to: "# 문서 제목".length,
+        row: 1,
+        level: 1,
+        empty: false,
+        documentTitle: true,
+      },
+      {
+        from: source.indexOf("##"),
+        to: source.length,
+        row: 5,
+        level: 2,
+        empty: true,
+        documentTitle: false,
+      },
+    ]);
+  });
+
+  it("collapses a hidden title marker onto the first real title cell", () => {
+    const source = "# ab";
+    const layout = layoutManuscript(source);
+    const marker = caretPlacementForOffset(layout, 0, "forward");
+    const titleStart = caretPlacementForOffset(layout, 2, "forward");
+    const titleMiddle = caretPlacementForOffset(layout, 3, "forward");
+
+    expect(marker).toEqual(titleStart);
+    expect(titleStart.cellIndex).toBe(MANUSCRIPT_COLUMNS + 9);
+    expect([titleStart.slot, titleMiddle.slot]).toEqual([0, 1]);
+  });
+
+  it("leaves the title row empty while an empty document heading is active", () => {
+    const layout = layoutManuscript("#");
+    const { pages } = layout;
+    const titleCells = pages[0].cells.slice(
+      MANUSCRIPT_COLUMNS,
+      2 * MANUSCRIPT_COLUMNS,
+    );
+
+    expect(titleCells.every((cell) => !cell.filled)).toBe(true);
+    expect(pages[0].headingGuides[0]).toMatchObject({
+      level: 1,
+      empty: true,
+      documentTitle: true,
+    });
+    expect(caretPlacementForOffset(layout, 1, "forward")).toMatchObject({
+      pageIndex: 0,
+      cellIndex: MANUSCRIPT_COLUMNS + 9,
+    });
+  });
+
   it("groups lowercase Latin letters and digits two per cell", () => {
     const { pages } = layoutManuscript("# 제목\n\nab12한");
     const body = pages[0].cells.slice(5 * MANUSCRIPT_COLUMNS);

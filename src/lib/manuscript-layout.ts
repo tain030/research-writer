@@ -2,6 +2,7 @@ import {
   parseManuscript,
   type ManuscriptBlock,
   type ManuscriptBlockKind,
+  type ManuscriptHeadingLevel,
   type ManuscriptInline,
   type ManuscriptTextStyle,
   type ParsedManuscript,
@@ -54,10 +55,20 @@ export interface ManuscriptBlockPlacement {
   rows: number;
 }
 
+export interface ManuscriptHeadingGuide {
+  from: number;
+  to: number;
+  row: number;
+  level: ManuscriptHeadingLevel;
+  empty: boolean;
+  documentTitle: boolean;
+}
+
 export interface ManuscriptPage {
   number: number;
   cells: ManuscriptCell[];
   blocks: ManuscriptBlockPlacement[];
+  headingGuides: ManuscriptHeadingGuide[];
   endOffset: number;
 }
 
@@ -96,6 +107,7 @@ function blankPage(number: number): ManuscriptPage {
   return {
     number,
     blocks: [],
+    headingGuides: [],
     endOffset: 0,
     cells: Array.from(
       { length: MANUSCRIPT_CELLS_PER_PAGE },
@@ -327,9 +339,11 @@ export function layoutManuscript(
     lastOffset = unit.to;
   };
 
-  const headerEndRow = placeHeader(document, (targetRow, targetColumn, unit) => {
+  const header = placeHeader(document, value, (targetRow, targetColumn, unit) => {
     setDirect(targetRow, targetColumn, unit);
   });
+  const headerEndRow = header.endRow;
+  if (header.headingGuide) currentPage().headingGuides.push(header.headingGuide);
   for (let headerRow = 0; headerRow < headerEndRow; headerRow += 1) {
     for (let headerColumn = 0; headerColumn < MANUSCRIPT_COLUMNS; headerColumn += 1) {
       const cell = directCell(headerRow, headerColumn);
@@ -391,6 +405,16 @@ export function layoutManuscript(
 
     placeInterBlockGap(previousBlockTo, block.from, block.indent > 0);
     startBlockRow(block.from);
+    if (block.kind === "heading") {
+      currentPage().headingGuides.push({
+        from: block.from,
+        to: block.to,
+        row,
+        level: block.headingLevel ?? 2,
+        empty: block.detail.trim().length === 0,
+        documentTitle: false,
+      });
+    }
     for (let index = 0; index < block.indent; index += 1) {
       placeVirtual("", block.from, block.kind === "quote" ? "quote" : "normal");
     }
@@ -428,6 +452,21 @@ export function layoutManuscript(
   }
 
   placeTrailingLineBreaks(previousBlockTo);
+
+  if (header.headingGuide?.empty) {
+    const emptyTitleCaret = placement(
+      0,
+      header.headingGuide.row,
+      Math.floor((MANUSCRIPT_COLUMNS - 1) / 2),
+    );
+    for (
+      let offset = header.headingGuide.from;
+      offset <= header.headingGuide.to;
+      offset += 1
+    ) {
+      recordCollapsed(offset, emptyTitleCaret);
+    }
+  }
 
   finalizePage(currentPage(), lastOffset);
 
@@ -575,112 +614,140 @@ export function sameCaretPlacement(
   );
 }
 
+interface HeaderLayout {
+  endRow: number;
+  headingGuide?: ManuscriptHeadingGuide;
+}
+
 function placeHeader(
   document: ParsedManuscript,
+  sourceValue: string,
   place: (
     row: number,
     column: number,
     unit: ProjectedUnit,
   ) => void,
-): number {
+): HeaderLayout {
   const metadata = document.metadata;
   const source = document.metadataSource.range;
-  const sourceLength = Math.max(1, source.to - source.from);
-  let nextSource = source.from;
-  const headerText = (
-    text: string,
+  const virtual = document.metadataSource.kind !== "heading";
+  const placeUnits = (
+    units: ProjectedUnit[],
     targetRow: number,
     startColumn: number,
-    style: ManuscriptTextStyle,
   ) => {
     let targetColumn = startColumn;
-    for (const segment of segmentText(text)) {
-      const from = Math.min(source.to, nextSource);
-      const to = Math.min(source.to, from + Math.max(1, segment.length));
-      place(targetRow, targetColumn, {
-        text: segment,
-        from,
-        to,
-        style,
-        compact: false,
-        virtual: document.metadataSource.kind !== "heading",
-      });
+    for (const unit of units) {
+      place(targetRow, targetColumn, unit);
       targetColumn += 1;
-      nextSource = source.from + ((nextSource - source.from + segment.length) % sourceLength);
       if (targetColumn >= MANUSCRIPT_COLUMNS) break;
     }
   };
   const centered = (
-    text: string,
+    units: ProjectedUnit[],
     targetRow: number,
-    style: ManuscriptTextStyle,
   ) => {
-    const segments = segmentText(text).slice(0, MANUSCRIPT_COLUMNS);
-    const start = Math.max(0, Math.floor((MANUSCRIPT_COLUMNS - segments.length) / 2));
-    headerText(segments.join(""), targetRow, start, style);
+    const visible = units.slice(0, MANUSCRIPT_COLUMNS);
+    const start = Math.max(
+      0,
+      Math.floor((MANUSCRIPT_COLUMNS - visible.length) / 2),
+    );
+    placeUnits(visible, targetRow, start);
   };
   const rightAligned = (
     text: string,
     targetRow: number,
     style: ManuscriptTextStyle,
   ) => {
-    const segments = segmentText(text).slice(0, MANUSCRIPT_COLUMNS - 2);
-    const start = Math.max(0, MANUSCRIPT_COLUMNS - 2 - segments.length);
-    headerText(segments.join(""), targetRow, start, style);
+    const units = projectedUnitsForText(text, style, source, true).slice(
+      0,
+      MANUSCRIPT_COLUMNS - 2,
+    );
+    const start = Math.max(0, MANUSCRIPT_COLUMNS - 2 - units.length);
+    placeUnits(units, targetRow, start);
   };
 
-  if (metadata.genre) headerText(metadata.genre, 0, 1, "metadata");
-  const titleSegments = segmentText(metadata.title || "제목 없는 원고");
-  const titleLines: string[] = [];
-  for (let index = 0; index < titleSegments.length; index += 18) {
-    titleLines.push(titleSegments.slice(index, index + 18).join(""));
+  if (metadata.genre) {
+    placeUnits(
+      projectedUnitsForText(metadata.genre, "metadata", source, true).slice(
+        0,
+        MANUSCRIPT_COLUMNS - 1,
+      ),
+      0,
+      1,
+    );
   }
-  if (!titleLines.length) titleLines.push("제목 없는 원고");
+
+  const headingSource = document.titleHeadingRange
+    ? sourceValue.slice(
+        document.titleHeadingRange.from,
+        document.titleHeadingRange.to,
+      )
+    : "";
+  const emptyHeading =
+    document.metadataSource.kind === "heading" &&
+    /^#{1,6}(?:[ \t]+#+)?[ \t]*$/u.test(headingSource);
+  const titleText = emptyHeading
+    ? ""
+    : metadata.title || "제목 없는 원고";
+  const titleSource =
+    document.metadataSource.kind === "heading" && document.titleTextRange
+      ? document.titleTextRange
+      : source;
+  const titleUnits = projectedUnitsForText(
+    titleText,
+    "title",
+    titleSource,
+    virtual,
+  );
+  const titleLines: ProjectedUnit[][] = [];
+  for (let index = 0; index < titleUnits.length; index += 18) {
+    titleLines.push(titleUnits.slice(index, index + 18));
+  }
+  if (!titleLines.length) titleLines.push([]);
   let targetRow = 1;
   for (const line of titleLines.slice(0, 2)) {
-    centered(line, targetRow, "title");
+    centered(line, targetRow);
     targetRow += 1;
   }
   if (metadata.subtitle) {
-    centered(`― ${metadata.subtitle} ―`, targetRow, "subtitle");
+    centered(
+      projectedUnitsForText(
+        `― ${metadata.subtitle} ―`,
+        "subtitle",
+        source,
+        true,
+      ),
+      targetRow,
+    );
     targetRow += 1;
   }
   if (metadata.affiliation) rightAligned(metadata.affiliation, targetRow, "metadata");
   targetRow += 1;
   if (metadata.author) rightAligned(metadata.author, targetRow, "metadata");
   targetRow += 2;
-  return Math.min(MANUSCRIPT_ROWS - 1, Math.max(5, targetRow));
+  return {
+    endRow: Math.min(MANUSCRIPT_ROWS - 1, Math.max(5, targetRow)),
+    headingGuide:
+      document.metadataSource.kind === "heading" && document.titleHeadingRange
+        ? {
+            from: document.titleHeadingRange.from,
+            to: document.titleHeadingRange.to,
+            row: 1,
+            level: 1,
+            empty: emptyHeading,
+            documentTitle: true,
+          }
+        : undefined,
+  };
 }
 
 function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
   const grouped: ProjectedUnit[] = [];
-  const push = (unit: ProjectedUnit) => {
-    const previous = grouped.at(-1);
-    if (
-      previous &&
-      isHalfCellCharacter(previous.text) &&
-      isHalfCellCharacter(unit.text) &&
-      previous.style === unit.style &&
-      previous.to === unit.from
-    ) {
-      grouped[grouped.length - 1] = {
-        text: `${previous.text}${unit.text}`,
-        from: previous.from,
-        to: unit.to,
-        style: previous.style,
-        compact: true,
-        stops: Array.from(
-          new Set([...(previous.stops ?? [previous.from, previous.to]), unit.to]),
-        ).sort((left, right) => left - right),
-      };
-      return;
-    }
-    grouped.push(unit);
-  };
 
   for (const inline of block.inlines) {
     if (inline.atomic) {
-      push({
+      appendProjectedUnit(grouped, {
         text: inline.text,
         from: inline.from,
         to: inline.to,
@@ -692,7 +759,7 @@ function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
     }
     let offset = inline.from;
     for (const segment of graphemes(inline.text)) {
-      push({
+      appendProjectedUnit(grouped, {
         text: segment.segment,
         from: offset,
         to: offset + segment.segment.length,
@@ -704,6 +771,65 @@ function unitsForBlock(block: ManuscriptBlock): ProjectedUnit[] {
     }
   }
   return grouped;
+}
+
+function projectedUnitsForText(
+  text: string,
+  style: ManuscriptTextStyle,
+  source: { from: number; to: number },
+  virtual: boolean,
+): ProjectedUnit[] {
+  const units: ProjectedUnit[] = [];
+  let offset = source.from;
+  for (const segment of graphemes(text)) {
+    const from = Math.min(source.to, offset);
+    const to = Math.min(source.to, from + segment.segment.length);
+    appendProjectedUnit(units, {
+      text: segment.segment,
+      from,
+      to,
+      style,
+      compact: false,
+      virtual,
+      stops: virtual ? undefined : [from, to],
+    });
+    offset += segment.segment.length;
+  }
+  return units;
+}
+
+function appendProjectedUnit(
+  units: ProjectedUnit[],
+  unit: ProjectedUnit,
+): void {
+  const previous = units.at(-1);
+  if (
+    previous &&
+    isHalfCellCharacter(previous.text) &&
+    isHalfCellCharacter(unit.text) &&
+    previous.style === unit.style &&
+    (previous.to === unit.from || (previous.virtual && unit.virtual))
+  ) {
+    units[units.length - 1] = {
+      text: `${previous.text}${unit.text}`,
+      from: previous.from,
+      to: unit.to,
+      style: previous.style,
+      compact: true,
+      virtual: previous.virtual && unit.virtual,
+      stops:
+        previous.virtual && unit.virtual
+          ? undefined
+          : Array.from(
+              new Set([
+                ...(previous.stops ?? [previous.from, previous.to]),
+                unit.to,
+              ]),
+            ).sort((left, right) => left - right),
+    };
+    return;
+  }
+  units.push(unit);
 }
 
 function previousFilledCell(
@@ -729,10 +855,6 @@ function previousFilledCell(
 
 function isHalfCellCharacter(value: string): boolean {
   return /^[0-9a-z]$/u.test(value);
-}
-
-function segmentText(value: string): string[] {
-  return Array.from(graphemes(value), (entry) => entry.segment);
 }
 
 export function paginateManuscript(value: string): ManuscriptPage[] {

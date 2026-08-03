@@ -10,6 +10,7 @@
     type ManuscriptCaretPlacement,
     type ManuscriptBlockPlacement,
     type ManuscriptCell,
+    type ManuscriptHeadingGuide,
     type ManuscriptLayout,
   } from "./manuscript-layout";
   import type {
@@ -878,6 +879,30 @@
     return head >= block.from && head <= block.to;
   }
 
+  function headingGuideIsActive(guide: ManuscriptHeadingGuide): boolean {
+    return (
+      focused &&
+      !readOnly &&
+      activeCaretOffset >= guide.from &&
+      activeCaretOffset <= guide.to
+    );
+  }
+
+  function headingGuideLabel(guide: ManuscriptHeadingGuide): string {
+    if (guide.documentTitle) return "문서 제목";
+    if (guide.level === 2) return "큰 제목";
+    if (guide.level === 3) return "작은 제목";
+    return `${guide.level}단계 제목`;
+  }
+
+  function headingGuideStyle(guide: ManuscriptHeadingGuide): string {
+    return `top: ${(guide.row * 52 + 20) * manuscriptScale}px`;
+  }
+
+  function headingPlaceholderStyle(guide: ManuscriptHeadingGuide): string {
+    return `top: ${guide.row * 52 * manuscriptScale}px`;
+  }
+
   function isActiveCell(pageIndex: number, cellIndex: number): boolean {
     return (
       focused &&
@@ -1313,6 +1338,26 @@
           <div class="page-caption">20 × 20</div>
           <div class="manuscript-grid">
             {#if pageIsRendered(pageIndex)}
+              {#each page.headingGuides as guide (`${guide.from}:${guide.to}:${guide.row}`)}
+                {#if headingGuideIsActive(guide)}
+                  <span
+                    class="heading-guide"
+                    style={headingGuideStyle(guide)}
+                    aria-hidden="true"
+                  >
+                    <b>{"#".repeat(guide.level)}</b>
+                    <span>· {headingGuideLabel(guide)}</span>
+                  </span>
+                  {#if guide.empty}
+                    <span
+                      class:document-title-placeholder={guide.documentTitle}
+                      class="heading-placeholder"
+                      style={headingPlaceholderStyle(guide)}
+                      aria-hidden="true"
+                    >{headingGuideLabel(guide)}을 입력하세요</span>
+                  {/if}
+                {/if}
+              {/each}
               {#each page.cells as cell, cellIndex (cell.index)}
                 {@const ghost = ghostCharacter(pageIndex, cellIndex)}
                 {@const optimistic = optimisticCharacter(pageIndex, cellIndex)}
@@ -1686,10 +1731,63 @@
   .ghost-text {
     position: relative;
     z-index: 2;
-    display: block;
-    max-width: calc(var(--cell-size) - 3px);
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: calc(var(--cell-size) - 3px);
+    height: calc(var(--cell-size) + var(--row-gap) * 0.5);
     overflow: hidden;
+    line-height: 1.25;
     white-space: nowrap;
+  }
+
+  .heading-guide {
+    position: absolute;
+    z-index: 5;
+    right: calc(100% + 3px);
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 2px;
+    width: calc(var(--grid-left) + 12px);
+    overflow: hidden;
+    color: rgba(139, 64, 56, 0.76);
+    font-family: var(--ui-font);
+    font-size: clamp(8px, calc(var(--tab-font-size) * 0.84), 11px);
+    line-height: 1.2;
+    text-align: right;
+    white-space: nowrap;
+    pointer-events: none;
+    transform: translateY(-50%);
+  }
+
+  .heading-guide b {
+    color: rgba(151, 61, 52, 0.92);
+    font-family: NanumGothicCoding, monospace;
+    font-weight: 700;
+  }
+
+  .heading-placeholder {
+    position: absolute;
+    z-index: 3;
+    left: var(--cell-size);
+    display: flex;
+    align-items: center;
+    width: calc(100% - var(--cell-size));
+    height: var(--cell-size);
+    color: rgba(114, 94, 85, 0.48);
+    font-family: var(--ui-font);
+    font-size: clamp(9px, calc(var(--writing-font-size) * 0.54), 15px);
+    letter-spacing: 0.04em;
+    line-height: 1;
+    pointer-events: none;
+  }
+
+  .heading-placeholder.document-title-placeholder {
+    left: 0;
+    justify-content: center;
+    width: 100%;
   }
 
   .manuscript-cell.selected::before {
@@ -1922,6 +2020,13 @@
 
     .page-stack.single-sheet .manuscript-page {
       animation: none;
+    }
+  }
+
+  @media print {
+    .heading-guide,
+    .heading-placeholder {
+      display: none;
     }
   }
 </style>

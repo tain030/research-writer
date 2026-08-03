@@ -153,6 +153,7 @@ export function projectedPagesForRender(
     result.push({
       number: result.length + 1,
       blocks: [],
+      headingGuides: [],
       endOffset: caretOffset,
       cells: Array.from(
         { length: MANUSCRIPT_CELLS_PER_PAGE },

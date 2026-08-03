@@ -57,6 +57,37 @@ describe("manuscript editor input", () => {
     unmount(component);
   });
 
+  it("explains an empty Markdown heading only while its row is being edited", async () => {
+    const source = "## \n\n본문";
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Editor, {
+      target,
+      props: { value: source, fallbackTitle: "제목" },
+    });
+    await tick();
+
+    const input = target.querySelector("textarea")!;
+    input.focus();
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await tick();
+
+    expect(target.querySelector(".heading-guide")?.textContent?.replaceAll(/\s/g, ""))
+      .toBe("##·큰제목");
+    expect(target.querySelector(".heading-placeholder")?.textContent).toBe(
+      "큰 제목을 입력하세요",
+    );
+
+    input.setSelectionRange(source.length, source.length);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await tick();
+
+    expect(target.querySelector(".heading-guide")).toBeNull();
+    expect(target.querySelector(".heading-placeholder")).toBeNull();
+    unmount(component);
+  });
+
   it("does not intercept Enter while the Korean IME is composing", async () => {
     const changes: Array<[string, EditorChangeContext]> = [];
     const target = document.createElement("div");

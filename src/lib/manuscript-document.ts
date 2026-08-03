@@ -18,6 +18,8 @@ export type ManuscriptTextStyle =
   | "quote"
   | "footnote";
 
+export type ManuscriptHeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
+
 export type ManuscriptBlockKind =
   | "paragraph"
   | "heading"
@@ -90,6 +92,7 @@ export interface ManuscriptBlock extends SourceRange {
   indent: number;
   continuationIndent: number;
   marker?: string;
+  headingLevel?: ManuscriptHeadingLevel;
 }
 
 export interface MetadataSource {
@@ -434,16 +437,21 @@ function appendBlockNode(
       return;
     }
     case "heading": {
+      const headingLevel = Math.max(
+        1,
+        Math.min(6, node.depth ?? 2),
+      ) as ManuscriptHeadingLevel;
       blocks.push({
         id: blockId("heading", range),
         kind: "heading",
-        label: `${node.depth ?? 2}단계 제목`,
+        label: `${headingLevel}단계 제목`,
         detail: nodePlainText(node),
         from: range.from,
         to: range.to,
         inlines: inlineContent(node, source, "heading"),
         indent: 1,
         continuationIndent: 0,
+        headingLevel,
       });
       return;
     }
