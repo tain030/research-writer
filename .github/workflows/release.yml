@@ -200,7 +200,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       RELEASE_NOTES: |
-        고정된 Electron/Chromium 엔진으로 Linux, macOS, Windows에서 같은 A4 편집·조판 결과를 제공하는 첫 크로스 플랫폼 릴리스입니다. 공개 코드 서명과 Apple 공증은 아직 적용되지 않았습니다.
+        고정된 Electron/Chromium 엔진으로 Linux, macOS, Windows에서 같은 A4 편집·조판 결과를 제공합니다. 공개 코드 서명과 Apple 공증은 아직 적용되지 않았습니다.
 
         Debian/Ubuntu에서는 이전 버전을 지우지 말고 새 파일을 그대로 덮어 설치하면 원고와 설정을 유지한 채 업그레이드됩니다.
 

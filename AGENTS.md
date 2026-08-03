@@ -12,6 +12,8 @@ git config --local --get researchwriter.role
 - Source changes, commits, pushes, release version changes, and tags are made only here.
 - Run `pnpm verify` before pushing a completed change to `main`.
 - After pushing, run `pnpm server:check` and `pnpm server:sync` to update the server validation mirror.
+- A user request to complete a deployment or update is not finished at source sync. Create the next stable release, wait for the GitHub Release assets, verify and install the published `.deb` on the developer notebook, then confirm the installed package version and final server HEAD.
+- Ordinary implementation work does not imply a release unless the user also requests deployment or an update.
 
 ## `server`
 

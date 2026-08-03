@@ -71,6 +71,34 @@ git push origin v0.8.0
 
 GitHub Actions가 각 운영체제 패키지와 `SHA256SUMS`를 만든다. 서버는 태그나 Release를 만들지 않는다.
 
+사용자가 배포 또는 업데이트 완료를 요청한 경우에는 Release workflow 성공만으로 끝내지 않는다. 공개 Release가 최신·비초안 상태인지 확인하고 노트북의 설치 패키지까지 갱신한다.
+
+```sh
+release_version=0.8.0
+release_dir=$(mktemp -d /tmp/research-writer-release.XXXXXX)
+gh release download "v${release_version}" \
+  --pattern research-writer_amd64.deb \
+  --pattern SHA256SUMS \
+  --dir "$release_dir"
+(
+  cd "$release_dir"
+  grep ' research-writer_amd64.deb$' SHA256SUMS | sha256sum -c -
+)
+test "$(dpkg-deb -f "$release_dir/research-writer_amd64.deb" Package)" = research-writer
+test "$(dpkg-deb -f "$release_dir/research-writer_amd64.deb" Version)" = "$release_version"
+test "$(dpkg-deb -f "$release_dir/research-writer_amd64.deb" Architecture)" = amd64
+install -m 0644 "$release_dir/research-writer_amd64.deb" \
+  "$HOME/Downloads/research-writer_${release_version}_amd64.deb"
+install -m 0644 "$release_dir/research-writer_amd64.deb" \
+  /tmp/research-writer_amd64.deb
+pkexec /usr/bin/apt-get install -y /tmp/research-writer_amd64.deb
+rm /tmp/research-writer_amd64.deb
+test "$(dpkg-query -W -f='${Version}' research-writer)" = "$release_version"
+pnpm server:check
+```
+
+설치 전에 Research Writer가 실행 중인지 확인한다. 실행 중이면 저장되지 않은 원고를 보호하기 위해 강제로 종료하지 말고 사용자가 닫을 때까지 기다린다. Release 검증이나 체크섬 검증이 실패하면 패키지를 설치하지 않는다.
+
 ## 점검과 복구
 
 ```sh
