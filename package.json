@@ -26,6 +26,9 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test": "vitest run",
+    "verify": "sh scripts/verify-local.sh",
+    "server:check": "sh _deploy/deploy-to-server.sh --dry-run",
+    "server:sync": "sh _deploy/deploy-to-server.sh",
     "release:check": "node scripts/release-version.mjs check",
     "release:version": "node scripts/release-version.mjs set"
   },

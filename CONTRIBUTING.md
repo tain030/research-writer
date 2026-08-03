@@ -11,16 +11,14 @@
 ## 변경 전 확인
 
 ```bash
+git config --local --get researchwriter.role
 pnpm install --frozen-lockfile
-pnpm check
-pnpm test
-pnpm build
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
+pnpm verify
 ```
 
-로컬 Rust 도구 구성이 어렵다면 `./scripts/test-linux-container.sh`를 사용합니다.
+`pnpm verify`는 호스트에 C 링커가 없으면 Rust 검증을 Docker로 자동 전환합니다. 프런트엔드까지 고정된 Linux 환경에서 검사하려면 `./scripts/test-linux-container.sh`를 사용합니다.
+
+코드는 `researchwriter.role=developer`인 노트북 체크아웃에서만 수정합니다. `researchwriter.role=server`인 `/home/tain/research-writer`는 읽기 전용 검증 미러이며 `_deploy/deploy-to-server.sh`의 clean fast-forward 외에는 갱신하지 않습니다. 노트북에서 `main`을 push한 뒤 `pnpm server:check`, `pnpm server:sync` 순서로 서버 전체 회귀 검사를 실행합니다.
 
 ## 테스트 기대치
 

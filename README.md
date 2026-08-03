@@ -112,9 +112,10 @@ Research Agent는 HTTPS API 또는 로컬 `source_index.jsonl`과 출처 카드�
 
 ## 개발
 
-Node, pnpm, Rust 버전은 저장소에 고정되어 있습니다.
+Node, pnpm, Rust 버전은 저장소에 고정되어 있습니다. 소스 코드의 기준은 GitHub `main`이며 노트북의 `developer` 체크아웃에서만 수정·commit·push·tag합니다. 이 서버의 `/home/tain/research-writer`는 앱 호스팅 서버가 아니라 push가 차단된 Linux 검증 미러입니다.
 
 ```bash
+_deploy/configure-checkout.sh developer
 corepack enable
 pnpm install --frozen-lockfile
 pnpm dev
@@ -125,23 +126,27 @@ pnpm dev
 전체 검증 명령은 다음과 같습니다.
 
 ```bash
-pnpm check
-pnpm test
-pnpm build
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
+pnpm verify
 ```
 
-Docker는 Linux에서 같은 도구 버전으로 검사하기 위한 보조 수단입니다. GUI 앱 자체는 컨테이너에 넣지 않습니다.
+`pnpm verify`는 호스트에 C 링커가 없으면 Rust 검증만 Docker로 자동 전환합니다. 프런트엔드까지 고정된 Linux 환경에서 다시 검사하려면 아래 명령을 사용합니다. GUI 앱 자체는 컨테이너에 넣지 않습니다.
 
 ```bash
 ./scripts/test-linux-container.sh
 ```
 
+변경을 `origin/main`에 push한 뒤 노트북에서 다음 명령을 실행하면 서버가 clean·fast-forward 가능 여부를 확인하고 같은 Docker 전체 검사를 통과한 커밋만 유지합니다. 실패하면 이전 서버 커밋으로 롤백합니다.
+
+```bash
+pnpm server:check
+pnpm server:sync
+```
+
+소스 코드는 Syncthing으로 양방향 복사하지 않습니다. Syncthing은 사용자가 연 원고 저장소에만 선택적으로 사용합니다. 최초 설정과 복구 절차는 [노트북 개발·서버 검증 Runbook](_deploy/README.md)에 있습니다.
+
 ## 릴리스
 
-버전을 한 번 설정하고 같은 커밋에 태그를 푸시하면 GitHub Actions가 전체 검사를 실행한 뒤 Linux, macOS, Windows 설치 파일 8개와 통합 체크섬을 자동으로 공개합니다.
+서버 동기화까지 성공한 뒤 노트북에서 버전을 한 번 설정하고 같은 커밋에 태그를 푸시하면 GitHub Actions가 전체 검사를 실행한 뒤 Linux, macOS, Windows 설치 파일 8개와 통합 체크섬을 자동으로 공개합니다. 서버에서는 태그나 Release를 만들지 않습니다.
 
 ```bash
 pnpm release:version 0.7.0

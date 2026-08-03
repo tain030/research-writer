@@ -36,6 +36,10 @@ jobs:
           node --check scripts/electron-smoke.mjs
           node --check scripts/collect-release-artifacts.mjs
           node --check scripts/release-version.mjs
+          sh -n _deploy/configure-checkout.sh
+          sh -n _deploy/deploy-to-server.sh
+          sh -n scripts/test-linux-container.sh
+          sh -n scripts/verify-local.sh
       - run: pnpm check
       - run: pnpm test
       - run: pnpm build

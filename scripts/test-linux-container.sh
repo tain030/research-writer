@@ -4,6 +4,33 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="research-writer-linux-ci:1.97.1"
 
+case "${1:-}" in
+  '')
+    validation_command='
+      set -eu
+      pnpm install --frozen-lockfile
+      pnpm check
+      pnpm test
+      pnpm build
+      cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
+    '
+    ;;
+  --rust-only)
+    validation_command='
+      set -eu
+      cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
+    '
+    ;;
+  *)
+    printf '%s\n' "사용법: scripts/test-linux-container.sh [--rust-only]" >&2
+    exit 2
+    ;;
+esac
+
 docker build \
   --file "${project_dir}/docker/Dockerfile.linux-ci" \
   --tag "${image}" \
@@ -19,13 +46,4 @@ docker run --rm \
   --env PNPM_HOME=/pnpm \
   --env PNPM_STORE_DIR=/pnpm/store \
   "${image}" \
-  sh -c '
-    set -eu
-    pnpm install --frozen-lockfile
-    pnpm check
-    pnpm test
-    pnpm build
-    cargo fmt --manifest-path src-tauri/Cargo.toml --check
-    cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
-    cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
-  '
+  sh -c "${validation_command}"

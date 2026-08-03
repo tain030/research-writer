@@ -96,6 +96,8 @@ GitHub Actions는 프런트엔드 검사와 Rust 테스트를 Linux, macOS, Wind
 
 모든 패키지를 모은 뒤 하나의 `SHA256SUMS`를 만들고 GitHub Release를 공개합니다. Docker 이미지는 고정된 Linux 검사 환경일 뿐 GUI 실행이나 배포 산출물의 기반이 아닙니다.
 
+개발 체크아웃과 서버 검증 미러도 분리합니다. 노트북의 `developer` 체크아웃만 GitHub에 쓸 수 있고 서버의 `server` 체크아웃은 공개 origin을 fetch하되 push URL을 비활성 프로토콜로 고정합니다. 명시적인 SSH 동기화가 양쪽 clean 상태, `origin/main` 일치와 fast-forward 가능 여부를 확인한 뒤 서버 커밋을 갱신하고 Docker 전체 회귀 검사를 실행합니다. 검증 실패 시 서버 브랜치를 이전 커밋으로 복원합니다. Research Writer 자체는 서버 상시 프로세스를 두지 않습니다.
+
 ## 의도적으로 넣지 않은 것
 
 - 독점 문서 포맷 또는 이중 원본 모델
