@@ -1,6 +1,6 @@
 {
   "name": "research-writer",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "A quiet, local-first research writing editor.",
   "type": "module",
   "private": true,

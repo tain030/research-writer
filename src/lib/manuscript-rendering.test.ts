@@ -36,4 +36,29 @@ describe("manuscript glyph rendering", () => {
     expect(printStyles).toContain(".heading-placeholder");
     expect(printStyles).toContain("display: none");
   });
+
+  it("keeps paired Latin glyphs near the surrounding text size", () => {
+    const pair = styleBlock(
+      ".half-cell-pair .cell-text,\n  .half-cell-pair .ghost-text",
+    );
+    const glyph = styleBlock(".half-cell-glyph");
+
+    expect(pair).toContain(
+      "grid-template-columns: repeat(2, minmax(0, 1fr))",
+    );
+    expect(pair).toContain("font-size: 0.94em");
+    expect(pair).toContain("letter-spacing: 0");
+    expect(glyph).toContain("transform: scaleX(0.88)");
+    expect(pair).not.toContain("var(--writing-font-size)");
+  });
+
+  it("classifies the text currently shown during optimistic rendering", () => {
+    expect(editorSource).toContain(
+      "{@const displayedText = optimistic || cell.text || ghost}",
+    );
+    expect(editorSource).toContain(
+      "class:compact-cell={cell.compact && !halfCellPair}",
+    );
+    expect(editorSource).toContain("class:half-cell-pair={halfCellPair}");
+  });
 });

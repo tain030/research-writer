@@ -7,6 +7,7 @@ import {
   type ManuscriptTextStyle,
   type ParsedManuscript,
 } from "./manuscript-document";
+import { isHalfCellCharacter } from "./manuscript-characters";
 
 export const MANUSCRIPT_COLUMNS = 20;
 export const MANUSCRIPT_ROWS = 20;
@@ -851,10 +852,6 @@ function previousFilledCell(
     }
   }
   return null;
-}
-
-function isHalfCellCharacter(value: string): boolean {
-  return /^[0-9a-z]$/u.test(value);
 }
 
 export function paginateManuscript(value: string): ManuscriptPage[] {

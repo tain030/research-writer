@@ -13,6 +13,7 @@
     type ManuscriptHeadingGuide,
     type ManuscriptLayout,
   } from "./manuscript-layout";
+  import { isHalfCellPair, packHalfCellText } from "./manuscript-characters";
   import type {
     ManuscriptLayoutRequest,
     ManuscriptLayoutResponse,
@@ -191,7 +192,7 @@
   let activeFocusRange = $derived(
     focusRange(internalValue, selectionFrom, selectionTo, focusMode),
   );
-  let ghostGraphemes = $derived(segmentGraphemes(ghostText));
+  let ghostCells = $derived(packHalfCellText(ghostText));
 
   function selectionInfo(): SelectionInfo {
     const from = Math.min(selectionFrom, selectionTo);
@@ -914,7 +915,7 @@
 
   function ghostCharacter(pageIndex: number, cellIndex: number): string {
     if (
-      !ghostGraphemes.length ||
+      !ghostCells.length ||
       selectionFrom !== selectionTo ||
       selectionTo !== internalValue.length
     ) {
@@ -929,7 +930,7 @@
       (pageIndex - activePageIndex) * MANUSCRIPT_CELLS_PER_PAGE +
       cellIndex -
       startCell;
-    return relative >= 0 ? (ghostGraphemes[relative] ?? "") : "";
+    return relative >= 0 ? (ghostCells[relative] ?? "") : "";
   }
 
   function optimisticCharacter(pageIndex: number, cellIndex: number): string {
@@ -1074,17 +1075,6 @@
     }
   }
 
-  function segmentGraphemes(text: string): string[] {
-    if (!text) return [];
-    if (graphemeSegmenter) {
-      return Array.from(
-        graphemeSegmenter.segment(text),
-        (entry) => entry.segment,
-      );
-    }
-    return Array.from(text);
-  }
-
   function paperGrainSeed(pageNumber: number, salt: number): number {
     const value = Math.sin(pageNumber * 12.9898 + salt * 78.233) * 43758.5453;
     return value - Math.floor(value);
@@ -1150,11 +1140,6 @@
     if (viewportFrame !== null) return;
     viewportFrame = requestAnimationFrame(measureViewport);
   }
-
-  const graphemeSegmenter =
-    typeof Intl !== "undefined" && "Segmenter" in Intl
-      ? new Intl.Segmenter("ko", { granularity: "grapheme" })
-      : null;
 
   function focusRange(
     content: string,
@@ -1262,6 +1247,16 @@
   });
 </script>
 
+{#snippet cellGlyphs(text: string)}
+  {#if isHalfCellPair(text)}
+    {#each [text[0], text[1]] as glyph}<span class="half-cell-glyph"
+        >{glyph}</span
+      >{/each}
+  {:else}
+    {text}
+  {/if}
+{/snippet}
+
 <div
   class:focused
   class:layout-pending={layoutPending}
@@ -1361,6 +1356,8 @@
               {#each page.cells as cell, cellIndex (cell.index)}
                 {@const ghost = ghostCharacter(pageIndex, cellIndex)}
                 {@const optimistic = optimisticCharacter(pageIndex, cellIndex)}
+                {@const displayedText = optimistic || cell.text || ghost}
+                {@const halfCellPair = isHalfCellPair(displayedText)}
                 {@const diagnosticSeverity =
                   showDiagnostics && (cell.filled || cell.blockContinuation)
                     ? diagnosticSeverityForRange(
@@ -1384,7 +1381,8 @@
                   class:style-code={cell.style === "code"}
                   class:style-quote={cell.style === "quote"}
                   class:style-footnote={cell.style === "footnote"}
-                  class:compact-cell={cell.compact}
+                  class:compact-cell={cell.compact && !halfCellPair}
+                  class:half-cell-pair={halfCellPair}
                   class:virtual-cell={cell.virtual}
                   class:block-reserved={cell.blockContinuation}
                   class:diagnostic-error={diagnosticSeverity === "error"}
@@ -1404,14 +1402,16 @@
                   onpointerenter={(event) => extendCellSelection(event, cell)}
                 >
                   {#if optimistic}
-                    <span class="cell-text optimistic-text">{optimistic}</span>
+                    <span class="cell-text optimistic-text"
+                      >{@render cellGlyphs(optimistic)}</span
+                    >
                   {:else if cell.text}
                     <span
                       class="cell-text"
                       style={glyphJitterStyle(pageIndex, cellIndex)}
-                    >{cell.text}</span>
+                    >{@render cellGlyphs(cell.text)}</span>
                   {:else if ghost}
-                    <span class="ghost-text">{ghost}</span>
+                    <span class="ghost-text">{@render cellGlyphs(ghost)}</span>
                   {/if}
                 </span>
               {/each}
@@ -1861,6 +1861,23 @@
     color: #466267;
     font-family: NanumGothicCoding, monospace;
     font-size: calc(var(--writing-font-size) * 0.66);
+  }
+
+  .half-cell-pair .cell-text,
+  .half-cell-pair .ghost-text {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    font-size: 0.94em;
+    letter-spacing: 0;
+  }
+
+  .half-cell-glyph {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    transform: scaleX(0.88);
+    transform-origin: center;
   }
 
   .compact-cell {

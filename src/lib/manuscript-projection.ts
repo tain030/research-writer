@@ -7,6 +7,10 @@ import {
   type ManuscriptLayout,
   type ManuscriptPage,
 } from "./manuscript-layout";
+import {
+  isHalfCellCharacter,
+  manuscriptGraphemes,
+} from "./manuscript-characters";
 
 export interface ManuscriptOptimisticProjection {
   cells: Record<number, string>;
@@ -21,11 +25,6 @@ interface ContiguousEdit {
   deletedTo: number;
   inserted: string;
 }
-
-const segmenter =
-  typeof Intl !== "undefined" && "Segmenter" in Intl
-    ? new Intl.Segmenter("ko", { granularity: "grapheme" })
-    : null;
 
 export function contiguousEdit(
   previous: string,
@@ -88,7 +87,7 @@ export function projectManuscriptEdit(
     pendingHalfCell = false;
   };
 
-  for (const segment of graphemes(edit.inserted)) {
+  for (const segment of manuscriptGraphemes(edit.inserted)) {
     if (segment === "\n") {
       lineBreakRun += 1;
       if (lineBreakRun === 1) nextRow();
@@ -172,15 +171,4 @@ export function projectedPagesForRender(
     });
   }
   return result;
-}
-
-function graphemes(value: string): string[] {
-  if (segmenter) {
-    return Array.from(segmenter.segment(value), (entry) => entry.segment);
-  }
-  return Array.from(value);
-}
-
-function isHalfCellCharacter(value: string): boolean {
-  return /^[0-9a-z]$/u.test(value);
 }

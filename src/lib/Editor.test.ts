@@ -228,7 +228,7 @@ describe("manuscript editor input", () => {
     unmount(component);
   });
 
-  it("moves through both positions in a compact Latin cell", async () => {
+  it("moves through both positions in a paired Latin cell", async () => {
     const source = "# 제목\n\nab";
     const target = document.createElement("div");
     document.body.append(target);
@@ -254,6 +254,85 @@ describe("manuscript editor input", () => {
     expect(input.selectionStart).toBe(source.length - 1);
     const caret = target.querySelector<HTMLElement>("[data-caret='true']")!;
     expect(caret.style.getPropertyValue("--caret-x")).toBe("50%");
+    unmount(component);
+  });
+
+  it("renders paired text in two slots relative to title and metadata sizes", async () => {
+    const source = [
+      "---",
+      "title: My research 2026",
+      "author: Jane Doe",
+      "---",
+      "",
+      "minimum ww ii",
+    ].join("\n");
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Editor, {
+      target,
+      props: { value: source, fallbackTitle: "제목" },
+    });
+    await tick();
+
+    const pairs = Array.from(
+      target.querySelectorAll<HTMLElement>(".half-cell-pair"),
+    );
+    const titlePair = pairs.find(
+      (cell) => cell.classList.contains("style-title") && cell.textContent === "re",
+    );
+    const authorPair = pairs.find(
+      (cell) => cell.classList.contains("style-metadata") && cell.textContent === "an",
+    );
+    const bodyPair = pairs.find(
+      (cell) => !cell.classList.contains("style-title") && cell.textContent === "ww",
+    );
+
+    expect(titlePair).toBeDefined();
+    expect(authorPair).toBeDefined();
+    expect(bodyPair).toBeDefined();
+    expect(titlePair?.classList.contains("compact-cell")).toBe(false);
+    expect(authorPair?.classList.contains("compact-cell")).toBe(false);
+    expect(bodyPair?.querySelectorAll(".half-cell-glyph")).toHaveLength(2);
+    const singleTitleLetter = Array.from(
+      target.querySelectorAll<HTMLElement>(".style-title"),
+    ).find((cell) => cell.textContent === "y");
+    expect(singleTitleLetter).toBeDefined();
+    expect(singleTitleLetter?.classList.contains("half-cell-pair")).toBe(false);
+    unmount(component);
+  });
+
+  it("packs Latin AI ghost text into the same paired cells", async () => {
+    const ready: {
+      api: {
+        setSelection: (from: number, to: number) => void;
+        setGhostText: (text: string) => void;
+      } | null;
+    } = { api: null };
+    const source = "# 제목\n\n끝";
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Editor, {
+      target,
+      props: {
+        value: source,
+        fallbackTitle: "제목",
+        onready: (next) => {
+          ready.api = next;
+        },
+      },
+    });
+    await tick();
+
+    expect(ready.api).not.toBeNull();
+    ready.api!.setSelection(source.length, source.length);
+    ready.api!.setGhostText("research 20");
+    await tick();
+
+    const ghostPairs = Array.from(
+      target.querySelectorAll<HTMLElement>(".half-cell-pair .ghost-text"),
+      (element) => element.textContent,
+    );
+    expect(ghostPairs).toEqual(["re", "se", "ar", "ch", "20"]);
     unmount(component);
   });
 
