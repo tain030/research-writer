@@ -50,7 +50,7 @@ export interface ManuscriptMetadata {
   affiliation: string;
   genre: string;
   schema: number;
-  layout: "traditional-ko";
+  layout: "editorial-a4";
 }
 
 export interface SourceRange {
@@ -155,7 +155,7 @@ const defaultMetadata: ManuscriptMetadata = {
   affiliation: "",
   genre: "",
   schema: 1,
-  layout: "traditional-ko",
+  layout: "editorial-a4",
 };
 
 const blockKinds = new Set<ManuscriptBlockKind>([
@@ -223,7 +223,7 @@ export function parseManuscript(
     affiliation: scalar(frontmatter.affiliation),
     genre: scalar(frontmatter.genre),
     schema: numeric(frontmatter.research_writer?.schema, 1),
-    layout: "traditional-ko",
+    layout: "editorial-a4",
   };
 
   const blocks: ManuscriptBlock[] = [];
@@ -277,7 +277,7 @@ export function updateManuscriptMetadata(
   metadata: ManuscriptMetadata,
   fallbackTitle = "제목 없는 원고",
 ): string {
-  const parsed = parseManuscript(content, fallbackTitle);
+  const parsed = parseManuscript(content, fallbackTitle, { diagnostics: false });
   let nextContent = content;
 
   if (
@@ -290,7 +290,9 @@ export function updateManuscriptMetadata(
       nextContent.slice(0, from) + metadata.title.trim() + nextContent.slice(to);
   }
 
-  const reparsed = parseManuscript(nextContent, fallbackTitle);
+  const reparsed = parseManuscript(nextContent, fallbackTitle, {
+    diagnostics: false,
+  });
   const existingRange = reparsed.frontmatterRange;
   const existingBody = existingRange
     ? nextContent.slice(existingRange.from + 4, Math.max(existingRange.from + 4, existingRange.to - 4))
@@ -302,7 +304,7 @@ export function updateManuscriptMetadata(
   yaml.set("affiliation", metadata.affiliation.trim());
   yaml.set("genre", metadata.genre.trim());
   yaml.setIn(["research_writer", "schema"], 1);
-  yaml.setIn(["research_writer", "layout"], "traditional-ko");
+  yaml.setIn(["research_writer", "layout"], "editorial-a4");
   const rendered = yaml.toString({ lineWidth: 0 }).trimEnd();
   const frontmatter = `---\n${rendered}\n---`;
 

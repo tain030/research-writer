@@ -14,6 +14,12 @@ describe("semantic Markdown formatting", () => {
     expect(currentBlockStyle(edit.replacement, 3)).toBe("heading2");
   });
 
+  it("offers a document-title style instead of requiring raw Markdown", () => {
+    const edit = applyBlockStyle("새 원고", { from: 0, to: 4 }, "heading1");
+    expect(edit.replacement).toBe("# 새 원고");
+    expect(currentBlockStyle(edit.replacement, 3)).toBe("heading1");
+  });
+
   it("wraps and unwraps strong text while retaining the text selection", () => {
     const wrapped = toggleInlineStyle("강조", { from: 0, to: 2 }, "strong");
     expect(wrapped).toMatchObject({

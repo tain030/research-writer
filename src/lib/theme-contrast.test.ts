@@ -1,4 +1,3 @@
-// @ts-expect-error The production bundle has no Node dependency; Vitest provides this built-in at test time.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 

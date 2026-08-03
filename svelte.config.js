@@ -1,7 +1,5 @@
-// Tauri doesn't have a Node.js server to do proper SSR
-// so we use adapter-static with a fallback to index.html to put the site in SPA mode
+// Electron loads the generated files directly, so the app is emitted as a static SPA.
 // See: https://svelte.dev/docs/kit/single-page-apps
-// See: https://v2.tauri.app/start/frontend/sveltekit/ for more info
 import adapter from "@sveltejs/adapter-static";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 
@@ -9,9 +7,28 @@ import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 const config = {
   preprocess: vitePreprocess(),
   kit: {
-    adapter: adapter({
-      fallback: "index.html",
-    }),
+    adapter: adapter(),
+    paths: {
+      relative: true,
+    },
+    csp: {
+      mode: "hash",
+      directives: {
+        "default-src": ["self"],
+        "base-uri": ["none"],
+        "object-src": ["none"],
+        "frame-ancestors": ["none"],
+        "script-src": ["self"],
+        "style-src": ["self", "unsafe-inline"],
+        "img-src": ["self", "data:", "blob:"],
+        "font-src": ["self", "data:"],
+        "connect-src": [
+          "self",
+          "http://127.0.0.1:1420",
+          "ws://127.0.0.1:1420",
+        ],
+      },
+    },
   },
 };
 

@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Release tags must use stable SemVer such as v0.1.4."
+            echo "::error::Release tags must use stable SemVer such as v0.7.0."
             exit 1
           fi
 
@@ -44,7 +44,6 @@ jobs:
             echo "::error::The release tag must point to a commit on main."
             exit 1
           fi
-
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   quality:
@@ -55,12 +54,35 @@ jobs:
       contents: read
 
   package:
-    name: Package Linux x64
+    name: Package ${{ matrix.name }}
     needs:
       - preflight
       - quality
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            id: linux-x64
+            os: ubuntu-22.04
+            command: pnpm exec electron-builder --linux deb AppImage --x64 --publish never
+          - name: macOS Apple Silicon
+            id: macos-arm64
+            package_arch: arm64
+            os: macos-15
+            command: pnpm exec electron-builder --mac dmg zip --arm64 --publish never
+          - name: macOS Intel
+            id: macos-x64
+            package_arch: x64
+            os: macos-15-intel
+            command: pnpm exec electron-builder --mac dmg zip --x64 --publish never
+          - name: Windows x64
+            id: windows-x64
+            os: windows-2025
+            command: pnpm exec electron-builder --win nsis portable --x64 --publish never
+    runs-on: ${{ matrix.os }}
     env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
     steps:
       - uses: actions/checkout@v6
@@ -77,59 +99,91 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Install Tauri dependencies
+      - name: Install Linux packaging and smoke-test dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libayatana-appindicator3-dev \
-            libwebkit2gtk-4.1-dev \
-            librsvg2-dev \
-            patchelf
+            binutils \
+            libasound2 \
+            libatspi2.0-0 \
+            libgbm1 \
+            libgtk-3-0 \
+            libnotify4 \
+            libnss3 \
+            libsecret-1-0 \
+            libuuid1 \
+            libxss1 \
+            libxtst6 \
+            xauth \
+            xvfb
       - run: pnpm install --frozen-lockfile
-      - name: Build Debian and AppImage packages
-        run: pnpm tauri build --ci --bundles deb,appimage
-      - name: Normalize and validate packages
+      - run: pnpm build
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --locked --release --bin research-writer-backend
+      - name: Ensure the sidecar is executable
+        if: runner.os != 'Windows'
+        run: chmod +x src-tauri/target/release/research-writer-backend
+      - name: Build native packages
+        run: ${{ matrix.command }}
+      - name: Boot packaged Linux application
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/electron-smoke.log"
+          xvfb-run -a dist/linux-unpacked/research-writer \
+            --no-sandbox \
+            --remote-debugging-port=9222 >"$log" 2>&1 &
+          app_pid=$!
+          cleanup() {
+            kill "$app_pid" 2>/dev/null || true
+            wait "$app_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          node scripts/electron-smoke.mjs
+          if grep -E "Unable to load preload|SyntaxError|ERR_FILE_NOT_FOUND|Refused to execute" "$log"; then
+            cat "$log"
+            exit 1
+          fi
+      - name: Collect stable release filenames
+        run: node scripts/collect-release-artifacts.mjs ${{ matrix.id }} dist "${{ runner.temp }}/release"
+      - name: Validate Linux packages
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           release_dir="$RUNNER_TEMP/release"
-          appimage_check_dir="$RUNNER_TEMP/appimage-check"
-          mkdir -p "$release_dir" "$appimage_check_dir"
-
-          mapfile -t debs < <(find src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name "*_${RELEASE_VERSION}_amd64.deb" -print)
-          mapfile -t appimages < <(find src-tauri/target/release/bundle/appimage -maxdepth 1 -type f -name "*_${RELEASE_VERSION}_amd64.AppImage" -print)
-          if [[ "${#debs[@]}" -ne 1 || "${#appimages[@]}" -ne 1 ]]; then
-            echo "::error::Expected exactly one Debian package and one AppImage."
-            exit 1
-          fi
-
-          cp "${debs[0]}" "$release_dir/research-writer_amd64.deb"
-          cp "${appimages[0]}" "$release_dir/research-writer_amd64.AppImage"
-          chmod +x "$release_dir/research-writer_amd64.AppImage"
-
           test "$(dpkg-deb -f "$release_dir/research-writer_amd64.deb" Package)" = "research-writer"
           test "$(dpkg-deb -f "$release_dir/research-writer_amd64.deb" Version)" = "$RELEASE_VERSION"
           test "$(dpkg-deb -f "$release_dir/research-writer_amd64.deb" Architecture)" = "amd64"
-
+          mkdir -p "$RUNNER_TEMP/appimage-check"
           (
-            cd "$appimage_check_dir"
-            "$release_dir/research-writer_amd64.AppImage" --appimage-extract >/dev/null
+            cd "$RUNNER_TEMP/appimage-check"
+            "$release_dir/research-writer_x86_64.AppImage" --appimage-extract >/dev/null
           )
-          test -x "$appimage_check_dir/squashfs-root/AppRun"
-          test -x "$appimage_check_dir/squashfs-root/usr/bin/research-writer"
-
-          (
-            cd "$release_dir"
-            sha256sum research-writer_amd64.deb research-writer_amd64.AppImage > SHA256SUMS
-            sha256sum -c SHA256SUMS
-          )
+          test -x "$RUNNER_TEMP/appimage-check/squashfs-root/AppRun"
+          test -x "$RUNNER_TEMP/appimage-check/squashfs-root/research-writer"
+          test -x "$RUNNER_TEMP/appimage-check/squashfs-root/resources/backend/research-writer-backend"
+      - name: Validate macOS packages
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdiutil verify "$RUNNER_TEMP/release/Research-Writer_macOS_${{ matrix.package_arch }}.dmg"
+          unzip -t "$RUNNER_TEMP/release/Research-Writer_macOS_${{ matrix.package_arch }}.zip"
+      - name: Validate Windows packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $packages = Get-ChildItem "$env:RUNNER_TEMP/release/*.exe"
+          if ($packages.Count -ne 2) { throw "Expected two Windows packages." }
+          foreach ($package in $packages) {
+            if ($package.Length -lt 10MB) { throw "$($package.Name) is unexpectedly small." }
+          }
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux-x86_64
-          path: |
-            ${{ runner.temp }}/release/research-writer_amd64.deb
-            ${{ runner.temp }}/release/research-writer_amd64.AppImage
-            ${{ runner.temp }}/release/SHA256SUMS
+          name: release-${{ matrix.id }}
+          path: ${{ runner.temp }}/release/*
           if-no-files-found: error
           retention-days: 7
 
@@ -146,42 +200,35 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       RELEASE_NOTES: |
-        Linux x86_64용 자동 빌드입니다. 현재 공개 배포용 코드 서명은 적용되지 않았습니다.
+        고정된 Electron/Chromium 엔진으로 Linux, macOS, Windows에서 같은 A4 편집·조판 결과를 제공하는 첫 크로스 플랫폼 릴리스입니다. 공개 코드 서명과 Apple 공증은 아직 적용되지 않았습니다.
 
-        Debian/Ubuntu에서는 아래처럼 기존 버전을 삭제하지 않고 바로 업그레이드할 수 있습니다.
+        Debian/Ubuntu에서는 이전 버전을 지우지 말고 새 파일을 그대로 덮어 설치하면 원고와 설정을 유지한 채 업그레이드됩니다.
 
         `sudo apt install ./research-writer_amd64.deb`
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
-          name: release-linux-x86_64
+          pattern: release-*
           path: release
-      - name: Verify workflow artifacts
+          merge-multiple: true
+      - name: Generate and verify checksums
         shell: bash
         run: |
           set -euo pipefail
-          (
-            cd release
-            sha256sum -c SHA256SUMS
-          )
-          test "$(dpkg-deb -f release/research-writer_amd64.deb Package)" = "research-writer"
-          test "$(dpkg-deb -f release/research-writer_amd64.deb Version)" = "$RELEASE_VERSION"
-          test "$(dpkg-deb -f release/research-writer_amd64.deb Architecture)" = "amd64"
-      - name: Create or resume draft release
-        id: release
+          cd release
+          mapfile -t assets < <(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+          test "${#assets[@]}" -eq 8
+          sha256sum "${assets[@]}" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          test "$(dpkg-deb -f research-writer_amd64.deb Package)" = "research-writer"
+          test "$(dpkg-deb -f research-writer_amd64.deb Version)" = "$RELEASE_VERSION"
+      - name: Create or update release
         shell: bash
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          release_state="$(gh release view "$tag" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
-
-          if [[ "$release_state" == "false" ]]; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [[ "$release_state" != "true" ]]; then
+          if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" \
               --verify-tag \
               --draft \
@@ -189,47 +236,23 @@ jobs:
               --generate-notes \
               --notes "$RELEASE_NOTES"
           fi
-
-          gh release upload "$tag" \
-            release/research-writer_amd64.deb \
-            release/research-writer_amd64.AppImage \
-            release/SHA256SUMS \
-            --clobber
+          gh release upload "$tag" release/* --clobber
           gh release edit "$tag" --draft=false --latest
-          echo "published=false" >> "$GITHUB_OUTPUT"
       - name: Verify published release
         shell: bash
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           public_dir="$RUNNER_TEMP/public-release"
-          mkdir -p "$public_dir"
-
           release_json="$(gh release view "$tag" --json isDraft,isPrerelease,assets,url)"
           jq -e '.isDraft == false and .isPrerelease == false' <<<"$release_json" >/dev/null
-          test "$(jq '.assets | length' <<<"$release_json")" -eq 3
-          for asset in research-writer_amd64.deb research-writer_amd64.AppImage SHA256SUMS; do
-            jq -e --arg name "$asset" \
-              '.assets | any(.name == $name and .state == "uploaded")' \
-              <<<"$release_json" >/dev/null
-          done
-
-          gh release download "$tag" \
-            --dir "$public_dir" \
-            --pattern 'research-writer_amd64.*' \
-            --pattern SHA256SUMS
-          (
-            cd "$public_dir"
-            sha256sum -c SHA256SUMS
-          )
-          test "$(dpkg-deb -f "$public_dir/research-writer_amd64.deb" Package)" = "research-writer"
+          test "$(jq '.assets | length' <<<"$release_json")" -eq 9
+          mkdir -p "$public_dir"
+          gh release download "$tag" --dir "$public_dir"
+          (cd "$public_dir" && sha256sum -c SHA256SUMS)
           test "$(dpkg-deb -f "$public_dir/research-writer_amd64.deb" Version)" = "$RELEASE_VERSION"
-          test "$(dpkg-deb -f "$public_dir/research-writer_amd64.deb" Architecture)" = "amd64"
-
-          release_base="https://github.com/${GITHUB_REPOSITORY}/releases"
-          curl --fail --silent --show-error --location --head --retry 5 \
-            "$release_base/tag/$tag" >/dev/null
-          for asset in research-writer_amd64.deb research-writer_amd64.AppImage SHA256SUMS; do
+          release_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag"
+          while IFS= read -r asset; do
             curl --fail --silent --show-error --location --head --retry 5 \
-              "$release_base/download/$tag/$asset" >/dev/null
-          done
+              "$release_base/$asset" >/dev/null
+          done < <(jq -r '.assets[].name' <<<"$release_json")

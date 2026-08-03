@@ -57,7 +57,7 @@ describe("manuscript document model", () => {
       affiliation: "원고지 연구소",
       genre: "평론",
       schema: 1,
-      layout: "traditional-ko",
+      layout: "editorial-a4",
     };
     const updated = updateManuscriptMetadata(source, metadata);
     const parsed = parseManuscript(updated);
@@ -77,7 +77,7 @@ describe("manuscript document model", () => {
       affiliation: "",
       genre: "",
       schema: 1,
-      layout: "traditional-ko",
+      layout: "editorial-a4",
     };
     const updated = updateManuscriptMetadata(source, metadata);
     const parsed = parseManuscript(updated);

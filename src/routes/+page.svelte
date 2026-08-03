@@ -1,23 +1,24 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-  import { openUrl } from "@tauri-apps/plugin-opener";
-  import { diffChars, diffWords } from "diff";
-  import Editor, { type EditorApi } from "$lib/Editor.svelte";
   import {
-    applyQuickFixes,
+    exportPdf,
+    getCurrentWebviewWindow,
+    getCurrentWindow,
+    invoke,
+    isDesktopRuntime,
+    listen,
+    openDialog,
+    openUrl,
+    saveDialog,
+    type UnlistenFn,
+  } from "$lib/desktop";
+  import { diffChars, diffWords } from "diff";
+  import PaginatedEditor from "$lib/PaginatedEditor.svelte";
+  import {
     parseManuscript,
     updateManuscriptMetadata,
     type ManuscriptMetadata,
-    type ParsedManuscript,
-    type QuickFix,
-    type WritingDiagnostic,
   } from "$lib/manuscript-document";
-  import type { ManuscriptBlockPlacement } from "$lib/manuscript-layout";
   import {
     basename,
     countWords,
@@ -42,7 +43,6 @@
     type Preferences,
   } from "$lib/preferences";
   import { SingleFlight } from "$lib/single-flight";
-  import { DeferredLatest } from "$lib/deferred-latest";
   import { externalSyncProvider } from "$lib/storage";
   import {
     compareVersionContent,
@@ -58,9 +58,11 @@
     CompanionView,
     DocumentPayload,
     EditorChangeContext,
+    EditorApi,
     EditorSelection,
     FontRecord,
     ImportedAsset,
+    ManuscriptAssetData,
     RecentDocument,
     RepositoryDocument,
     RepositoryStatus,
@@ -82,21 +84,15 @@
   type SaveState = "saved" | "dirty" | "saving" | "error";
   type ContextMode = "selection" | "section" | "document";
   type GrammarScope = "selection" | "paragraph" | "document";
-  type PreviewComponent = typeof import("$lib/DocumentPreview.svelte").default;
-  type PreviewApi = import("$lib/DocumentPreview.svelte").PreviewApi;
   type SourceComponent = typeof import("$lib/MarkdownSourceEditor.svelte").default;
   type ToolbarMenu = "insert" | "view" | "link" | null;
   type RuntimePlatform = "linux" | "windows" | "macos" | "web";
-  type ResizeDirection = Parameters<
-    ReturnType<typeof getCurrentWindow>["startResizeDragging"]
-  >[0];
   type DocumentDialog =
     | "metadata"
     | "figure"
     | "table"
     | "math"
     | "footnote"
-    | "block"
     | null;
 
   interface ConflictState {
@@ -135,15 +131,11 @@
   let desktop = $state(false);
   let currentDocument = $state<DocumentPayload | null>(null);
   let editorValue = $state("");
-  let analyzedValue = $state("");
-  let analysisPending = $state(false);
   let baseContent = $state("");
   let editorApi = $state<EditorApi | null>(null);
-  let manuscriptApi = $state<EditorApi | null>(null);
+  let paperApi = $state<EditorApi | null>(null);
   let sourceApi = $state<EditorApi | null>(null);
-  let previewApi = $state<PreviewApi | null>(null);
-  let activeEditor = $state<"manuscript" | "source">("manuscript");
-  let Preview = $state<PreviewComponent | null>(null);
+  let activeEditor = $state<"paper" | "source">("paper");
   let SourceEditor = $state<SourceComponent | null>(null);
   let companionView = $state<CompanionView>(null);
   let runtimePlatform = $state<RuntimePlatform>("web");
@@ -171,11 +163,12 @@
   let saveError = $state("");
   let conflict = $state<ConflictState | null>(null);
   let recents = $state<RecentDocument[]>([]);
-  let fonts = $state<FontRecord[]>([
+  const bundledFonts: FontRecord[] = [
     { family: "Pretendard", monospaced: false, bundled: true },
     { family: "MaruBuri", monospaced: false, bundled: true },
     { family: "NanumGothicCoding", monospaced: true, bundled: true },
-  ]);
+  ];
+  let fonts = $state<FontRecord[]>([...bundledFonts]);
   let preferences = $state<Preferences>({ ...defaultPreferences });
   let toast = $state("");
   let toastKind = $state<"info" | "error" | "success">("info");
@@ -228,7 +221,7 @@
     affiliation: "",
     genre: "",
     schema: 1,
-    layout: "traditional-ko",
+    layout: "editorial-a4",
   });
   let figureSourcePath = $state("");
   let figureAlt = $state("");
@@ -239,9 +232,6 @@
   let mathDisplay = $state(true);
   let mathValue = $state("");
   let footnoteValue = $state("");
-  let activeBlock = $state<ManuscriptBlockPlacement | null>(null);
-  let blockSource = $state("");
-  let blockOriginal = $state("");
 
   let zotero = $state<ZoteroStatus | null>(null);
   let zoteroQuery = $state("");
@@ -287,29 +277,16 @@
   let closing = false;
   const saveFlight = new SingleFlight<boolean>();
   const exitFlight = new SingleFlight<void>();
-  const documentAnalysis = new DeferredLatest();
-
-  let outline = $derived(extractOutline(analyzedValue));
-  let words = $derived(countWords(analyzedValue));
+  let outline = $derived(extractOutline(editorValue));
+  let words = $derived(countWords(editorValue));
   let minutes = $derived(Math.max(1, Math.ceil(words / 350)));
   let documentTitle = $derived(
     currentDocument ? basename(currentDocument.path) : "Research Writer",
   );
-  let manuscriptFallbackTitle = $derived(
+  let documentFallbackTitle = $derived(
     currentDocument
       ? basename(currentDocument.path).replace(/\.(?:md|markdown)$/i, "")
       : "제목 없는 원고",
-  );
-  let parsedManuscript = $state<ParsedManuscript>(
-    parseManuscript("", "제목 없는 원고"),
-  );
-  let diagnostics = $derived(
-    preferences.manuscriptGuidance && !analysisPending
-      ? parsedManuscript.diagnostics
-      : [],
-  );
-  let safeDiagnosticCount = $derived(
-    diagnostics.filter((item) => item.fix?.safe).length,
   );
   let grammarEdits = $derived(
     grammarSuggestion
@@ -359,13 +336,6 @@
       ),
   );
 
-  function isDesktopRuntime(): boolean {
-    return (
-      typeof window !== "undefined" &&
-      "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
-    );
-  }
-
   async function initializeWindowChrome(): Promise<void> {
     if (!desktop) {
       runtimePlatform = "web";
@@ -398,15 +368,6 @@
     windowMaximized = await getCurrentWindow()
       .isMaximized()
       .catch(() => windowMaximized);
-  }
-
-  function startWindowResize(
-    event: PointerEvent,
-    direction: ResizeDirection,
-  ): void {
-    if (!desktop || runtimePlatform === "macos" || event.button !== 0) return;
-    event.preventDefault();
-    void getCurrentWindow().startResizeDragging(direction);
   }
 
   function measureWritingStage(): void {
@@ -486,49 +447,82 @@
     document.documentElement.dataset.theme = preferences.theme;
   }
 
-  function setManuscriptFitMode(
-    mode: Preferences["manuscriptFitMode"],
-  ): void {
-    preferences.manuscriptFitMode = mode;
-    savePreferences();
-  }
-
-  function cancelDocumentAnalysis(): void {
-    documentAnalysis.cancel();
-  }
-
-  function analyzeDocumentNow(value = editorValue): ParsedManuscript {
-    cancelDocumentAnalysis();
-    const parsed = parseManuscript(value, manuscriptFallbackTitle);
-    if (value === editorValue) {
-      analyzedValue = value;
-      parsedManuscript = parsed;
-      analysisPending = false;
-    }
-    return parsed;
-  }
-
-  function scheduleDocumentAnalysis(value = editorValue): void {
-    cancelDocumentAnalysis();
-    if (value === analyzedValue) {
-      analysisPending = false;
-      return;
-    }
-    analysisPending = true;
-    documentAnalysis.schedule(
-      250,
-      () => parseManuscript(value, manuscriptFallbackTitle),
-      (parsed) => {
-        if (value !== editorValue) return;
-        analyzedValue = value;
-        parsedManuscript = parsed;
-        analysisPending = false;
-      },
+  async function installRepositoryFonts(records: FontRecord[]): Promise<void> {
+    if (typeof FontFace === "undefined" || !document.fonts) return;
+    const repositoryFonts = records.filter(
+      (font): font is FontRecord & { dataUrl: string } =>
+        !font.bundled && typeof font.dataUrl === "string",
+    );
+    await Promise.all(
+      repositoryFonts.map(async (font) => {
+        try {
+          const face = new FontFace(font.family, `url("${font.dataUrl}")`);
+          await face.load();
+          document.fonts.add(face);
+        } catch {
+          // A damaged optional font must not keep the editor from opening.
+        }
+      }),
     );
   }
 
+  async function refreshFonts(): Promise<void> {
+    if (!desktop) return;
+    const loaded = await invoke<FontRecord[]>("list_fonts").catch(
+      () => bundledFonts,
+    );
+    fonts = loaded;
+    await installRepositoryFonts(loaded);
+    if (!fonts.some((font) => font.family === preferences.fontFamily)) {
+      preferences.fontFamily = defaultPreferences.fontFamily;
+      savePreferences();
+    }
+  }
+
+  async function importRepositoryFont(): Promise<void> {
+    if (!desktop || !repository?.available) {
+      notify("폰트를 가져오려면 먼저 저장소를 열어주세요.", "info");
+      return;
+    }
+    const selected = await openDialog({
+      title: "저장소에 폰트 가져오기",
+      directory: false,
+      multiple: false,
+      filters: [{ name: "Font", extensions: ["ttf", "otf", "woff2"] }],
+    });
+    if (typeof selected !== "string") return;
+    try {
+      const previousFamilies = new Set(fonts.map((font) => font.family));
+      const loaded = await invoke<FontRecord[]>("import_repository_font", {
+        sourcePath: selected,
+      });
+      fonts = loaded;
+      await installRepositoryFonts(loaded);
+      const imported = loaded.find(
+        (font) =>
+          !font.bundled &&
+          font.dataUrl &&
+          !previousFamilies.has(font.family),
+      );
+      if (imported) {
+        preferences.fontFamily = imported.family;
+      }
+      savePreferences();
+      notify("폰트를 저장소에 복사해 적용했습니다.", "success");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
+  }
+
+  function setPageFitMode(
+    mode: Preferences["pageFitMode"],
+  ): void {
+    preferences.pageFitMode = mode;
+    savePreferences();
+  }
+
   function handleEditorSelection(
-    source: "manuscript" | "source",
+    source: "paper" | "source",
     value: EditorSelection,
   ): void {
     if (source !== activeEditor) return;
@@ -540,17 +534,17 @@
     }
   }
 
-  function setActiveEditor(source: "manuscript" | "source"): void {
+  function setActiveEditor(source: "paper" | "source"): void {
     activeEditor = source;
-    editorApi = source === "source" ? sourceApi : manuscriptApi;
+    editorApi = source === "source" ? sourceApi : paperApi;
     const nextSelection = editorApi?.getSelection();
     if (nextSelection) handleEditorSelection(source, nextSelection);
   }
 
-  function handleManuscriptReady(api: EditorApi | null): void {
-    const wasActive = editorApi === manuscriptApi;
-    manuscriptApi = api;
-    if (api && (activeEditor === "manuscript" || !editorApi)) editorApi = api;
+  function handlePaperReady(api: EditorApi | null): void {
+    const wasActive = editorApi === paperApi;
+    paperApi = api;
+    if (api && (activeEditor === "paper" || !editorApi)) editorApi = api;
     else if (!api && wasActive) editorApi = sourceApi;
   }
 
@@ -559,21 +553,18 @@
     sourceApi = api;
     if (api && activeEditor === "source") editorApi = api;
     else if (!api && wasActive) {
-      activeEditor = "manuscript";
-      editorApi = manuscriptApi;
+      activeEditor = "paper";
+      editorApi = paperApi;
     }
   }
 
   async function toggleCompanionView(mode: Exclude<CompanionView, null>): Promise<void> {
     if (companionView === mode) {
       companionView = null;
-      if (activeEditor === "source") setActiveEditor("manuscript");
+      if (activeEditor === "source") setActiveEditor("paper");
       return;
     }
     try {
-      if (mode === "preview" && !Preview) {
-        Preview = (await import("$lib/DocumentPreview.svelte")).default;
-      }
       if (mode === "source" && !SourceEditor) {
         SourceEditor = (await import("$lib/MarkdownSourceEditor.svelte")).default;
       }
@@ -581,59 +572,35 @@
       notify(`보조 화면을 불러오지 못했습니다: ${errorMessage(error)}`, "error");
       return;
     }
-    if (mode !== "source" && activeEditor === "source") {
-      setActiveEditor("manuscript");
-    }
     companionView = mode;
     await tick();
-    const anchor = manuscriptApi?.getScrollAnchor();
+    const anchor = paperApi?.getScrollAnchor();
     if (anchor) {
-      if (mode === "source") sourceApi?.scrollToAnchor(anchor);
-      else previewApi?.scrollToAnchor(anchor);
+      sourceApi?.scrollToAnchor(anchor);
     }
   }
 
   async function editableApi(): Promise<EditorApi | null> {
     if (!currentDocument || currentDocument.readOnly) return null;
-    return editorApi ?? manuscriptApi;
+    return editorApi ?? paperApi;
   }
 
   function handleScrollAnchor(anchor: ScrollAnchor): void {
     if (anchor.source === suppressedScrollSource) return;
     const target =
-      anchor.source === "manuscript"
+      anchor.source === "paper"
         ? companionView
-        : "manuscript";
+        : "paper";
     if (!target) return;
     suppressedScrollSource = target;
     if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
     requestAnimationFrame(() => {
       if (target === "source") sourceApi?.scrollToAnchor(anchor);
-      else if (target === "preview") previewApi?.scrollToAnchor(anchor);
-      else manuscriptApi?.scrollToAnchor(anchor);
+      else paperApi?.scrollToAnchor(anchor);
       scrollSyncTimer = setTimeout(() => {
         suppressedScrollSource = null;
       }, 90);
     });
-  }
-
-  async function loadPreviewComponent(): Promise<boolean> {
-    if (Preview) return true;
-    try {
-      Preview = (await import("$lib/DocumentPreview.svelte")).default;
-      return true;
-    } catch (error) {
-      notify(`완성본 보기를 불러오지 못했습니다: ${errorMessage(error)}`, "error");
-      return false;
-    }
-  }
-
-  async function showPreviewForPrint(): Promise<boolean> {
-    if (!(await loadPreviewComponent())) return false;
-    companionView = "preview";
-    if (activeEditor === "source") setActiveEditor("manuscript");
-    await tick();
-    return true;
   }
 
   async function applyEditorMarkdownEdit(edit: MarkdownEdit): Promise<void> {
@@ -804,7 +771,11 @@
   }
 
   function openMetadataDialog(): void {
-    metadataDraft = { ...analyzeDocumentNow().metadata };
+    metadataDraft = {
+      ...parseManuscript(editorValue, documentFallbackTitle, {
+        diagnostics: false,
+      }).metadata,
+    };
     documentDialog = "metadata";
   }
 
@@ -816,44 +787,11 @@
     const next = updateManuscriptMetadata(
       editorValue,
       metadataDraft,
-      manuscriptFallbackTitle,
+      documentFallbackTitle,
     );
     if (await replaceWholeDocument(next, "원고 정보를 반영했습니다.")) {
       documentDialog = null;
     }
-  }
-
-  async function moveToDiagnostic(item: WritingDiagnostic): Promise<void> {
-    if (item.category === "metadata" && !item.fix) {
-      openMetadataDialog();
-      return;
-    }
-    setActiveEditor("manuscript");
-    manuscriptApi?.setSelection(item.from, item.to);
-  }
-
-  async function applyDiagnosticFix(item: WritingDiagnostic): Promise<void> {
-    if (!item.fix) {
-      await moveToDiagnostic(item);
-      return;
-    }
-    const fix = item.fix;
-    if (editorValue.slice(fix.from, fix.to) !== fix.expected) {
-      notify("원고가 바뀌어 이 안내를 바로 적용할 수 없습니다.", "error");
-      return;
-    }
-    const api = await editableApi();
-    api?.replaceRange(fix.from, fix.to, fix.replacement);
-    notify("원고지 규칙에 맞게 고쳤습니다.", "success");
-  }
-
-  async function applyAllSafeDiagnostics(): Promise<void> {
-    const next = applyQuickFixes(editorValue, diagnostics, true);
-    if (next === editorValue) {
-      notify("자동으로 고칠 안전한 항목이 없습니다.", "info");
-      return;
-    }
-    await replaceWholeDocument(next, "안전한 원고지 수정 사항을 모두 반영했습니다.");
   }
 
   function grammarRange(): { from: number; to: number } | null {
@@ -1045,6 +983,22 @@
     }
   }
 
+  async function resolveManuscriptImage(
+    relativePath: string,
+  ): Promise<string | null> {
+    if (!desktop || !currentDocument) return null;
+    const documentPath = currentDocument.path;
+    try {
+      const asset = await invoke<ManuscriptAssetData>(
+        "read_manuscript_asset",
+        { documentPath, relativePath },
+      );
+      return currentDocument?.path === documentPath ? asset.dataUrl : null;
+    } catch {
+      return null;
+    }
+  }
+
   function openTableDialog(): void {
     tableRows = 3;
     tableColumns = 3;
@@ -1118,40 +1072,29 @@
     footnoteValue = "";
   }
 
-  function editDocumentBlock(block: ManuscriptBlockPlacement): void {
-    activeBlock = block;
-    blockSource = editorValue.slice(block.from, block.to);
-    blockOriginal = blockSource;
-    documentDialog = "block";
-  }
-
-  async function saveDocumentBlock(): Promise<void> {
-    if (!activeBlock) return;
-    const current = editorValue.slice(activeBlock.from, activeBlock.to);
-    if (current !== blockOriginal) {
-      notify("문서 요소가 바뀌었습니다. 다시 열어주세요.", "error");
-      return;
-    }
-    const api = await editableApi();
-    api?.replaceRange(activeBlock.from, activeBlock.to, blockSource.trim());
-    documentDialog = null;
-    activeBlock = null;
-    notify("문서 요소를 수정했습니다.", "success");
-  }
-
   async function printCompletedDocument(): Promise<void> {
-    if (!(await showPreviewForPrint())) return;
-    await tick();
-    for (let attempt = 0; attempt < 12 && !previewApi; attempt += 1) {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    }
-    if (!previewApi) {
-      notify("인쇄용 완성본을 준비하지 못했습니다. 다시 시도해주세요.", "error");
+    if (!paperApi) {
+      notify("인쇄할 페이지를 준비하지 못했습니다.", "error");
       return;
     }
-    await previewApi.awaitLayout();
+    await paperApi.awaitLayout?.();
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    window.print();
+    document.documentElement.dataset.printing = "paper";
+    try {
+      if (desktop) {
+        const stem = currentDocument
+          ? basename(currentDocument.path).replace(/\.(?:md|markdown)$/i, "")
+          : "원고";
+        const path = await exportPdf(`${stem}.pdf`);
+        if (path) notify("PDF를 저장했습니다.", "success");
+      } else {
+        window.print();
+      }
+    } catch (error) {
+      notify(`PDF를 만들지 못했습니다: ${errorMessage(error)}`, "error");
+    } finally {
+      delete document.documentElement.dataset.printing;
+    }
   }
 
   async function loadRecents(): Promise<void> {
@@ -1221,18 +1164,14 @@
     resetVersionPreview(false);
     currentDocument = null;
     resetChromeSuppression();
-    cancelDocumentAnalysis();
     editorValue = "";
-    analyzedValue = "";
-    analysisPending = false;
     baseContent = "";
-    parsedManuscript = parseManuscript("", "제목 없는 원고");
     saveState = "saved";
     saveError = "";
     conflict = null;
     companionView = null;
-    activeEditor = "manuscript";
-    editorApi = manuscriptApi;
+    activeEditor = "paper";
+    editorApi = paperApi;
     documentDialog = null;
     grammarSuggestion = null;
     sync = null;
@@ -1262,7 +1201,11 @@
       workspaceRoot = openedPath;
       searchIndexed = false;
       searchResults = [];
-      await Promise.all([refreshRepositoryDocuments(), watchActiveRepository()]);
+      await Promise.all([
+        refreshRepositoryDocuments(),
+        watchActiveRepository(),
+        refreshFonts(),
+      ]);
       leftPanel = "repository";
       if (repository.lastDocumentPath) {
         await openPath(repository.lastDocumentPath);
@@ -1306,6 +1249,11 @@
       await clearDocumentState();
       repository = closed;
       repositoryDocuments = [];
+      fonts = [...bundledFonts];
+      if (!fonts.some((font) => font.family === preferences.fontFamily)) {
+        preferences.fontFamily = defaultPreferences.fontFamily;
+        savePreferences();
+      }
       workspaceRoot = "";
       searchResults = [];
       searchIndexed = false;
@@ -1328,21 +1276,14 @@
     resetVersionPreview(false);
     currentDocument = document;
     resetChromeSuppression();
-    cancelDocumentAnalysis();
     editorValue = document.content;
-    analyzedValue = document.content;
-    analysisPending = false;
     baseContent = document.content;
-    parsedManuscript = parseManuscript(
-      document.content,
-      basename(document.path).replace(/\.(?:md|markdown)$/i, ""),
-    );
     saveState = "saved";
     saveError = "";
     conflict = null;
     companionView = null;
-    activeEditor = "manuscript";
-    editorApi = manuscriptApi;
+    activeEditor = "paper";
+    editorApi = paperApi;
     documentDialog = null;
     grammarSuggestion = null;
     selection = { from: 0, to: 0, text: "", line: 1 };
@@ -1566,12 +1507,10 @@
     context: EditorChangeContext = { composing: false },
   ): void {
     editorValue = value;
-    analysisPending = value !== analyzedValue;
     if (!currentDocument || currentDocument.readOnly) return;
     saveState = "dirty";
     saveError = "";
     if (context.composing) return;
-    scheduleDocumentAnalysis(value);
     scheduleSave();
   }
 
@@ -1791,7 +1730,6 @@
           notify("겹치지 않는 변경 사항을 병합했습니다.", "success");
         }
       }
-      scheduleDocumentAnalysis(editorValue);
       saveState = "dirty";
       await saveNow();
     } catch (error) {
@@ -2008,7 +1946,6 @@
         throw new Error("복원 중 원고가 바뀌었습니다.");
       }
       editorValue = preview.content;
-      scheduleDocumentAnalysis(editorValue);
       saveState = "dirty";
       saveError = "";
       scheduleSave();
@@ -2483,7 +2420,7 @@
       "",
       "## 원고가 먼저다",
       "",
-      "화면 가운데에는 스무 칸 스무 줄의 행간 원고지가 놓인다. Markdown 기호는 감추고 완성될 글만 조판하며, 문단 첫 칸과 줄 끝 문장 부호도 원고지 관행에 맞춰 자동으로 배치한다.",
+      "화면 가운데에는 여백과 행간을 세심하게 다듬은 A4 종이가 놓인다. Markdown 기호는 조용한 표식으로 안내하고, 제목·본문·인용은 출판 원고처럼 즉시 조판된다.",
       "",
       "## 리서치는 글 옆에 머문다",
       "",
@@ -2623,9 +2560,6 @@
     } else if (event.key.toLowerCase() === "p") {
       event.preventDefault();
       void printCompletedDocument();
-    } else if (event.key.toLowerCase() === "v" && event.shiftKey) {
-      event.preventDefault();
-      void toggleCompanionView("preview");
     } else if (event.key === "\\") {
       event.preventDefault();
       void toggleLeft("outline");
@@ -2665,7 +2599,7 @@
       return;
     }
 
-    fonts = await invoke<FontRecord[]>("list_fonts").catch(() => fonts);
+    await refreshFonts();
     await loadRecents();
     const restoredRepository = await refreshRepository();
     await watchActiveRepository();
@@ -2740,7 +2674,6 @@
     if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
     stageObserver?.disconnect();
     stageObserver = null;
-    documentAnalysis.cancel();
     if (syncTimer) clearInterval(syncTimer);
   });
 </script>
@@ -2762,7 +2695,6 @@
       ((chromeSuppressed && preferences.immersiveChrome) ||
         preferences.focusSheetMode)}
     class="topbar"
-    data-tauri-drag-region="deep"
   >
     <button
       class:active={leftPanel !== null}
@@ -2810,6 +2742,7 @@
             void formatBlock(event.currentTarget.value as MarkdownBlockStyle)}
         >
           <option value="body">본문</option>
+          <option value="heading1">문서 제목</option>
           <option value="heading2">큰 제목</option>
           <option value="heading3">작은 제목</option>
           <option value="quote">인용</option>
@@ -2818,7 +2751,7 @@
       </label>
       <label
         class="toolbar-select font-select"
-        title="원고 전체 글꼴 · 원고지 칸 크기는 유지됩니다"
+        title="문서 전체 글꼴 · 저장소에 포함된 글꼴만 사용합니다"
       >
         <span class="sr-only">글꼴</span>
         <select
@@ -2923,16 +2856,16 @@
             onkeydown={handleToolbarMenuKeydown}
           >
             <button
-              class:active={preferences.manuscriptFitMode === "page"}
+              class:active={preferences.pageFitMode === "page"}
               role="menuitemradio"
-              aria-checked={preferences.manuscriptFitMode === "page"}
-              onclick={() => { closeToolbarMenu(false); setManuscriptFitMode("page"); }}
+              aria-checked={preferences.pageFitMode === "page"}
+              onclick={() => { closeToolbarMenu(false); setPageFitMode("page"); }}
             >페이지에 맞추기</button>
             <button
-              class:active={preferences.manuscriptFitMode === "width"}
+              class:active={preferences.pageFitMode === "width"}
               role="menuitemradio"
-              aria-checked={preferences.manuscriptFitMode === "width"}
-              onclick={() => { closeToolbarMenu(false); setManuscriptFitMode("width"); }}
+              aria-checked={preferences.pageFitMode === "width"}
+              onclick={() => { closeToolbarMenu(false); setPageFitMode("width"); }}
             >페이지 너비에 맞추기</button>
           </div>
         {/if}
@@ -2950,17 +2883,6 @@
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M14 5l-4 14"></path></svg>
       </button>
       <button
-        class:active={companionView === "preview"}
-        class="toolbar-icon-button"
-        title="완성본을 옆에 열기 (Ctrl+Shift+V)"
-        aria-label="완성본을 옆에 열기"
-        aria-pressed={companionView === "preview"}
-        disabled={!currentDocument}
-        onclick={() => void toggleCompanionView("preview")}
-      >
-        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v17H6.5A2.5 2.5 0 0 0 4 22V5.5ZM20 5.5A2.5 2.5 0 0 0 17.5 3H13v17h4.5A2.5 2.5 0 0 1 20 22V5.5Z"></path></svg>
-      </button>
-      <button
         class="toolbar-icon-button"
         title="인쇄/PDF 저장 (Ctrl+P)"
         aria-label="인쇄 또는 PDF 저장"
@@ -2976,7 +2898,7 @@
         class:active={rightPanel !== null}
         class="panel-toggle tools-toggle"
         title={rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}
-        aria-label={`${rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}${diagnostics.length ? `, 규칙 문제 ${diagnostics.length}개` : ""}`}
+        aria-label={rightPanel ? "도구 패널 닫기" : "도구 패널 열기"}
         aria-expanded={rightPanel !== null}
         aria-controls="right-panel"
         onclick={() => void togglePrimaryRight()}
@@ -2985,9 +2907,6 @@
           <rect x="3" y="4" width="18" height="16" rx="2"></rect>
           <path d="M15 4v16M18 8h.01M18 12h.01M18 16h.01"></path>
         </svg>
-        {#if diagnostics.length}
-          <span class="panel-count" aria-hidden="true">{diagnostics.length > 99 ? "99+" : diagnostics.length}</span>
-        {/if}
       </button>
       {#if desktop && runtimePlatform !== "macos"}
         <div class="window-controls" aria-label="창 제어">
@@ -3000,17 +2919,6 @@
       {/if}
     </div>
   </header>
-
-  {#if desktop && runtimePlatform !== "macos" && !windowMaximized}
-    <div class="window-resize-edge north" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "North")}></div>
-    <div class="window-resize-edge east" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "East")}></div>
-    <div class="window-resize-edge south" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "South")}></div>
-    <div class="window-resize-edge west" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "West")}></div>
-    <div class="window-resize-corner north-east" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "NorthEast")}></div>
-    <div class="window-resize-corner north-west" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "NorthWest")}></div>
-    <div class="window-resize-corner south-east" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "SouthEast")}></div>
-    <div class="window-resize-corner south-west" aria-hidden="true" onpointerdown={(event) => startWindowResize(event, "SouthWest")}></div>
-  {/if}
 
   {#if leftPanel}
     <aside id="left-panel" class="panel left-panel">
@@ -3255,39 +3163,35 @@
           ? `grid-template-columns:calc(${preferences.companionSplitRatio * 100}% - 4px) 8px minmax(0, 1fr)`
           : undefined}
       >
-        <div class="manuscript-pane">
-          <Editor
+        <div class="document-pane paper-pane">
+          <PaginatedEditor
             value={editorValue}
             readOnly={currentDocument.readOnly}
-            fallbackTitle={manuscriptFallbackTitle}
+            fallbackTitle={documentFallbackTitle}
+            documentPath={currentDocument.path}
             fontFamily={preferences.fontFamily}
-            manuscriptFitMode={preferences.manuscriptFitMode}
+            fitMode={preferences.pageFitMode}
             focusMode={preferences.focusMode}
             typewriterMode={preferences.typewriterMode}
             soundEnabled={preferences.soundEnabled}
-            singleSheetMode={preferences.focusSheetMode}
-            typewriterImperfection={preferences.typewriterImperfection}
-            showDiagnostics={preferences.manuscriptGuidance}
-            {diagnostics}
-            onready={handleManuscriptReady}
+            resolveImage={resolveManuscriptImage}
+            onready={handlePaperReady}
             onchange={onEditorChange}
-            onselection={(value) => handleEditorSelection("manuscript", value)}
+            onselection={(value) => handleEditorSelection("paper", value)}
             onactivity={handleEditorActivity}
-            onfocuschange={(focused) => focused && setActiveEditor("manuscript")}
+            onfocuschange={(focused) => focused && setActiveEditor("paper")}
             onscrollanchor={handleScrollAnchor}
-            onghostaccept={() => notify("자동 완성을 반영했습니다.", "success")}
-            onblockactivate={editDocumentBlock}
           />
         </div>
         {#if companionView}
           <button
             class="split-handle"
             title="분할 너비 조절"
-            aria-label="원고지와 보조 화면 너비 조절"
+            aria-label="편집 화면과 Markdown 원문 너비 조절"
             onpointerdown={beginSplitResize}
           ><span></span></button>
-          <div class:preview-pane={companionView === "preview"} class="companion-pane">
-            {#if companionView === "source" && SourceEditor}
+          <div class="companion-pane">
+            {#if SourceEditor}
               <SourceEditor
                 value={editorValue}
                 readOnly={currentDocument.readOnly}
@@ -3298,18 +3202,6 @@
                 onactivity={handleEditorActivity}
                 onfocuschange={(focused) => focused && setActiveEditor("source")}
                 onscrollanchor={handleScrollAnchor}
-              />
-            {:else if companionView === "preview" && Preview}
-              <Preview
-                content={editorValue}
-                documentPath={currentDocument.path}
-                fallbackTitle={manuscriptFallbackTitle}
-                fontFamily={preferences.fontFamily}
-                fitMode={preferences.manuscriptFitMode}
-                {desktop}
-                onready={(api) => (previewApi = api)}
-                onscrollanchor={handleScrollAnchor}
-                onlink={(url) => void openExternalUrl(url)}
               />
             {/if}
           </div>
@@ -3330,18 +3222,12 @@
         <div>
           <span>{words.toLocaleString("ko-KR")}단어</span>
           <span>약 {minutes}분</span>
-          {#if activeEditor === "manuscript"}
+          {#if activeEditor === "paper"}
             <span>
-              {selection.page ?? 1}쪽 · {selection.row ?? 1}행 · {selection.column ?? 1}칸
+              {selection.page ?? 1}쪽 · {selection.line}행
             </span>
           {:else}
             <span>{selection.line}행 · Markdown 원문</span>
-          {/if}
-          {#if diagnostics.length}
-            <button
-              class="status-diagnostics"
-              onclick={() => void toggleRight("proofreading")}
-            >규칙 문제 {diagnostics.length}개</button>
           {/if}
         </div>
         <div>
@@ -3377,8 +3263,8 @@
     {:else if repository?.available && repository.path}
       <div class="repository-home">
         <div class="repository-home-paper" aria-hidden="true">
-          <span>20 × 20</span>
-          <strong>NO. 1</strong>
+          <span>A4</span>
+          <strong>EDITORIAL</strong>
         </div>
         <p class="welcome-kicker">OPEN REPOSITORY</p>
         <h1>{basename(repository.path)}</h1>
@@ -3405,13 +3291,13 @@
     {:else}
       <div class="welcome">
         <div class="welcome-seal" aria-hidden="true">
-          <span>원</span><span>고</span>
+          <span>R</span><span>W</span>
         </div>
-        <p class="welcome-kicker">LOCAL · MARKDOWN · MANUSCRIPT</p>
-        <h1>원고지</h1>
+        <p class="welcome-kicker">LOCAL · MARKDOWN · EDITORIAL</p>
+        <h1>Research Writer</h1>
         <p class="welcome-copy">
           폴더를 저장소로 열고,<br />
-          한 글자씩 원고지 위에 써 내려갑니다.
+          종이 위에 쓰듯 차분하게 문서를 완성하세요.
         </p>
         <div class="welcome-actions">
           <button
@@ -3482,83 +3368,21 @@
       <div class="panel-content right-content">
         {#if rightPanel === "proofreading"}
           <section class="panel-section guidance-intro">
-            <p class="eyebrow">원고지 작성 안내</p>
-            <h3>규칙을 외우지 않아도 됩니다</h3>
+            <p class="eyebrow">문서 작성 안내</p>
+            <h3>형식보다 문장에 집중하세요</h3>
             <p>
-              널리 쓰이는 원고지 관행에 따라 문단 첫 칸, 숫자·영문 칸쓰기와
-              줄 끝 문장 부호를 원문 손상 없이 자동 배치합니다. 이어지는
-              영문 소문자와 숫자는 한 칸을 좌우로 나눠 두 자씩 표시하고,
-              Markdown 제목은 편집 중인 행의 왼쪽에서 종류를 알려줍니다.
+              A4 편집 화면이 Markdown 문법을 자연스러운 제목·본문·인용으로
+              보여줍니다. 원문은 계속 표준 Markdown으로 저장되므로 다른
+              편집기에서도 그대로 열 수 있습니다.
             </p>
             <div class="guidance-checklist">
               <span><b>1</b> Enter는 새 문단, Shift+Enter는 줄바꿈</span>
-              <span><b>2</b> 문단과 인용문의 들여쓰기는 자동</span>
+              <span><b>2</b> 제목·목록·인용은 상단 서식에서 선택</span>
               <span><b>3</b> 표·그림·수식은 상단 삽입 도구 사용</span>
             </div>
             <button class="wide-button" onclick={openMetadataDialog}
-              >제목·작성자 원고 정보</button
+              >제목·작성자 문서 정보</button
             >
-          </section>
-
-          <section class="panel-section">
-            <div class="proof-heading">
-              <div>
-                <p class="eyebrow">현재 원고</p>
-                <strong>
-                  {analysisPending
-                    ? "교정 갱신 중…"
-                    : diagnostics.length
-                      ? `${diagnostics.length}개 확인 필요`
-                      : "원고지 규칙에 맞습니다"}
-                </strong>
-              </div>
-              {#if safeDiagnosticCount}
-                <button onclick={() => void applyAllSafeDiagnostics()}>
-                  안전 수정 {safeDiagnosticCount}
-                </button>
-              {/if}
-            </div>
-            {#if analysisPending}
-              <div class="empty-state small proof-empty" aria-live="polite">
-                <p>입력을 마치면 잠시 후 교정 결과를 갱신합니다.</p>
-              </div>
-            {:else if diagnostics.length}
-              <div class="diagnostic-list">
-                {#each diagnostics as item (item.id)}
-                  <article class={`diagnostic-card ${item.severity}`}>
-                    <button
-                      class="diagnostic-main"
-                      onclick={() => void moveToDiagnostic(item)}
-                    >
-                      <span class="diagnostic-label">
-                        {item.severity === "error"
-                          ? "오류"
-                          : item.severity === "warning"
-                            ? "확인"
-                            : "안내"}
-                      </span>
-                      <strong>{item.title}</strong>
-                      <p>{item.message}</p>
-                      {#if item.example}<code>{item.example}</code>{/if}
-                      <small>{item.source}</small>
-                    </button>
-                    <div class="diagnostic-actions">
-                      <button onclick={() => void moveToDiagnostic(item)}>이동</button>
-                      {#if item.fix}
-                        <button
-                          class="accent"
-                          onclick={() => void applyDiagnosticFix(item)}
-                        >{item.fix.label}</button>
-                      {/if}
-                    </div>
-                  </article>
-                {/each}
-              </div>
-            {:else}
-              <div class="empty-state small proof-empty">
-                <p>확정적인 원고지 문제를 찾지 못했습니다.</p>
-              </div>
-            {/if}
           </section>
 
           <section class="panel-section">
@@ -3590,8 +3414,8 @@
             </button>
             {#if !aiAccount?.authenticated}
               <p class="panel-note">
-                AI 검사는 ChatGPT 연결이 필요하지만 위의 원고지 규칙 검사는
-                로그인 없이 항상 동작합니다.
+                AI 검사는 ChatGPT 연결 후 사용하며, 실행할 때 선택한 범위만
+                전송합니다.
               </p>
               <button class="wide-button" onclick={() => void startAiLogin(false)}
                 >ChatGPT로 연결</button
@@ -3862,6 +3686,16 @@
                 <option value="dark">어두운 작업대</option>
               </select>
             </label>
+            <button
+              class="wide-button"
+              disabled={!repository?.available}
+              onclick={() => void importRepositoryFont()}
+            >
+              저장소에 글꼴 가져오기
+            </button>
+            <p class="panel-note">
+              TTF·OTF·WOFF2 파일을 <code>.research-writer/fonts</code>에 복사해 모든 운영체제와 PDF에서 같은 조판을 유지합니다.
+            </p>
             <label class="field">
               <span>집중 모드</span>
               <select bind:value={preferences.focusMode} onchange={savePreferences}>
@@ -3869,17 +3703,6 @@
                 <option value="paragraph">현재 문단</option>
                 <option value="sentence">현재 문장</option>
               </select>
-            </label>
-            <label class="switch-row">
-              <div>
-                <strong>원고지 작성 안내</strong>
-                <small>규칙 문제를 칸과 교정 패널에 표시</small>
-              </div>
-              <input
-                type="checkbox"
-                bind:checked={preferences.manuscriptGuidance}
-                onchange={savePreferences}
-              />
             </label>
           </section>
 
@@ -3912,10 +3735,6 @@
               <label class="switch-row">
                 <div><strong>몰입 중 도구막대 숨기기</strong><small>계속 타이핑하면 옅어지고, 마우스를 움직이거나 멈추면 다시 보임</small></div>
                 <input type="checkbox" bind:checked={preferences.immersiveChrome} onchange={saveImmersiveChromePreference} />
-              </label>
-              <label class="switch-row">
-                <div><strong>타자기 활자 느낌</strong><small>글자마다 미세하게 기울고 흔들리는 잉크 농담 표현</small></div>
-                <input type="checkbox" bind:checked={preferences.typewriterImperfection} onchange={savePreferences} />
               </label>
             </section>
 
@@ -4003,8 +3822,8 @@
           </label>
         </div>
         <p class="panel-note">
-          정보는 호환 가능한 YAML 속성으로 저장되고 원고지 첫 장에서는
-          전통 배치로 표시됩니다.
+          정보는 호환 가능한 YAML 속성으로 저장되며 제목과 문서 속성에
+          일관되게 반영됩니다.
         </p>
         <footer>
           <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
@@ -4200,46 +4019,6 @@
             >취소</button
           >
           <button class="primary-button" disabled={!footnoteValue.trim()}>각주 넣기</button>
-        </footer>
-        </form>
-      </div>
-    {:else}
-      <div
-        class="modal document-element-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="문서 요소 편집"
-        use:modalFocus
-      >
-        <form
-          class="modal-form"
-          onsubmit={(event) => {
-            event.preventDefault();
-            void saveDocumentBlock();
-          }}
-        >
-        <header>
-          <div>
-            <p class="eyebrow">{activeBlock?.kind ?? "문서 요소"}</p>
-            <h2>{activeBlock?.label ?? "문서 요소 편집"}</h2>
-          </div>
-          <button type="button" class="close-button" onclick={() => (documentDialog = null)}
-            >×</button
-          >
-        </header>
-        <label class="field">
-          <span>Markdown 원문</span>
-          <textarea rows="12" spellcheck="false" bind:value={blockSource}></textarea>
-        </label>
-        <p class="panel-note">
-          표와 그림의 휴대성을 위해 이 대화상자에서는 해당 블록의 표준
-          Markdown만 편집합니다.
-        </p>
-        <footer>
-          <button type="button" class="secondary-button" onclick={() => (documentDialog = null)}
-            >취소</button
-          >
-          <button class="primary-button">반영</button>
         </footer>
         </form>
       </div>
@@ -4553,6 +4332,13 @@
     backdrop-filter: blur(8px);
     transition: opacity 700ms ease;
     user-select: none;
+    -webkit-app-region: drag;
+  }
+
+  .topbar button,
+  .topbar input,
+  .topbar select {
+    -webkit-app-region: no-drag;
   }
 
   .platform-macos .topbar {
@@ -4693,22 +4479,6 @@
     stroke: currentColor;
     stroke-width: 1.1;
   }
-
-  .window-resize-edge,
-  .window-resize-corner {
-    position: fixed;
-    z-index: 200;
-  }
-
-  .window-resize-edge.north { top: 0; right: 7px; left: 7px; height: 5px; cursor: n-resize; }
-  .window-resize-edge.east { top: 7px; right: 0; bottom: 7px; width: 5px; cursor: e-resize; }
-  .window-resize-edge.south { right: 7px; bottom: 0; left: 7px; height: 5px; cursor: s-resize; }
-  .window-resize-edge.west { top: 7px; bottom: 7px; left: 0; width: 5px; cursor: w-resize; }
-  .window-resize-corner { width: 9px; height: 9px; }
-  .window-resize-corner.north-east { top: 0; right: 0; cursor: ne-resize; }
-  .window-resize-corner.north-west { top: 0; left: 0; cursor: nw-resize; }
-  .window-resize-corner.south-east { right: 0; bottom: 0; cursor: se-resize; }
-  .window-resize-corner.south-west { bottom: 0; left: 0; cursor: sw-resize; }
 
   .document-name {
     display: flex;
@@ -5037,7 +4807,7 @@
     overflow: hidden;
   }
 
-  .manuscript-pane,
+  .document-pane,
   .companion-pane {
     min-width: 0;
     min-height: 0;
@@ -5076,7 +4846,7 @@
     grid-template-columns: minmax(0, 1fr) !important;
   }
 
-  .writing-surface.compact-companion .manuscript-pane,
+  .writing-surface.compact-companion .document-pane,
   .writing-surface.compact-companion .split-handle { display: none; }
 
   .panel {
@@ -5376,134 +5146,6 @@
     font-size: var(--type-micro);
   }
 
-  .proof-heading {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .proof-heading .eyebrow {
-    margin-bottom: 4px;
-  }
-
-  .proof-heading strong {
-    color: var(--ink-strong);
-    font-size: var(--type-control);
-  }
-
-  .proof-heading > button {
-    flex: 0 0 auto;
-    border: 1px solid var(--accent);
-    border-radius: 6px;
-    background: transparent;
-    padding: 5px 7px;
-    color: var(--accent);
-    font-size: var(--type-micro);
-  }
-
-  .diagnostic-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: 13px;
-  }
-
-  .diagnostic-card {
-    overflow: hidden;
-    border: 1px solid var(--rule);
-    border-left-width: 3px;
-    border-radius: 8px;
-    background: var(--paper-raised);
-  }
-
-  .diagnostic-card.error {
-    border-left-color: var(--danger);
-  }
-
-  .diagnostic-card.warning {
-    border-left-color: var(--warning);
-  }
-
-  .diagnostic-card.suggestion {
-    border-left-color: #658489;
-  }
-
-  .diagnostic-main {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    width: 100%;
-    border: 0;
-    background: transparent;
-    padding: 10px 10px 8px;
-    color: var(--ink);
-    text-align: left;
-  }
-
-  .diagnostic-main:hover {
-    background: var(--paper);
-  }
-
-  .diagnostic-label {
-    margin-bottom: 5px;
-    border-radius: 8px;
-    background: var(--paper-deep);
-    padding: 2px 6px;
-    color: var(--ink-faint);
-    font-size: var(--type-micro);
-  }
-
-  .diagnostic-main strong {
-    font-size: var(--type-control);
-    line-height: 1.45;
-  }
-
-  .diagnostic-main p {
-    margin: 4px 0;
-    color: var(--ink-muted);
-    font-size: var(--type-caption);
-    line-height: 1.55;
-  }
-
-  .diagnostic-main code {
-    margin: 3px 0;
-    color: var(--accent);
-    font-size: var(--type-micro);
-    white-space: normal;
-  }
-
-  .diagnostic-main small {
-    margin-top: 4px;
-    color: var(--ink-faint);
-    font-size: var(--type-micro);
-  }
-
-  .diagnostic-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 4px;
-    border-top: 1px solid var(--rule);
-    padding: 5px 7px;
-  }
-
-  .diagnostic-actions button {
-    border: 0;
-    border-radius: 5px;
-    background: transparent;
-    padding: 4px 6px;
-    color: var(--ink-muted);
-    font-size: var(--type-micro);
-  }
-
-  .diagnostic-actions button.accent {
-    color: var(--accent);
-  }
-
-  .proof-empty {
-    min-height: 90px;
-  }
-
   .grammar-scope {
     margin: 10px 0 7px;
   }
@@ -5602,20 +5244,6 @@
 
   .path-button small {
     color: var(--accent);
-  }
-
-  .repository-path {
-    align-items: flex-start;
-    gap: 10px;
-  }
-
-  .repository-path span {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-
-  .repository-path small {
-    flex: 0 0 auto;
   }
 
   .quiet-line,
@@ -5801,19 +5429,6 @@
 
   .statusbar .warning {
     color: var(--danger);
-  }
-
-  .status-diagnostics {
-    border: 0;
-    background: transparent;
-    padding: 0;
-    color: var(--warning);
-    font-size: var(--type-micro);
-    pointer-events: auto;
-  }
-
-  .status-diagnostics:hover {
-    color: var(--accent);
   }
 
   .welcome,
@@ -6424,23 +6039,6 @@
     width: 100%;
     min-width: 0;
     font-size: var(--type-control);
-  }
-
-  .settings-fact {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    margin: 10px 0;
-  }
-
-  .settings-fact strong {
-    font-size: var(--type-control);
-  }
-
-  .settings-fact span {
-    color: var(--ink-muted);
-    font-size: var(--type-caption);
-    line-height: 1.55;
   }
 
   .settings-advanced-toggle {
@@ -7077,13 +6675,12 @@
       overflow: visible;
     }
 
-    .manuscript-pane,
     .split-handle,
-    .companion-pane:not(.preview-pane) {
+    .companion-pane {
       display: none !important;
     }
 
-    .companion-pane.preview-pane {
+    .document-pane {
       display: block;
       overflow: visible;
     }

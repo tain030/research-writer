@@ -6,7 +6,7 @@
 - 편집 화면의 상시 UI를 늘리기 전에 패널이나 명령으로 숨길 수 있는지 검토합니다.
 - AI 기능은 명시적인 문맥 선택, diff, 사용자 승인과 되돌리기를 유지해야 합니다.
 - 비밀은 프런트엔드 상태, 로그, SQLite 또는 저장소에 넣지 않습니다.
-- 플랫폼 전용 코드는 Rust 서비스 경계 안에 두고 Svelte 화면은 공통으로 유지합니다.
+- 플랫폼 전용 코드는 Electron main 또는 Rust 서비스 경계 안에 두고 Svelte 화면은 공통으로 유지합니다.
 
 ## 변경 전 확인
 
@@ -20,7 +20,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D w
 cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets
 ```
 
-Linux 네이티브 의존성을 설치할 수 없다면 `./scripts/test-linux-container.sh`를 사용합니다.
+로컬 Rust 도구 구성이 어렵다면 `./scripts/test-linux-container.sh`를 사용합니다.
 
 ## 테스트 기대치
 
@@ -28,6 +28,6 @@ Linux 네이티브 의존성을 설치할 수 없다면 `./scripts/test-linux-co
 - 버전 변경: 압축 round-trip, 이름 있는 버전 보존, 정리 정책 테스트
 - Markdown 변경: fenced code, 제목·각주·한글 검색 사례
 - 연동 변경: 실제 계정 대신 `docker-compose.test.yml`의 WireMock fixture
-- UI 변경: 밝은·어두운 테마와 720px 최소 폭을 확인
+- UI 변경: 밝은·어두운 테마, 920px 최소 창, A4 페이지/너비 맞춤을 확인
 
 외부 서비스에 쓰는 통합 테스트나 실제 OAuth 로그인은 자동 CI에서 수행하지 않습니다.

@@ -2,7 +2,7 @@
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EditorApi } from "./Editor.svelte";
+import type { EditorApi } from "./types";
 import MarkdownSourceEditor from "./MarkdownSourceEditor.svelte";
 
 beforeEach(() => {
@@ -57,6 +57,19 @@ describe("Markdown source editor", () => {
     expect(changes.at(-1)).toBe("# 제목\n\n새 본문");
     expect(api!.getScrollAnchor().source).toBe("source");
     expect(target.querySelector(".cm-lineNumbers")).not.toBeNull();
+
+    api!.setSelection(api!.getContent().length, api!.getContent().length);
+    api!.setGhostText(" 이어쓰기");
+    await tick();
+    expect(target.querySelector(".cm-ghost-text")?.textContent).toContain(
+      "이어쓰기",
+    );
+    target.querySelector<HTMLElement>(".cm-content")!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
+    await tick();
+    expect(api!.getContent()).toBe("# 제목\n\n새 본문 이어쓰기");
+    expect(target.querySelector(".cm-ghost-text")).toBeNull();
     unmount(component);
   });
 });

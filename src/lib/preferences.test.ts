@@ -4,8 +4,7 @@ import { defaultPreferences, parsePreferences } from "./preferences";
 describe("writing preferences", () => {
   it("uses Pretendard for a fresh profile", () => {
     expect(defaultPreferences.fontFamily).toBe("Pretendard");
-    expect(defaultPreferences.manuscriptFitMode).toBe("page");
-    expect(defaultPreferences.manuscriptGuidance).toBe(true);
+    expect(defaultPreferences.pageFitMode).toBe("width");
     expect(defaultPreferences.companionSplitRatio).toBe(0.56);
     expect(parsePreferences(null).fontFamily).toBe("Pretendard");
   });
@@ -31,9 +30,8 @@ describe("writing preferences", () => {
 
     expect(parsePreferences(stored)).toMatchObject({
       fontFamily: "MaruBuri",
-      manuscriptFitMode: "page",
+      pageFitMode: "width",
       typewriterMode: true,
-      manuscriptGuidance: true,
     });
     expect("measure" in parsePreferences(stored)).toBe(false);
   });
@@ -45,42 +43,36 @@ describe("writing preferences", () => {
 
   it("migrates manual zoom profiles to page fitting", () => {
     const migrated = parsePreferences('{"manuscriptZoom":130}');
-    expect(migrated.manuscriptFitMode).toBe("page");
+    expect(migrated.pageFitMode).toBe("width");
     expect("manuscriptZoom" in migrated).toBe(false);
   });
 
-  it("preserves a valid manuscript fitting mode", () => {
+  it("migrates a valid legacy manuscript fitting mode", () => {
     expect(
-      parsePreferences('{"manuscriptFitMode":"width"}').manuscriptFitMode,
+      parsePreferences('{"manuscriptFitMode":"page"}').pageFitMode,
+    ).toBe("page");
+    expect(
+      parsePreferences('{"pageFitMode":"width"}').pageFitMode,
     ).toBe("width");
     expect(
-      parsePreferences('{"manuscriptFitMode":"invalid"}').manuscriptFitMode,
-    ).toBe("page");
-  });
-
-  it("preserves an explicit writing-guidance preference", () => {
-    expect(
-      parsePreferences('{"manuscriptGuidance":false}').manuscriptGuidance,
-    ).toBe(false);
+      parsePreferences('{"manuscriptFitMode":"invalid"}').pageFitMode,
+    ).toBe("width");
   });
 
   it("migrates immersive writing options without changing old profiles", () => {
     expect(parsePreferences("{}")).toMatchObject({
       immersiveChrome: false,
-      typewriterImperfection: false,
       focusSheetMode: false,
     });
     expect(
       parsePreferences(
         JSON.stringify({
           immersiveChrome: true,
-          typewriterImperfection: true,
           focusSheetMode: true,
         }),
       ),
     ).toMatchObject({
       immersiveChrome: true,
-      typewriterImperfection: true,
       focusSheetMode: true,
     });
   });

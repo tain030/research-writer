@@ -13,9 +13,12 @@
     Annotation,
     Compartment,
     EditorState,
+    StateEffect,
+    StateField,
     Transaction,
   } from "@codemirror/state";
   import {
+    Decoration,
     drawSelection,
     dropCursor,
     EditorView,
@@ -24,9 +27,11 @@
     highlightSpecialChars,
     keymap,
     lineNumbers,
+    WidgetType,
+    type DecorationSet,
   } from "@codemirror/view";
-  import type { EditorApi } from "./Editor.svelte";
   import type {
+    EditorApi,
     EditorChangeContext,
     EditorSelection,
     ScrollAnchor,
@@ -64,8 +69,80 @@
   let scrollFrame: number | null = null;
   let compositionNeedsCommit = false;
   const externalUpdate = Annotation.define<boolean>();
+  const setSourceGhost = StateEffect.define<{ pos: number; text: string }>();
+  const clearSourceGhost = StateEffect.define<null>();
   const readOnlyCompartment = new Compartment();
   const editableCompartment = new Compartment();
+
+  interface SourceGhostState {
+    pos: number | null;
+    text: string;
+    decorations: DecorationSet;
+  }
+
+  class SourceGhostWidget extends WidgetType {
+    readonly text: string;
+
+    constructor(text: string) {
+      super();
+      this.text = text;
+    }
+
+    eq(other: SourceGhostWidget): boolean {
+      return other.text === this.text;
+    }
+
+    toDOM(): HTMLElement {
+      const ghost = document.createElement("span");
+      const hint = document.createElement("kbd");
+      ghost.className = "cm-ghost-text";
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.append(this.text);
+      hint.textContent = "Tab";
+      ghost.append(hint);
+      return ghost;
+    }
+
+    ignoreEvent(): boolean {
+      return true;
+    }
+  }
+
+  function emptySourceGhost(): SourceGhostState {
+    return { pos: null, text: "", decorations: Decoration.none };
+  }
+
+  const sourceGhostField = StateField.define<SourceGhostState>({
+    create: emptySourceGhost,
+    update(current, transaction) {
+      let next =
+        transaction.docChanged || transaction.selection
+          ? emptySourceGhost()
+          : current;
+      for (const effect of transaction.effects) {
+        if (effect.is(clearSourceGhost)) next = emptySourceGhost();
+        if (effect.is(setSourceGhost)) {
+          const pos = Math.max(0, Math.min(effect.value.pos, transaction.newDoc.length));
+          const text = effect.value.text;
+          next = text
+            ? {
+                pos,
+                text,
+                decorations: Decoration.set([
+                  Decoration.widget({
+                    widget: new SourceGhostWidget(text),
+                    side: 100,
+                  }).range(pos),
+                ]),
+              }
+            : emptySourceGhost();
+        }
+      }
+      return next;
+    },
+    provide: (field) =>
+      EditorView.decorations.from(field, (value) => value.decorations),
+  });
 
   function selectionInfo(state = view?.state): EditorSelection {
     if (!state) return { from: 0, to: 0, text: "", line: 1 };
@@ -139,6 +216,35 @@
     view.dispatch({ effects: EditorView.scrollIntoView(offset, { y: "start" }) });
   }
 
+  function clearGhostText(): void {
+    if (!view || !view.state.field(sourceGhostField).text) return;
+    view.dispatch({ effects: clearSourceGhost.of(null) });
+  }
+
+  function setGhostText(text: string): void {
+    if (!view) return;
+    const selection = view.state.selection.main;
+    if (!selection.empty || !text) {
+      clearGhostText();
+      return;
+    }
+    view.dispatch({
+      effects: setSourceGhost.of({ pos: selection.head, text }),
+    });
+  }
+
+  function acceptGhostText(target: EditorView): boolean {
+    const ghost = target.state.field(sourceGhostField);
+    if (!ghost.text || ghost.pos === null) return false;
+    target.dispatch({
+      changes: { from: ghost.pos, insert: ghost.text },
+      selection: { anchor: ghost.pos + ghost.text.length },
+      effects: clearSourceGhost.of(null),
+      scrollIntoView: true,
+    });
+    return true;
+  }
+
   function api(): EditorApi {
     return {
       focus: () => view?.focus(),
@@ -154,8 +260,8 @@
       scrollToLine,
       getScrollAnchor: currentAnchor,
       scrollToAnchor,
-      setGhostText: () => undefined,
-      clearGhostText: () => undefined,
+      setGhostText,
+      clearGhostText,
     };
   }
 
@@ -188,6 +294,22 @@
       backgroundColor: "color-mix(in srgb, var(--accent) 20%, transparent)",
     },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
+    ".cm-ghost-text": {
+      color: "var(--ink-ghost)",
+      opacity: "0.78",
+      whiteSpace: "pre-wrap",
+      pointerEvents: "none",
+    },
+    ".cm-ghost-text kbd": {
+      marginLeft: "0.55em",
+      border: "1px solid var(--rule)",
+      borderRadius: "3px",
+      backgroundColor: "var(--paper-raised)",
+      padding: "1px 4px",
+      color: "var(--ink-faint)",
+      fontFamily: "var(--ui-font)",
+      fontSize: "10px",
+    },
     ".cm-search": {
       border: "0",
       borderBottom: "1px solid var(--rule)",
@@ -230,7 +352,22 @@
         search({ top: true }),
         EditorView.lineWrapping,
         highlightActiveLine(),
-        keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
+        sourceGhostField,
+        keymap.of([
+          { key: "Tab", run: acceptGhostText },
+          {
+            key: "Escape",
+            run: () => {
+              if (!view?.state.field(sourceGhostField).text) return false;
+              clearGhostText();
+              return true;
+            },
+          },
+          ...defaultKeymap,
+          ...historyKeymap,
+          ...searchKeymap,
+          indentWithTab,
+        ]),
         readOnlyCompartment.of(EditorState.readOnly.of(readOnly)),
         editableCompartment.of(EditorView.editable.of(!readOnly)),
         editorTheme,

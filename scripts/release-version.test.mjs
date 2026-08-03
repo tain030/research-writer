@@ -10,7 +10,6 @@ import {
   setCargoLockVersion,
   setCargoPackageVersion,
   setReleaseVersion,
-  setTauriVersionSource,
 } from "./release-version.mjs";
 
 async function makeReleaseFixture(version = "0.1.3") {
@@ -21,10 +20,6 @@ async function makeReleaseFixture(version = "0.1.3") {
     writeFile(
       path.join(root, "package.json"),
       `${JSON.stringify({ name: "research-writer", version }, null, 2)}\n`,
-    ),
-    writeFile(
-      path.join(tauriDir, "tauri.conf.json"),
-      `${JSON.stringify({ version: "../package.json" }, null, 2)}\n`,
     ),
     writeFile(
       path.join(tauriDir, "Cargo.toml"),
@@ -81,20 +76,6 @@ dependencies = []
 
     expect(readCargoLockVersion(updated)).toBe("0.1.4");
     expect(updated).toContain('name = "dependency"\nversion = "0.1.3"');
-  });
-
-  it("preserves unrelated Tauri configuration formatting", () => {
-    const config = `{
-  "version": "0.1.3",
-  "bundle": { "targets": "all" }
-}
-`;
-
-    expect(setTauriVersionSource(config)).toBe(`{
-  "version": "../package.json",
-  "bundle": { "targets": "all" }
-}
-`);
   });
 
   it("updates and verifies every release version source", async () => {

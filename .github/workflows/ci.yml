@@ -8,7 +8,7 @@ on:
   workflow_call:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   frontend:
-    name: Frontend
+    name: Editor and desktop bridge
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
@@ -28,12 +28,20 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check desktop entry points
+        run: |
+          node --check electron/main.mjs
+          node --check electron/preload.cjs
+          node --check scripts/electron-dev.mjs
+          node --check scripts/electron-smoke.mjs
+          node --check scripts/collect-release-artifacts.mjs
+          node --check scripts/release-version.mjs
       - run: pnpm check
       - run: pnpm test
       - run: pnpm build
 
-  native:
-    name: Native (${{ matrix.name }})
+  backend:
+    name: Backend (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
@@ -47,13 +55,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 10.32.1
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24.18.0
-          cache: pnpm
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -61,17 +62,6 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Install Tauri dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libayatana-appindicator3-dev \
-            libwebkit2gtk-4.1-dev \
-            librsvg2-dev \
-            patchelf
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets

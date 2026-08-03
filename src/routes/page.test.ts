@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 describe("writing workspace toolbar", () => {
-  it("keeps the manuscript mounted and opens Markdown beside it", async () => {
+  it("keeps the paginated paper mounted and opens Markdown beside it", async () => {
     const target = document.createElement("div");
     document.body.append(target);
     const component = mount(Page, { target });
@@ -79,7 +79,6 @@ describe("writing workspace toolbar", () => {
       "삽입 메뉴",
       "보기 메뉴",
       "Markdown 원문을 옆에 열기",
-      "완성본을 옆에 열기",
       "인쇄 또는 PDF 저장",
     ]);
 
@@ -109,7 +108,7 @@ describe("writing workspace toolbar", () => {
       )!
       .click();
 
-    expect(target.querySelector(".manuscript-pane .editor-host")).not.toBeNull();
+    expect(target.querySelector(".paper-pane .paper-editor-shell")).not.toBeNull();
     await vi.waitFor(
       () =>
         expect(

@@ -1,4 +1,10 @@
-export type MarkdownBlockStyle = "body" | "heading2" | "heading3" | "quote" | "bullet";
+export type MarkdownBlockStyle =
+  | "body"
+  | "heading1"
+  | "heading2"
+  | "heading3"
+  | "quote"
+  | "bullet";
 export type MarkdownInlineStyle = "strong" | "emphasis";
 
 export interface MarkdownSelection {
@@ -12,7 +18,7 @@ export interface MarkdownEdit extends MarkdownSelection {
   replacement: string;
 }
 
-const blockPrefix = /^(?:#{2,3}\s+|>\s+|[-*+]\s+)/u;
+const blockPrefix = /^(?:#{1,3}\s+|>\s+|[-*+]\s+)/u;
 
 export function currentBlockStyle(
   content: string,
@@ -20,6 +26,7 @@ export function currentBlockStyle(
 ): MarkdownBlockStyle {
   const start = content.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
   const line = content.slice(start, content.indexOf("\n", offset) < 0 ? content.length : content.indexOf("\n", offset));
+  if (/^#\s/u.test(line)) return "heading1";
   if (/^###\s/u.test(line)) return "heading3";
   if (/^##\s/u.test(line)) return "heading2";
   if (/^>\s/u.test(line)) return "quote";
@@ -135,6 +142,7 @@ export function insertMarkdownLink(
 }
 
 function prefixForStyle(style: MarkdownBlockStyle): string {
+  if (style === "heading1") return "# ";
   if (style === "heading2") return "## ";
   if (style === "heading3") return "### ";
   if (style === "quote") return "> ";

@@ -1,33 +1,38 @@
-import type { FocusMode, ManuscriptFitMode } from "./types";
+import type { FocusMode } from "./types";
+
+export type PageFitMode = "page" | "width";
 
 export interface Preferences {
   fontFamily: string;
-  manuscriptFitMode: ManuscriptFitMode;
+  pageFitMode: PageFitMode;
   focusMode: FocusMode;
   typewriterMode: boolean;
   soundEnabled: boolean;
   autoComplete: boolean;
-  manuscriptGuidance: boolean;
   theme: "system" | "light" | "dark";
   immersiveChrome: boolean;
-  typewriterImperfection: boolean;
   focusSheetMode: boolean;
   companionSplitRatio: number;
 }
 
 export const defaultPreferences: Preferences = {
   fontFamily: "Pretendard",
-  manuscriptFitMode: "page",
+  pageFitMode: "width",
   focusMode: "off",
   typewriterMode: true,
   soundEnabled: false,
   autoComplete: false,
-  manuscriptGuidance: true,
   theme: "system",
   immersiveChrome: false,
-  typewriterImperfection: false,
   focusSheetMode: false,
   companionSplitRatio: 0.56,
+};
+
+type StoredPreferences = Partial<Preferences> & {
+  manuscriptFitMode?: unknown;
+  manuscriptGuidance?: unknown;
+  typewriterImperfection?: unknown;
+  manuscriptZoom?: unknown;
 };
 
 function clampSplitRatio(value: unknown): number {
@@ -43,17 +48,18 @@ export function parsePreferences(stored: string | null): Preferences {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { ...defaultPreferences };
     }
-    const candidate = parsed as Partial<Preferences>;
+    const candidate = parsed as StoredPreferences;
+    const storedPageFitMode =
+      candidate.pageFitMode ?? candidate.manuscriptFitMode;
     return {
       fontFamily:
         typeof candidate.fontFamily === "string" && candidate.fontFamily.trim()
           ? candidate.fontFamily
           : defaultPreferences.fontFamily,
-      manuscriptFitMode: ["page", "width"].includes(
-        candidate.manuscriptFitMode ?? "",
-      )
-        ? (candidate.manuscriptFitMode as ManuscriptFitMode)
-        : defaultPreferences.manuscriptFitMode,
+      pageFitMode:
+        storedPageFitMode === "page" || storedPageFitMode === "width"
+        ? storedPageFitMode
+        : defaultPreferences.pageFitMode,
       focusMode: ["off", "paragraph", "sentence"].includes(
         candidate.focusMode ?? "",
       )
@@ -71,10 +77,6 @@ export function parsePreferences(stored: string | null): Preferences {
         typeof candidate.autoComplete === "boolean"
           ? candidate.autoComplete
           : defaultPreferences.autoComplete,
-      manuscriptGuidance:
-        typeof candidate.manuscriptGuidance === "boolean"
-          ? candidate.manuscriptGuidance
-          : defaultPreferences.manuscriptGuidance,
       theme: ["system", "light", "dark"].includes(candidate.theme ?? "")
         ? (candidate.theme as Preferences["theme"])
         : defaultPreferences.theme,
@@ -82,10 +84,6 @@ export function parsePreferences(stored: string | null): Preferences {
         typeof candidate.immersiveChrome === "boolean"
           ? candidate.immersiveChrome
           : defaultPreferences.immersiveChrome,
-      typewriterImperfection:
-        typeof candidate.typewriterImperfection === "boolean"
-          ? candidate.typewriterImperfection
-          : defaultPreferences.typewriterImperfection,
       focusSheetMode:
         typeof candidate.focusSheetMode === "boolean"
           ? candidate.focusSheetMode

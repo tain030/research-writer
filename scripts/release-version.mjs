@@ -4,7 +4,6 @@ import path from "node:path";
 
 const STABLE_SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const TAURI_VERSION_SOURCE = "../package.json";
 
 export function requireStableVersion(value) {
   if (!STABLE_SEMVER.test(value ?? "")) {
@@ -75,19 +74,9 @@ export function setCargoLockVersion(contents, version) {
   );
 }
 
-export function setTauriVersionSource(contents) {
-  return replaceExactlyOnce(
-    contents,
-    /^([ \t]*"version"[ \t]*:[ \t]*)"[^"]+"([ \t]*,?[ \t]*\r?)$/m,
-    `$1"${TAURI_VERSION_SOURCE}"$2`,
-    "tauri.conf.json",
-  );
-}
-
 function repositoryPaths(root) {
   return {
     packageJson: path.join(root, "package.json"),
-    tauriConfig: path.join(root, "src-tauri", "tauri.conf.json"),
     cargoToml: path.join(root, "src-tauri", "Cargo.toml"),
     cargoLock: path.join(root, "src-tauri", "Cargo.lock"),
   };
@@ -95,9 +84,8 @@ function repositoryPaths(root) {
 
 async function readReleaseFiles(root) {
   const paths = repositoryPaths(root);
-  const [packageText, tauriText, cargoToml, cargoLock] = await Promise.all([
+  const [packageText, cargoToml, cargoLock] = await Promise.all([
     readFile(paths.packageJson, "utf8"),
-    readFile(paths.tauriConfig, "utf8"),
     readFile(paths.cargoToml, "utf8"),
     readFile(paths.cargoLock, "utf8"),
   ]);
@@ -105,8 +93,6 @@ async function readReleaseFiles(root) {
     paths,
     packageText,
     packageJson: JSON.parse(packageText),
-    tauriText,
-    tauriConfig: JSON.parse(tauriText),
     cargoToml,
     cargoLock,
   };
@@ -124,11 +110,6 @@ export async function checkReleaseVersion(root, expectedVersion) {
     .filter(([, current]) => current !== version)
     .map(([file, current]) => `${file}: ${current ?? "없음"}`);
 
-  if (files.tauriConfig.version !== TAURI_VERSION_SOURCE) {
-    mismatches.push(
-      `tauri.conf.json: ${files.tauriConfig.version ?? "없음"} (기대값 ${TAURI_VERSION_SOURCE})`,
-    );
-  }
   if (mismatches.length > 0) {
     throw new Error(
       `릴리스 버전 ${version}과 일치하지 않습니다.\n${mismatches.join("\n")}`,
@@ -147,10 +128,6 @@ export async function setReleaseVersion(root, requestedVersion) {
     writeFile(
       files.paths.packageJson,
       `${JSON.stringify(files.packageJson, null, 2)}\n`,
-    ),
-    writeFile(
-      files.paths.tauriConfig,
-      setTauriVersionSource(files.tauriText),
     ),
     writeFile(
       files.paths.cargoToml,

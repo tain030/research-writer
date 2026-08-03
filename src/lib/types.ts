@@ -58,6 +58,7 @@ export interface FontRecord {
   family: string;
   monospaced: boolean;
   bundled: boolean;
+  dataUrl?: string | null;
 }
 
 export interface SyncthingStatus {
@@ -202,13 +203,34 @@ export interface EditorSelection {
   column?: number;
 }
 
+/**
+ * Common contract shared by the visual paper editor and the raw Markdown
+ * companion. Offsets are always offsets in the canonical Markdown string,
+ * never ProseMirror/DOM positions.
+ */
+export interface EditorApi {
+  focus: () => void;
+  getContent: () => string;
+  getSelection: () => EditorSelection;
+  replaceRange: (from: number, to: number, text: string) => void;
+  insertAtCursor: (text: string) => void;
+  setSelection: (from: number, to: number) => void;
+  scrollToOffset: (offset: number) => void;
+  scrollToLine: (line: number) => void;
+  getScrollAnchor: () => ScrollAnchor;
+  scrollToAnchor: (anchor: ScrollAnchor) => void;
+  setGhostText: (text: string) => void;
+  clearGhostText: () => void;
+  getPageCount?: () => number;
+  awaitLayout?: () => Promise<void>;
+}
+
 export interface ScrollAnchor {
   offset: number;
-  source: "manuscript" | "source" | "preview";
+  source: "paper" | "source";
 }
 
 export type FocusMode = "off" | "paragraph" | "sentence";
-export type ManuscriptFitMode = "page" | "width";
 export type SidePanel = "repository" | "outline" | "search" | "versions" | null;
 export type AssistantPanel =
   | "proofreading"
@@ -216,4 +238,4 @@ export type AssistantPanel =
   | "sources"
   | "settings"
   | null;
-export type CompanionView = "source" | "preview" | null;
+export type CompanionView = "source" | null;

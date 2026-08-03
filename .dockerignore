@@ -2,6 +2,7 @@ node_modules
 .pnpm-store
 .svelte-kit
 build
+dist
 package
 src-tauri/target
 .git
