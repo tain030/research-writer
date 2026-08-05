@@ -100,6 +100,9 @@
     0 16px 38px rgba(46, 37, 29, 0.16);
   --shadow: var(--shadow-float);
   --hanji-texture: url("/textures/hanji-grain.svg");
+  --typewriter-sheet: #f3f4f1;
+  --typewriter-sheet-edge: #aeb2ad;
+  --typewriter-paper-texture: url("/textures/typewriter-bond.svg");
   --typewriter-desk-surface:
     radial-gradient(
       ellipse at 50% 3%,

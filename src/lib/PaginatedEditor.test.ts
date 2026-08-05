@@ -1263,6 +1263,37 @@ describe("paginated editorial editor", () => {
     unmount(component);
   });
 
+  it("centers one blockquote rail around multiple Markdown paragraphs", async () => {
+    const source = "> 첫 문단\n>\n> 둘째 문단";
+    let api: EditorApi | null = null;
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: source,
+        experience: "typewriter",
+        onready: (value) => (api = value),
+      },
+    });
+    await tick();
+
+    const quote = target.querySelector<HTMLElement>(
+      ".ProseMirror > blockquote",
+    )!;
+    const paragraphs = quote.querySelectorAll<HTMLElement>(":scope > p");
+    expect(paragraphs).toHaveLength(2);
+    expect(getComputedStyle(quote).paddingTop).toBe(
+      getComputedStyle(quote).paddingBottom,
+    );
+    expect(Number.parseFloat(getComputedStyle(paragraphs[0]).marginTop)).toBe(0);
+    expect(Number.parseFloat(getComputedStyle(paragraphs[1]).marginBottom)).toBe(0);
+    expect(api!.getContent().trimEnd()).toMatch(
+      /^> 첫 문단\n>\s*\n> 둘째 문단$/u,
+    );
+    unmount(component);
+  });
+
   it("renders the literary style with its paired font and guide", async () => {
     let api: EditorApi | null = null;
     const target = document.createElement("div");

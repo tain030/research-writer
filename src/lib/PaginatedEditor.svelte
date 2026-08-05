@@ -2213,10 +2213,13 @@
   }
 
   .writing-typewriter .paper-sheet {
-    border-color: rgba(49, 45, 39, 0.32);
+    border-color: color-mix(in srgb, var(--typewriter-sheet-edge) 76%, transparent);
+    background-color: var(--typewriter-sheet);
     background-image:
-      linear-gradient(rgba(83, 70, 52, 0.018), rgba(83, 70, 52, 0.018)),
-      var(--hanji-texture);
+      linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(55, 62, 58, 0.018)),
+      var(--typewriter-paper-texture);
+    background-repeat: no-repeat, repeat;
+    background-size: 100% 100%, 320px 320px;
     box-shadow:
       0 1px 1px rgba(0, 0, 0, 0.24),
       0 20px 58px rgba(0, 0, 0, 0.38);
@@ -2313,8 +2316,8 @@
     transform-origin: top center;
     border-radius: 0 0 48% 48% / 0 0 15px 15px;
     background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(117, 105, 84, 0.07) 48%, rgba(46, 42, 35, 0.2)),
-      var(--sheet);
+      linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(105, 111, 106, 0.055) 48%, rgba(37, 41, 39, 0.2)),
+      var(--typewriter-sheet);
     box-shadow:
       inset 0 -6px 8px rgba(44, 39, 31, 0.16),
       0 1px 2px rgba(0, 0, 0, 0.2);
@@ -2733,8 +2736,8 @@
     transform: translateY(var(--typewriter-paper-tension));
     border-radius: 0 0 50% 50% / 0 0 13px 13px;
     background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(95, 88, 75, 0.05) 50%, rgba(24, 23, 21, 0.22)),
-      var(--sheet);
+      linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(91, 98, 94, 0.045) 50%, rgba(24, 28, 26, 0.2)),
+      var(--typewriter-sheet);
     box-shadow:
       inset 0 -7px 8px rgba(35, 32, 27, 0.17),
       0 1px 2px rgba(0, 0, 0, 0.24);
@@ -3342,8 +3345,8 @@
     transform: translate3d(-50%, var(--typewriter-paper-tension), 0);
     border-radius: 0 0 50% 50% / 0 0 14px 14px;
     background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(95, 88, 75, 0.05) 50%, rgba(24, 23, 21, 0.22)),
-      var(--sheet);
+      linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(91, 98, 94, 0.045) 50%, rgba(24, 28, 26, 0.2)),
+      var(--typewriter-sheet);
     box-shadow:
       inset 0 -8px 9px rgba(35, 32, 27, 0.18),
       0 2px 3px rgba(0, 0, 0, 0.26);
@@ -3880,11 +3883,21 @@
     margin: 1.35em 0 0.5em;
     font-size: 11.5pt;
   }
-  .paper-editor-mount :global(.ProseMirror blockquote) {
+  .paper-editor-mount :global(.ProseMirror blockquote),
+  .paper-measure-host :global(.ProseMirror blockquote) {
     margin: 1.25em 0;
     border-left: 2px solid #a98675;
-    padding: 0.15em 0 0.15em 1.1em;
+    padding-block: 0.15em;
+    padding-inline: 1.1em 0;
     color: #5c534d;
+  }
+  .paper-editor-mount :global(.ProseMirror blockquote > :first-child),
+  .paper-measure-host :global(.ProseMirror blockquote > :first-child) {
+    margin-top: 0;
+  }
+  .paper-editor-mount :global(.ProseMirror blockquote > :last-child),
+  .paper-measure-host :global(.ProseMirror blockquote > :last-child) {
+    margin-bottom: 0;
   }
   .paper-editor-mount :global(.ProseMirror ul),
   .paper-editor-mount :global(.ProseMirror ol) {

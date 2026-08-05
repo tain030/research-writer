@@ -10,20 +10,28 @@ const paginatedEditor = readFileSync(
   "utf8",
 );
 
-function cssBlock(selector: string): string {
-  const selectorStart = stylesheet.indexOf(selector);
+function sourceCssBlock(source: string, label: string, selector: string): string {
+  const selectorStart = source.indexOf(selector);
   expect(
     selectorStart,
-    `Missing ${selector} in stylesheet (${stylesheet.length} characters): ${stylesheet.slice(0, 80)}`,
+    `Missing ${selector} in ${label} (${source.length} characters): ${source.slice(0, 80)}`,
   ).toBeGreaterThanOrEqual(0);
-  const blockStart = stylesheet.indexOf("{", selectorStart);
+  const blockStart = source.indexOf("{", selectorStart);
   let depth = 0;
-  for (let index = blockStart; index < stylesheet.length; index += 1) {
-    if (stylesheet[index] === "{") depth += 1;
-    if (stylesheet[index] === "}") depth -= 1;
-    if (depth === 0) return stylesheet.slice(blockStart + 1, index);
+  for (let index = blockStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(blockStart + 1, index);
   }
   throw new Error(`CSS block is not closed: ${selector}`);
+}
+
+function cssBlock(selector: string): string {
+  return sourceCssBlock(stylesheet, "stylesheet", selector);
+}
+
+function editorCssBlock(selector: string): string {
+  return sourceCssBlock(paginatedEditor, "PaginatedEditor", selector);
 }
 
 function hexToken(block: string, token: string): string {
@@ -160,6 +168,66 @@ describe("editorial theme accessibility", () => {
     );
     expect(texture).toContain("feTurbulence");
     expect(new TextEncoder().encode(texture).byteLength).toBeLessThan(4_096);
+  });
+
+  it("uses neutral cotton bond throughout the typewriter paper path", () => {
+    const root = cssBlock(":root {");
+    const sheet = hexToken(root, "typewriter-sheet");
+    expect(sheet).toBe("#f3f4f1");
+    expect(hexToken(root, "typewriter-sheet-edge")).toBe("#aeb2ad");
+    expect(customProperty(root, "typewriter-paper-texture")).toBe(
+      'url("/textures/typewriter-bond.svg")',
+    );
+    expect(contrast("#28231f", sheet)).toBeGreaterThanOrEqual(7);
+
+    const texture = readFileSync(
+      new URL("../../static/textures/typewriter-bond.svg", import.meta.url),
+      "utf8",
+    );
+    expect(texture.match(/<feTurbulence/g)).toHaveLength(2);
+    expect(texture).toContain('seed="29"');
+    expect(texture).toContain('seed="53"');
+    expect(texture.match(/stitchTiles="stitch"/g)).toHaveLength(2);
+    expect(texture).not.toContain("<image");
+    expect(texture).not.toContain("href=");
+    expect(new TextEncoder().encode(texture).byteLength).toBeLessThan(4_096);
+
+    const paper = editorCssBlock(".writing-typewriter .paper-sheet {");
+    expect(paper).toContain("background-color: var(--typewriter-sheet)");
+    expect(paper).toContain("var(--typewriter-paper-texture)");
+    expect(paper).not.toContain("var(--hanji-texture)");
+
+    const wraps = Array.from(
+      paginatedEditor.matchAll(
+        /^  \.typewriter-paper-wrap \{([\s\S]*?)^  \}/gmu,
+      ),
+      (match) => match[1],
+    );
+    expect(wraps).toHaveLength(3);
+    for (const wrap of wraps) {
+      expect(wrap).toContain("var(--typewriter-sheet)");
+      expect(wrap).not.toContain("var(--sheet)");
+    }
+  });
+
+  it("balances blockquote rails around their first and last content", () => {
+    const quote = editorCssBlock(
+      ".paper-editor-mount :global(.ProseMirror blockquote),",
+    );
+    expect(quote).toContain("padding-block: 0.15em");
+    expect(quote).toContain("padding-inline: 1.1em 0");
+
+    const first = editorCssBlock(
+      ".paper-editor-mount :global(.ProseMirror blockquote > :first-child),",
+    );
+    const last = editorCssBlock(
+      ".paper-editor-mount :global(.ProseMirror blockquote > :last-child),",
+    );
+    expect(first).toContain("margin-top: 0");
+    expect(last).toContain("margin-bottom: 0");
+    expect(paginatedEditor).toContain(
+      ".paper-measure-host :global(.ProseMirror blockquote > :last-child)",
+    );
   });
 
   it("uses warm loden embossed leather behind the light walnut typewriter", () => {
