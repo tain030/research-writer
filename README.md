@@ -49,15 +49,15 @@ DMG를 열어 앱을 Applications로 옮깁니다. 아직 Apple 공증 전이므
 
 ## 편집 방식
 
-- 기본 집필 스타일은 NanumGothicCoding을 사용하는 타자기형입니다. 상단 타자기 버튼으로 MaruBuri 문학형과 즉시 전환할 수 있으며 Pretendard도 함께 제공합니다.
+- 기본 쓰기 감각은 Goorm Sans Code를 사용하는 타자기형입니다. 상단 선택기에서 무음 플래튼과 움직이는 종이의 `타자기`, MaruBuri 기반의 책 한 쪽 `문학 서재`, 페이지 경계가 없는 Pretendard 기반 `몰입 캔버스`를 같은 원고에서 즉시 비교할 수 있습니다.
 - 210×297mm A4, 고정 여백과 실제 페이지 나눔을 편집 중 그대로 봅니다.
 - `페이지 너비에 맞추기`는 읽기 좋은 너비로 연속 페이지를 보여주고, `페이지에 맞추기`는 현재 한 장을 스크롤 없이 맞춥니다.
 - 제목, 목록, 인용, 표, 그림, 수식, 각주를 화면에서 직접 편집합니다.
 - Markdown 기호는 편집 화면에서 감추되 현재 블록의 의미를 작은 안내로 보여줍니다.
-- 커서가 있는 실제 행은 타자기형의 얇은 흑연색 캐리지 밴드 또는 문학형의 절제된 여백 표식으로 알려줍니다.
+- 타자기형은 포커스 즉시 타점을 고정하고 종이만 글자 폭만큼 움직이며, 문학 서재는 입력한 글자와 조판 부호가 잉크처럼 정착합니다. 몰입 캔버스는 현재 문단을 중심에 두고 세션의 단어·문장·문단을 고정 도크에 조용히 쌓아 보여줍니다.
 - Markdown 원문 버튼을 누르면 오른쪽에서 실제 저장 내용을 함께 편집할 수 있습니다.
 - PDF 내보내기는 별도 미리보기 문서를 다시 만들지 않고 현재 A4 조판을 그대로 인쇄합니다.
-- 문단·문장 집중, 타자기 스크롤과 선택적인 타건음을 제공합니다.
+- 문단·문장 집중, 커서 따라가기와 입력 중 도구막대 숨기기를 제공합니다.
 
 원고의 단일 진실은 언제나 평범한 `.md` 파일입니다. 리치 편집기와 원문 편집기는 같은 Markdown 문자열을 수정하므로 독점 문서 포맷이 생기지 않습니다.
 
@@ -80,7 +80,7 @@ Dropbox, OneDrive, Google Drive, iCloud 또는 Syncthing 폴더를 저장소로 
 
 운영체제에 설치된 글꼴은 의도적으로 목록에 넣지 않습니다. OS마다 같은 폰트 이름이 다른 파일을 가리키는 문제를 막고 PDF까지 동일한 조판을 유지하기 위해 다음 두 종류만 사용합니다.
 
-- 앱에 고정해 넣은 Pretendard, MaruBuri, NanumGothicCoding
+- 앱에 고정해 넣은 Goorm Sans Code, Pretendard, MaruBuri, NanumGothicCoding
 - 설정의 `저장소에 글꼴 가져오기`로 복사한 TTF·OTF·WOFF2
 
 가져온 글꼴은 `<저장소>/.research-writer/fonts`에 저장됩니다. 저장소를 동기화하면 다른 컴퓨터에서도 같은 글꼴을 사용합니다. 배포·공유 권한이 있는 폰트만 가져와야 합니다.
@@ -171,4 +171,4 @@ git push origin main v0.7.0
 
 ## 라이선스
 
-코드는 MIT License입니다. 기본 제공 글꼴의 라이선스는 `static/fonts/Pretendard-OFL.txt`, `static/fonts/OFL.txt`와 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록했습니다.
+코드는 MIT License입니다. 기본 제공 글꼴의 라이선스는 `static/fonts/GoormSansCode-OFL.txt`, `static/fonts/Pretendard-OFL.txt`, `static/fonts/OFL.txt`와 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록했습니다.

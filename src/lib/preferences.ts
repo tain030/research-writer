@@ -1,44 +1,83 @@
-import type { FocusMode } from "./types";
+import type { FocusMode, WritingExperience } from "./types";
 
 export type PageFitMode = "page" | "width";
+export type FontFamilyByExperience = Record<WritingExperience, string>;
 
-export const PREFERENCES_SCHEMA_VERSION = 2;
+export const PREFERENCES_SCHEMA_VERSION = 6;
+
+export const defaultFontFamilyByExperience: FontFamilyByExperience = {
+  typewriter: "Goorm Sans Code",
+  literary: "MaruBuri",
+  flow: "Pretendard",
+};
 
 export interface Preferences {
   schemaVersion: number;
-  fontFamily: string;
+  fontFamilyByExperience: FontFamilyByExperience;
+  writingExperience: WritingExperience;
   pageFitMode: PageFitMode;
   focusMode: FocusMode;
-  typewriterMode: boolean;
-  soundEnabled: boolean;
   autoComplete: boolean;
   theme: "system" | "light" | "dark";
-  immersiveChrome: boolean;
+  flowAutoHideChrome: boolean;
   focusSheetMode: boolean;
   companionSplitRatio: number;
 }
 
 export const defaultPreferences: Preferences = {
   schemaVersion: PREFERENCES_SCHEMA_VERSION,
-  fontFamily: "NanumGothicCoding",
+  fontFamilyByExperience: { ...defaultFontFamilyByExperience },
+  writingExperience: "typewriter",
   pageFitMode: "width",
   focusMode: "off",
-  typewriterMode: true,
-  soundEnabled: false,
   autoComplete: false,
   theme: "system",
-  immersiveChrome: false,
+  flowAutoHideChrome: true,
   focusSheetMode: false,
   companionSplitRatio: 0.56,
 };
 
-type StoredPreferences = Omit<Partial<Preferences>, "schemaVersion"> & {
+type StoredPreferences = Omit<
+  Partial<Preferences>,
+  "schemaVersion" | "fontFamilyByExperience" | "writingExperience"
+> & {
   schemaVersion?: unknown;
+  fontFamily?: unknown;
+  fontFamilyByExperience?: unknown;
   manuscriptFitMode?: unknown;
   manuscriptGuidance?: unknown;
   typewriterImperfection?: unknown;
   manuscriptZoom?: unknown;
+  writingExperience?: unknown;
+  typewriterMode?: unknown;
+  caretTracking?: unknown;
+  immersiveChrome?: unknown;
+  soundEnabled?: unknown;
 };
+
+const writingExperienceIds: WritingExperience[] = [
+  "typewriter",
+  "literary",
+  "flow",
+];
+
+function isWritingExperience(value: unknown): value is WritingExperience {
+  return (
+    typeof value === "string" &&
+    writingExperienceIds.includes(value as WritingExperience)
+  );
+}
+
+function defaultPreferencesCopy(): Preferences {
+  return {
+    ...defaultPreferences,
+    fontFamilyByExperience: { ...defaultFontFamilyByExperience },
+  };
+}
+
+function validFontFamily(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
 
 function clampSplitRatio(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
@@ -46,24 +85,115 @@ function clampSplitRatio(value: unknown): number {
     : defaultPreferences.companionSplitRatio;
 }
 
-function migrateFontFamily(
+function migrateLegacyFontFamily(
   fontFamily: string,
   storedSchemaVersion: number,
+  storedWritingExperience: WritingExperience | null,
 ): string {
-  if (storedSchemaVersion >= PREFERENCES_SCHEMA_VERSION) return fontFamily;
-  if (fontFamily === "MaruBuri") return defaultPreferences.fontFamily;
+  // These were application defaults in early schemas, not explicit choices.
+  // An explicit non-typewriter experience is always treated as a user choice.
+  if (storedWritingExperience === "literary" || storedWritingExperience === "flow") {
+    return fontFamily;
+  }
+  if (storedSchemaVersion < 2 && fontFamily === "MaruBuri") {
+    return defaultFontFamilyByExperience.typewriter;
+  }
   if (storedSchemaVersion < 1 && fontFamily === "Pretendard") {
-    return defaultPreferences.fontFamily;
+    return defaultFontFamilyByExperience.typewriter;
   }
   return fontFamily;
 }
 
+function parseStoredFontFamilies(value: unknown): FontFamilyByExperience {
+  const parsed = { ...defaultFontFamilyByExperience };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return parsed;
+  }
+  const candidate = value as Partial<Record<WritingExperience, unknown>>;
+  for (const experience of writingExperienceIds) {
+    const family = validFontFamily(candidate[experience]);
+    if (family) parsed[experience] = family;
+  }
+  return parsed;
+}
+
+function migrateFontFamilies(
+  candidate: StoredPreferences,
+  storedSchemaVersion: number,
+  storedWritingExperience: WritingExperience | null,
+): {
+  fontFamilyByExperience: FontFamilyByExperience;
+  writingExperience: WritingExperience;
+} {
+  if (storedSchemaVersion >= PREFERENCES_SCHEMA_VERSION) {
+    const fontFamilyByExperience = parseStoredFontFamilies(
+      candidate.fontFamilyByExperience,
+    );
+    return {
+      fontFamilyByExperience,
+      writingExperience:
+        storedWritingExperience ??
+        writingExperienceForFont(fontFamilyByExperience.typewriter),
+    };
+  }
+
+  const legacyFontFamily = migrateLegacyFontFamily(
+    validFontFamily(candidate.fontFamily) ??
+      defaultFontFamilyByExperience.typewriter,
+    storedSchemaVersion,
+    storedWritingExperience,
+  );
+  const writingExperience =
+    storedWritingExperience ?? writingExperienceForFont(legacyFontFamily);
+  const fontFamilyByExperience = { ...defaultFontFamilyByExperience };
+
+  // Schema 6 intentionally gives every existing typewriter profile the new
+  // Goorm default once. Non-typewriter choices remain attached to their mode.
+  if (writingExperience !== "typewriter") {
+    fontFamilyByExperience[writingExperience] = legacyFontFamily;
+  }
+
+  return { fontFamilyByExperience, writingExperience };
+}
+
+export function writingExperienceForFont(
+  fontFamily: string,
+  monospaced?: boolean,
+): WritingExperience {
+  if (
+    monospaced === true ||
+    fontFamily === "Goorm Sans Code" ||
+    fontFamily === "NanumGothicCoding"
+  ) {
+    return "typewriter";
+  }
+  if (fontFamily === "Pretendard") return "flow";
+  return "literary";
+}
+
+export function hasStoredWritingExperience(stored: string | null): boolean {
+  if (!stored) return false;
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    return Boolean(
+      parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        isWritingExperience(
+          (parsed as { writingExperience?: unknown }).writingExperience,
+        ),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function parsePreferences(stored: string | null): Preferences {
-  if (!stored) return { ...defaultPreferences };
+  if (!stored) return defaultPreferencesCopy();
   try {
     const parsed: unknown = JSON.parse(stored);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { ...defaultPreferences };
+      return defaultPreferencesCopy();
     }
     const candidate = parsed as StoredPreferences;
     const storedSchemaVersion =
@@ -72,10 +202,16 @@ export function parsePreferences(stored: string | null): Preferences {
       candidate.schemaVersion >= 0
         ? candidate.schemaVersion
         : 0;
-    const storedFontFamily =
-      typeof candidate.fontFamily === "string" && candidate.fontFamily.trim()
-        ? candidate.fontFamily
-        : defaultPreferences.fontFamily;
+    const storedWritingExperience = isWritingExperience(
+      candidate.writingExperience,
+    )
+      ? candidate.writingExperience
+      : null;
+    const migratedFonts = migrateFontFamilies(
+      candidate,
+      storedSchemaVersion,
+      storedWritingExperience,
+    );
     const storedPageFitMode =
       candidate.pageFitMode ?? candidate.manuscriptFitMode;
     return {
@@ -83,24 +219,16 @@ export function parsePreferences(stored: string | null): Preferences {
         PREFERENCES_SCHEMA_VERSION,
         storedSchemaVersion,
       ),
-      fontFamily: migrateFontFamily(storedFontFamily, storedSchemaVersion),
+      ...migratedFonts,
       pageFitMode:
         storedPageFitMode === "page" || storedPageFitMode === "width"
-        ? storedPageFitMode
-        : defaultPreferences.pageFitMode,
+          ? storedPageFitMode
+          : defaultPreferences.pageFitMode,
       focusMode: ["off", "paragraph", "sentence"].includes(
         candidate.focusMode ?? "",
       )
         ? (candidate.focusMode as FocusMode)
         : defaultPreferences.focusMode,
-      typewriterMode:
-        typeof candidate.typewriterMode === "boolean"
-          ? candidate.typewriterMode
-          : defaultPreferences.typewriterMode,
-      soundEnabled:
-        typeof candidate.soundEnabled === "boolean"
-          ? candidate.soundEnabled
-          : defaultPreferences.soundEnabled,
       autoComplete:
         typeof candidate.autoComplete === "boolean"
           ? candidate.autoComplete
@@ -108,10 +236,11 @@ export function parsePreferences(stored: string | null): Preferences {
       theme: ["system", "light", "dark"].includes(candidate.theme ?? "")
         ? (candidate.theme as Preferences["theme"])
         : defaultPreferences.theme,
-      immersiveChrome:
-        typeof candidate.immersiveChrome === "boolean"
-          ? candidate.immersiveChrome
-          : defaultPreferences.immersiveChrome,
+      flowAutoHideChrome:
+        storedSchemaVersion >= 4 &&
+        typeof candidate.flowAutoHideChrome === "boolean"
+          ? candidate.flowAutoHideChrome
+          : defaultPreferences.flowAutoHideChrome,
       focusSheetMode:
         typeof candidate.focusSheetMode === "boolean"
           ? candidate.focusSheetMode
@@ -119,6 +248,6 @@ export function parsePreferences(stored: string | null): Preferences {
       companionSplitRatio: clampSplitRatio(candidate.companionSplitRatio),
     };
   } catch {
-    return { ...defaultPreferences };
+    return defaultPreferencesCopy();
   }
 }

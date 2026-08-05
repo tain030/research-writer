@@ -5,6 +5,10 @@ const stylesheet = readFileSync(
   new URL("../app.css", import.meta.url),
   "utf8",
 );
+const paginatedEditor = readFileSync(
+  new URL("./PaginatedEditor.svelte", import.meta.url),
+  "utf8",
+);
 
 function cssBlock(selector: string): string {
   const selectorStart = stylesheet.indexOf(selector);
@@ -28,6 +32,26 @@ function hexToken(block: string, token: string): string {
   )?.[1];
   if (!value) throw new Error(`Missing hexadecimal CSS token: ${token}`);
   return value;
+}
+
+function customProperty(block: string, token: string): string {
+  const value = block.match(
+    new RegExp(`--${token}:\\s*([\\s\\S]*?);`),
+  )?.[1];
+  if (!value) throw new Error(`Missing CSS custom property: ${token}`);
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function lossyWebpDimensions(bytes: Buffer): [number, number] {
+  expect(bytes.toString("ascii", 0, 4)).toBe("RIFF");
+  expect(bytes.toString("ascii", 8, 12)).toBe("WEBP");
+  expect(bytes.toString("ascii", 12, 16)).toBe("VP8 ");
+  const frameStart = bytes.indexOf(Buffer.from([0x9d, 0x01, 0x2a]), 20);
+  expect(frameStart).toBeGreaterThanOrEqual(0);
+  return [
+    bytes.readUInt16LE(frameStart + 3) & 0x3fff,
+    bytes.readUInt16LE(frameStart + 5) & 0x3fff,
+  ];
 }
 
 function luminance(hex: string): number {
@@ -136,5 +160,205 @@ describe("editorial theme accessibility", () => {
     );
     expect(texture).toContain("feTurbulence");
     expect(new TextEncoder().encode(texture).byteLength).toBeLessThan(4_096);
+  });
+
+  it("uses warm loden embossed leather behind the light walnut typewriter", () => {
+    const light = cssBlock(":root {");
+    const desk = customProperty(light, "typewriter-desk-surface");
+    const bed = customProperty(light, "typewriter-bed-surface");
+    const race = customProperty(light, "typewriter-race-surface");
+    const support = customProperty(light, "typewriter-support-surface");
+
+    expect(desk).toContain('url("/textures/leather-emboss.svg")');
+    expect(desk).toContain("#b0a991");
+    expect(desk).toContain("#9b947b");
+    expect(desk).toContain("#87806a");
+    expect(desk).toContain("rgba(54, 47, 37, 0.1)");
+    expect(customProperty(light, "typewriter-desk-inset-bottom")).toBe(
+      "rgba(47, 42, 33, 0.12)",
+    );
+    expect(desk).not.toContain(".webp");
+    expect(desk).not.toContain("taupe-leather-grain");
+    expect(desk).not.toContain("walnut-desk");
+    expect(bed).toContain('url("/textures/walnut-typewriter-veneer.webp")');
+    expect(bed).toContain("#a27b5a");
+    expect(race).toContain("#e7e8e3");
+    expect(support).toContain("#858a87");
+    expect(customProperty(light, "typewriter-contact-shadow")).toBe(
+      "rgba(22, 11, 8, 0.72)",
+    );
+    expect(customProperty(light, "typewriter-chassis-surface")).toContain(
+      'url("/textures/walnut-typewriter-veneer.webp")',
+    );
+    expect(customProperty(light, "typewriter-chassis-surface")).toContain(
+      "#947052",
+    );
+    expect(
+      customProperty(light, "typewriter-chassis-deck-overlay"),
+    ).toContain("rgba(255, 246, 232, 0.28)");
+    expect(
+      customProperty(light, "typewriter-chassis-front-overlay"),
+    ).toContain("rgba(25, 13, 9, 0.28)");
+    expect(customProperty(light, "typewriter-depth-edge")).toBe(
+      "rgba(64, 37, 26, 0.48)",
+    );
+  });
+
+  it("separates the dark warm-black typewriter from its blue slate leather mat", () => {
+    const light = cssBlock(":root {");
+    const dark = cssBlock(':root[data-theme="dark"] {');
+    const desk = customProperty(dark, "typewriter-desk-surface");
+    const bed = customProperty(dark, "typewriter-bed-surface");
+    const race = customProperty(dark, "typewriter-race-surface");
+    const support = customProperty(dark, "typewriter-support-surface");
+    const chassis = customProperty(dark, "typewriter-chassis-surface");
+    const endcap = customProperty(dark, "typewriter-endcap-surface");
+
+    expect(desk).toContain('url("/textures/leather-emboss.svg")');
+    expect(desk).toContain("#3b4852");
+    expect(desk).toContain("#34414b");
+    expect(desk).toContain("#2d3942");
+    expect(desk).not.toContain(".webp");
+    expect(bed).toContain("#302c28");
+    expect(bed).toContain("#0c0d0e");
+    expect(bed).not.toContain(".webp");
+    expect(race).toContain("#d7d8d3");
+    expect(support).toContain("#707572");
+    expect(customProperty(dark, "typewriter-contact-shadow")).toBe(
+      "rgba(0, 0, 0, 0.86)",
+    );
+    expect(chassis).toContain("#262421");
+    expect(chassis).toContain("#181817");
+    expect(chassis).toContain("#0c0d0e");
+    expect(chassis).not.toContain("leather-emboss.svg");
+    expect(chassis).not.toContain(".webp");
+    expect(endcap).toContain("#2d2925");
+    expect(
+      customProperty(dark, "typewriter-chassis-deck-overlay"),
+    ).toContain("rgba(244, 234, 219, 0.16)");
+    expect(
+      customProperty(dark, "typewriter-chassis-front-overlay"),
+    ).toContain("rgba(0, 0, 0, 0.36)");
+    expect(customProperty(dark, "typewriter-depth-edge")).toBe(
+      "rgba(4, 6, 7, 0.74)",
+    );
+    expect(customProperty(dark, "typewriter-body")).toBe("#181817");
+    expect(customProperty(dark, "typewriter-body-light")).toBe("#2d2925");
+    expect(customProperty(dark, "typewriter-body-cast-shadow")).toBe(
+      "rgba(3, 6, 8, 0.58)",
+    );
+    expect(desk).not.toBe(customProperty(light, "typewriter-desk-surface"));
+  });
+
+  it("ships a small deterministic seamless leather emboss texture", () => {
+    const texture = readFileSync(
+      new URL("../../static/textures/leather-emboss.svg", import.meta.url),
+      "utf8",
+    );
+
+    expect(texture.match(/<feTurbulence/g)).toHaveLength(2);
+    expect(texture).toContain('seed="41"');
+    expect(texture).toContain('seed="73"');
+    expect(texture.match(/stitchTiles="stitch"/g)).toHaveLength(2);
+    expect(texture).toContain("feDiffuseLighting");
+    expect(texture).toContain("feDistantLight");
+    expect(texture).not.toContain("feSpecularLighting");
+    expect(texture).not.toContain("<image");
+    expect(texture).not.toContain("href=");
+    expect(new TextEncoder().encode(texture).byteLength).toBeLessThan(4_096);
+  });
+
+  it.each([
+    ["walnut-typewriter-veneer.webp", [1920, 160], 180_000],
+  ] as const)(
+    "ships optimized local typewriter material %s",
+    (filename, dimensions, maxBytes) => {
+      const texture = readFileSync(
+        new URL(`../../static/textures/${filename}`, import.meta.url),
+      );
+      expect(lossyWebpDimensions(texture)).toEqual(dimensions);
+      expect(texture.byteLength).toBeLessThan(maxBytes);
+    },
+  );
+
+  it("keeps the background abstract and the typewriter veneer photographic", () => {
+    const light = cssBlock(":root {");
+    const desk = customProperty(light, "typewriter-desk-surface");
+    const chassis = customProperty(light, "typewriter-chassis-surface");
+
+    expect(desk).toContain("320px 320px repeat");
+    expect(desk).not.toContain(".webp");
+    expect(desk).not.toContain("cover no-repeat");
+    expect(chassis).toContain("center / 960px 80px no-repeat");
+    expect(desk).not.toContain("repeating-linear-gradient");
+    expect(chassis).not.toContain("repeating-linear-gradient");
+  });
+
+  it("keeps explicit and system dark typewriter surfaces identical", () => {
+    const explicitDark = cssBlock(':root[data-theme="dark"] {');
+    const systemDark = cssBlock(':root[data-theme="system"] {');
+    const tokens = [
+      "typewriter-desk-surface",
+      "typewriter-bed-surface",
+      "typewriter-race-surface",
+      "typewriter-support-surface",
+      "typewriter-contact-shadow",
+      "typewriter-chassis-surface",
+      "typewriter-chassis-deck-overlay",
+      "typewriter-chassis-front-overlay",
+      "typewriter-depth-edge",
+      "typewriter-endcap-surface",
+      "typewriter-body",
+      "typewriter-body-deep",
+      "typewriter-body-light",
+      "typewriter-body-border",
+      "typewriter-desk-inset-top",
+      "typewriter-desk-inset-bottom",
+      "typewriter-body-inset-highlight",
+      "typewriter-body-inset-shadow",
+      "typewriter-body-cast-shadow",
+      "typewriter-endcap-inset-highlight",
+      "typewriter-endcap-inset-shadow",
+      "typewriter-endcap-cast-shadow",
+      "typewriter-endcap-seam",
+    ];
+
+    for (const token of tokens) {
+      expect(customProperty(systemDark, token)).toBe(
+        customProperty(explicitDark, token),
+      );
+    }
+  });
+
+  it("routes every large typewriter surface through theme tokens", () => {
+    for (const token of [
+      "typewriter-desk-surface",
+      "typewriter-race-surface",
+      "typewriter-support-surface",
+      "typewriter-contact-shadow",
+      "typewriter-chassis-surface",
+      "typewriter-chassis-deck-overlay",
+      "typewriter-chassis-front-overlay",
+      "typewriter-depth-edge",
+      "typewriter-endcap-surface",
+      "typewriter-desk-inset-top",
+      "typewriter-desk-inset-bottom",
+      "typewriter-body-inset-highlight",
+      "typewriter-body-inset-shadow",
+      "typewriter-body-cast-shadow",
+      "typewriter-endcap-inset-highlight",
+      "typewriter-endcap-inset-shadow",
+      "typewriter-endcap-cast-shadow",
+    ]) {
+      expect(paginatedEditor).toContain(`var(--${token})`);
+    }
+  });
+
+  it("clips the paper without repainting the desk below the platen", () => {
+    expect(paginatedEditor).not.toContain("typewriter-paper-shield");
+    expect(paginatedEditor).toContain("--typewriter-paper-mask-start");
+    expect(paginatedEditor).toContain("--typewriter-paper-mask-end");
+    expect(paginatedEditor).toContain("-webkit-mask-image: linear-gradient");
+    expect(paginatedEditor).toContain("-webkit-mask-image: none");
   });
 });

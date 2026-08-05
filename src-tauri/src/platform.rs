@@ -10,9 +10,10 @@ use std::sync::{Mutex, mpsc::Sender};
 
 const CREDENTIAL_SERVICE: &str = "com.tain.researchwriter";
 const RESEARCH_TOKEN_ACCOUNT: &str = "research-agent-token";
-const BUNDLED_FONTS: [(&str, bool); 3] = [
-    ("Pretendard", false),
+const BUNDLED_FONTS: [(&str, bool); 4] = [
+    ("Goorm Sans Code", true),
     ("MaruBuri", false),
+    ("Pretendard", false),
     ("NanumGothicCoding", true),
 ];
 
@@ -406,6 +407,10 @@ mod tests {
     #[test]
     fn bundled_fonts_are_first_and_repository_duplicates_are_removed() {
         let families = BTreeMap::from([
+            (
+                "goorm sans code".to_string(),
+                (true, "data:goorm".to_string()),
+            ),
             ("pretendard".to_string(), (false, "data:a".to_string())),
             ("MaruBuri".to_string(), (false, "data:b".to_string())),
             (
@@ -422,13 +427,14 @@ mod tests {
         assert_eq!(
             names,
             [
-                "Pretendard",
+                "Goorm Sans Code",
                 "MaruBuri",
+                "Pretendard",
                 "NanumGothicCoding",
                 "Repository Serif"
             ]
         );
-        assert!(fonts[..3].iter().all(|font| font.bundled));
-        assert!(!fonts[3].bundled);
+        assert!(fonts[..4].iter().all(|font| font.bundled));
+        assert!(!fonts[4].bundled);
     }
 }

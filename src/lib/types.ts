@@ -61,7 +61,33 @@ export interface FontRecord {
   dataUrl?: string | null;
 }
 
-export type WritingStyle = "literary" | "typewriter";
+export type WritingExperience = "typewriter" | "literary" | "flow";
+
+export type WritingInputKind =
+  | "character"
+  | "space"
+  | "backspace"
+  | "delete"
+  | "enter"
+  | "paste"
+  | "other";
+
+export type WritingInputOrigin =
+  | "keyboard"
+  | "paste"
+  | "autocomplete"
+  | "programmatic";
+
+export interface WritingActivity {
+  source: "paper" | "source";
+  kind: WritingInputKind;
+  origin: WritingInputOrigin;
+  insertedText: string;
+  removedText: string;
+  wordDelta: number;
+  sentenceDelta: number;
+  paragraphDelta: number;
+}
 
 export interface SyncthingStatus {
   available: boolean;

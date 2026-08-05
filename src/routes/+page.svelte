@@ -38,8 +38,10 @@
     type MarkdownInlineStyle,
   } from "$lib/markdown-formatting";
   import {
-    defaultPreferences,
+    defaultFontFamilyByExperience,
+    hasStoredWritingExperience,
     parsePreferences,
+    writingExperienceForFont,
     type Preferences,
   } from "$lib/preferences";
   import { SingleFlight } from "$lib/single-flight";
@@ -77,7 +79,8 @@
     StoredVersion,
     SyncthingStatus,
     VersionSummary,
-    WritingStyle,
+    WritingActivity,
+    WritingExperience,
     ZoteroItem,
     ZoteroStatus,
   } from "$lib/types";
@@ -86,7 +89,7 @@
   type ContextMode = "selection" | "section" | "document";
   type GrammarScope = "selection" | "paragraph" | "document";
   type SourceComponent = typeof import("$lib/MarkdownSourceEditor.svelte").default;
-  type ToolbarMenu = "insert" | "view" | "link" | null;
+  type ToolbarMenu = "insert" | "view" | "link" | "experience" | null;
   type RuntimePlatform = "linux" | "windows" | "macos" | "web";
   type DocumentDialog =
     | "metadata"
@@ -159,18 +162,34 @@
   let linkUrl = $state("https://");
   let linkInput = $state<HTMLInputElement>();
   let advancedSettingsOpen = $state(false);
+  let inferWritingExperienceFromFont = false;
   let chromeSuppressed = $state(false);
   let saveState = $state<SaveState>("saved");
   let saveError = $state("");
   let conflict = $state<ConflictState | null>(null);
   let recents = $state<RecentDocument[]>([]);
   const bundledFonts: FontRecord[] = [
+    { family: "Goorm Sans Code", monospaced: true, bundled: true },
     { family: "MaruBuri", monospaced: false, bundled: true },
     { family: "Pretendard", monospaced: false, bundled: true },
     { family: "NanumGothicCoding", monospaced: true, bundled: true },
   ];
   let fonts = $state<FontRecord[]>([...bundledFonts]);
-  let preferences = $state<Preferences>({ ...defaultPreferences });
+  let preferences = $state<Preferences>(parsePreferences(null));
+  let currentFontFamily = $derived(
+    preferences.fontFamilyByExperience[preferences.writingExperience] ??
+      defaultFontFamilyByExperience[preferences.writingExperience],
+  );
+  let flowChromeHidden = $derived(
+    Boolean(currentDocument) &&
+      preferences.writingExperience === "flow" &&
+      preferences.flowAutoHideChrome &&
+      chromeSuppressed,
+  );
+  let sessionWords = $state(0);
+  let sessionSentences = $state(0);
+  let sessionParagraphs = $state(0);
+  let sessionMarks = $state<Array<"sentence" | "paragraph">>([]);
   let systemPrefersDark = $state(false);
   let toast = $state("");
   let toastKind = $state<"info" | "error" | "success">("info");
@@ -259,11 +278,35 @@
   let formattingDisabled = $derived(
     !currentDocument || currentDocument.readOnly,
   );
-  let writingStyle = $derived.by(
-    (): WritingStyle =>
-      fonts.find((font) => font.family === preferences.fontFamily)?.monospaced
-        ? "typewriter"
-        : "literary",
+  const writingExperiences: Array<{
+    id: WritingExperience;
+    label: string;
+    cue: string;
+    description: string;
+  }> = [
+    {
+      id: "typewriter",
+      label: "타자기",
+      cue: "고정 타점",
+      description: "무음 플래튼과 움직이는 캐리지",
+    },
+    {
+      id: "literary",
+      label: "문학 서재",
+      cue: "책 한 쪽",
+      description: "따뜻한 종이와 조판의 여운",
+    },
+    {
+      id: "flow",
+      label: "몰입 캔버스",
+      cue: "연속 집중",
+      description: "페이지 경계 없는 집중 원고",
+    },
+  ];
+  let currentWritingExperience = $derived(
+    writingExperiences.find(
+      (experience) => experience.id === preferences.writingExperience,
+    ) ?? writingExperiences[0],
   );
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -444,8 +487,16 @@
     return saveState === "saved";
   }
 
+  function resetWritingSession(): void {
+    sessionWords = 0;
+    sessionSentences = 0;
+    sessionParagraphs = 0;
+    sessionMarks = [];
+  }
+
   function loadPreferences(): void {
     const stored = localStorage.getItem("research-writer.preferences");
+    inferWritingExperienceFromFont = !hasStoredWritingExperience(stored);
     preferences = parsePreferences(stored);
     const normalized = JSON.stringify(preferences);
     if (stored !== normalized) {
@@ -462,15 +513,115 @@
     document.documentElement.dataset.theme = preferences.theme;
   }
 
+  function rememberFontFamily(
+    experience: WritingExperience,
+    fontFamily: string,
+  ): void {
+    preferences.fontFamilyByExperience = {
+      ...preferences.fontFamilyByExperience,
+      [experience]: fontFamily,
+    };
+  }
+
+  function handleFontFamilyChange(event: Event): void {
+    const select = event.currentTarget;
+    if (!(select instanceof HTMLSelectElement)) return;
+    rememberFontFamily(preferences.writingExperience, select.value);
+    inferWritingExperienceFromFont = false;
+    savePreferences();
+  }
+
+  function normalizeRememberedFontFamilies(records: FontRecord[]): boolean {
+    const availableFamilies = new Set(records.map((font) => font.family));
+    const normalized = { ...preferences.fontFamilyByExperience };
+    let changed = false;
+    for (const experience of writingExperiences) {
+      if (!availableFamilies.has(normalized[experience.id])) {
+        normalized[experience.id] =
+          defaultFontFamilyByExperience[experience.id];
+        changed = true;
+      }
+    }
+    if (changed) preferences.fontFamilyByExperience = normalized;
+    return changed;
+  }
+
+  function inferLegacyWritingExperience(): void {
+    const previousExperience = preferences.writingExperience;
+    const previousFontFamily = currentFontFamily;
+    const selected = fonts.find(
+      (font) => font.family === previousFontFamily,
+    );
+    const inferredExperience = writingExperienceForFont(
+      previousFontFamily,
+      selected?.monospaced,
+    );
+
+    if (inferredExperience !== previousExperience) {
+      const migrated = {
+        ...preferences.fontFamilyByExperience,
+        [previousExperience]:
+          defaultFontFamilyByExperience[previousExperience],
+      };
+      if (inferredExperience !== "typewriter") {
+        migrated[inferredExperience] = previousFontFamily;
+      }
+      preferences.fontFamilyByExperience = migrated;
+      preferences.writingExperience = inferredExperience;
+    }
+    inferWritingExperienceFromFont = false;
+  }
+
   function toggleTheme(): void {
     preferences.theme = darkThemeActive ? "light" : "dark";
     savePreferences();
   }
 
-  function toggleWritingStyle(): void {
-    preferences.fontFamily =
-      writingStyle === "typewriter" ? "MaruBuri" : "NanumGothicCoding";
+  async function setWritingExperience(
+    experience: WritingExperience,
+  ): Promise<void> {
+    if (!currentDocument || experience === preferences.writingExperience) {
+      closeToolbarMenu(false);
+      return;
+    }
+    const activeBefore = activeEditor;
+    const selectedBefore = editorApi?.getSelection() ?? selection;
+    preferences.writingExperience = experience;
+    if (experience !== "flow") resetChromeSuppression();
+    inferWritingExperienceFromFont = false;
     savePreferences();
+    closeToolbarMenu(false);
+    await tick();
+    await paperApi?.awaitLayout?.();
+    await tick();
+    const target = activeBefore === "source" ? sourceApi : paperApi;
+    target?.setSelection(selectedBefore.from, selectedBefore.to);
+  }
+
+  function handleExperiencePickerKeydown(event: KeyboardEvent): void {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    const current = writingExperiences.findIndex(
+      (experience) => experience.id === preferences.writingExperience,
+    );
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? writingExperiences.length - 1
+          : event.key === "ArrowRight"
+            ? (current + 1) % writingExperiences.length
+            : (current - 1 + writingExperiences.length) %
+              writingExperiences.length;
+    void setWritingExperience(writingExperiences[next].id).then(() => {
+      document
+        .querySelector<HTMLButtonElement>(
+          `.experience-segment[data-experience="${writingExperiences[next].id}"]`,
+        )
+        ?.focus();
+    });
   }
 
   function watchSystemTheme(): void {
@@ -510,10 +661,12 @@
     );
     fonts = loaded;
     await installRepositoryFonts(loaded);
-    if (!fonts.some((font) => font.family === preferences.fontFamily)) {
-      preferences.fontFamily = defaultPreferences.fontFamily;
-      savePreferences();
+    let preferencesChanged = normalizeRememberedFontFamilies(fonts);
+    if (inferWritingExperienceFromFont) {
+      inferLegacyWritingExperience();
+      preferencesChanged = true;
     }
+    if (preferencesChanged) savePreferences();
   }
 
   async function importRepositoryFont(): Promise<void> {
@@ -542,7 +695,7 @@
           !previousFamilies.has(font.family),
       );
       if (imported) {
-        preferences.fontFamily = imported.family;
+        rememberFontFamily(preferences.writingExperience, imported.family);
       }
       savePreferences();
       notify("폰트를 저장소에 복사해 적용했습니다.", "success");
@@ -1213,6 +1366,7 @@
     grammarSuggestion = null;
     sync = null;
     selection = { from: 0, to: 0, text: "", line: 1 };
+    resetWritingSession();
   }
 
   async function openRepositoryPath(path: string): Promise<boolean> {
@@ -1287,10 +1441,7 @@
       repository = closed;
       repositoryDocuments = [];
       fonts = [...bundledFonts];
-      if (!fonts.some((font) => font.family === preferences.fontFamily)) {
-        preferences.fontFamily = defaultPreferences.fontFamily;
-        savePreferences();
-      }
+      if (normalizeRememberedFontFamilies(fonts)) savePreferences();
       workspaceRoot = "";
       searchResults = [];
       searchIndexed = false;
@@ -1324,6 +1475,7 @@
     documentDialog = null;
     grammarSuggestion = null;
     selection = { from: 0, to: 0, text: "", line: 1 };
+    resetWritingSession();
     searchIndexed = false;
     lastSnapshotAt = Date.now();
     if (desktop) {
@@ -2179,7 +2331,13 @@
   }
 
   function noteWritingActivity(): void {
-    if (!preferences.immersiveChrome || !currentDocument) return;
+    if (
+      !preferences.flowAutoHideChrome ||
+      preferences.writingExperience !== "flow" ||
+      !currentDocument
+    ) {
+      return;
+    }
     if (chromePauseTimer) clearTimeout(chromePauseTimer);
     chromePauseTimer = setTimeout(() => {
       chromePauseTimer = null;
@@ -2193,7 +2351,7 @@
       chromeStreakTimer = setTimeout(() => {
         chromeSuppressed = true;
         chromeStreakTimer = null;
-      }, 1800);
+      }, 1200);
     }
   }
 
@@ -2213,12 +2371,29 @@
     resetChromeSuppression();
   }
 
-  function saveImmersiveChromePreference(): void {
-    if (!preferences.immersiveChrome) resetChromeSuppression();
+  function saveFlowChromePreference(): void {
+    if (!preferences.flowAutoHideChrome) resetChromeSuppression();
     savePreferences();
   }
 
-  function handleEditorActivity(): void {
+  function handleEditorActivity(activity: WritingActivity): void {
+    if (activity.origin !== "keyboard") return;
+    sessionWords += activity.wordDelta;
+    sessionSentences += activity.sentenceDelta;
+    sessionParagraphs += activity.paragraphDelta;
+    const completed: Array<"sentence" | "paragraph"> = [
+      ...Array.from(
+        { length: activity.sentenceDelta },
+        () => "sentence" as const,
+      ),
+      ...Array.from(
+        { length: activity.paragraphDelta },
+        () => "paragraph" as const,
+      ),
+    ];
+    if (completed.length) {
+      sessionMarks = [...sessionMarks, ...completed].slice(-12);
+    }
     scheduleCompletion();
     noteWritingActivity();
   }
@@ -2518,6 +2693,11 @@
         return;
       }
       if (event.key === "Escape") {
+        if (flowChromeHidden) {
+          event.preventDefault();
+          resetChromeSuppression();
+          return;
+        }
         if (toolbarMenu) {
           closeToolbarMenu(true);
           return;
@@ -2725,13 +2905,13 @@
   class:panel-right={rightPanel !== null}
   class:platform-macos={runtimePlatform === "macos"}
   class:split-dragging={splitDragging}
+  class:flow-chrome-hidden={flowChromeHidden}
   class="app-shell"
   onmousemove={revealChrome}
 >
   <header
     class:chrome-hidden={Boolean(currentDocument) &&
-      ((chromeSuppressed && preferences.immersiveChrome) ||
-        preferences.focusSheetMode)}
+      (flowChromeHidden || preferences.focusSheetMode)}
     class="topbar"
   >
     <button
@@ -2793,32 +2973,95 @@
       >
         <span class="sr-only">글꼴</span>
         <select
-          bind:value={preferences.fontFamily}
+          value={currentFontFamily}
           disabled={!currentDocument}
-          onchange={savePreferences}
+          onchange={handleFontFamilyChange}
         >
           {#each fonts as font}
             <option value={font.family}>{font.family}</option>
           {/each}
         </select>
       </label>
-      <button
-        class:active={writingStyle === "typewriter"}
-        class="toolbar-icon-button writing-style-toggle"
-        title={writingStyle === "typewriter"
-          ? "현재 타자기형 · 문학형으로 전환"
-          : "현재 문학형 · 타자기형으로 전환"}
-        aria-label={writingStyle === "typewriter"
-          ? "문학형 집필 스타일로 전환"
-          : "타자기형 집필 스타일로 전환"}
-        aria-pressed={writingStyle === "typewriter"}
-        disabled={!currentDocument}
-        onclick={toggleWritingStyle}
-      >
-        <svg aria-hidden="true" viewBox="0 0 24 24">
-          <path d="M7 3h10v6H7zM3 9h18M5 12h14l2 8H3l2-8ZM7 15h.01M10.3 15h.01M13.7 15h.01M17 15h.01M6 18h12"></path>
-        </svg>
-      </button>
+      <div class="experience-picker">
+        <div
+          class="experience-segmented"
+          role="radiogroup"
+          tabindex="-1"
+          aria-label="쓰기 감각"
+          onkeydown={handleExperiencePickerKeydown}
+        >
+          {#each writingExperiences as experience}
+            <button
+              class:active={preferences.writingExperience === experience.id}
+              class="experience-segment"
+              data-experience={experience.id}
+              role="radio"
+              aria-checked={preferences.writingExperience === experience.id}
+              title={experience.description}
+              disabled={!currentDocument}
+              onclick={() => void setWritingExperience(experience.id)}
+            >
+              <span class="experience-glyph" data-kind={experience.id} aria-hidden="true">
+                {#if experience.id === "typewriter"}
+                  <svg viewBox="0 0 24 24"><path d="M7 3h10v6H7zM3 9h18M5 12h14l2 8H3l2-8M7 15h.01M10.3 15h.01M13.7 15h.01M17 15h.01M6 18h12"></path></svg>
+                {:else if experience.id === "literary"}
+                  <svg viewBox="0 0 24 24"><path d="M4 5.5c3-1 5.6-.6 8 1.2v12c-2.4-1.8-5-2.2-8-1.2zM20 5.5c-3-1-5.6-.6-8 1.2v12c2.4-1.8 5-2.2 8-1.2z"></path></svg>
+                {:else}
+                  <svg viewBox="0 0 24 24"><path d="M5 7h14M7 12h10M9 17h6"></path><circle cx="12" cy="12" r="9"></circle></svg>
+                {/if}
+              </span>
+              <span class="experience-segment-copy"><strong>{experience.label}</strong><small>{experience.cue}</small></span>
+            </button>
+          {/each}
+        </div>
+
+        <div class="toolbar-menu-host experience-compact">
+          <button
+            class:active={toolbarMenu === "experience"}
+            class="toolbar-text-button toolbar-menu-button experience-current"
+            aria-label={`쓰기 감각: ${currentWritingExperience.label}`}
+            title={currentWritingExperience.description}
+            aria-haspopup="menu"
+            aria-expanded={toolbarMenu === "experience"}
+            disabled={!currentDocument}
+            onclick={(event) =>
+              void toggleToolbarMenu("experience", event.currentTarget)}
+          >
+            {#if currentWritingExperience.id === "typewriter"}
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3h10v6H7zM3 9h18M5 12h14l2 8H3l2-8M7 15h.01M10.3 15h.01M13.7 15h.01M17 15h.01M6 18h12"></path></svg>
+            {:else if currentWritingExperience.id === "literary"}
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5.5c3-1 5.6-.6 8 1.2v12c-2.4-1.8-5-2.2-8-1.2zM20 5.5c-3-1-5.6-.6-8 1.2v12c2.4-1.8 5-2.2 8-1.2z"></path></svg>
+            {:else}
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 7h14M7 12h10M9 17h6"></path><circle cx="12" cy="12" r="9"></circle></svg>
+            {/if}
+            <span class="experience-current-label">{currentWritingExperience.label}</span>
+            <svg class="toolbar-chevron" aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
+          </button>
+          {#if toolbarMenu === "experience"}
+            <div
+              class="toolbar-popover toolbar-menu experience-menu"
+              role="menu"
+              tabindex="-1"
+              data-menu="experience"
+              onkeydown={handleToolbarMenuKeydown}
+            >
+              {#each writingExperiences as experience}
+                <button
+                  class:active={preferences.writingExperience === experience.id}
+                  role="menuitemradio"
+                  aria-checked={preferences.writingExperience === experience.id}
+                  onclick={() => void setWritingExperience(experience.id)}
+                >
+                  <span class="experience-menu-copy">
+                    <strong>{experience.label}</strong>
+                    <small>{experience.description}</small>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
       <span class="toolbar-divider"></span>
       <button
         class="format-button"
@@ -2910,18 +3153,25 @@
             data-menu="view"
             onkeydown={handleToolbarMenuKeydown}
           >
-            <button
-              class:active={preferences.pageFitMode === "page"}
-              role="menuitemradio"
-              aria-checked={preferences.pageFitMode === "page"}
-              onclick={() => { closeToolbarMenu(false); setPageFitMode("page"); }}
-            >페이지에 맞추기</button>
-            <button
-              class:active={preferences.pageFitMode === "width"}
-              role="menuitemradio"
-              aria-checked={preferences.pageFitMode === "width"}
-              onclick={() => { closeToolbarMenu(false); setPageFitMode("width"); }}
-            >페이지 너비에 맞추기</button>
+            {#if preferences.writingExperience === "literary"}
+              <button
+                class:active={preferences.pageFitMode === "page"}
+                role="menuitemradio"
+                aria-checked={preferences.pageFitMode === "page"}
+                onclick={() => { closeToolbarMenu(false); setPageFitMode("page"); }}
+              >페이지에 맞추기</button>
+              <button
+                class:active={preferences.pageFitMode === "width"}
+                role="menuitemradio"
+                aria-checked={preferences.pageFitMode === "width"}
+                onclick={() => { closeToolbarMenu(false); setPageFitMode("width"); }}
+              >페이지 너비에 맞추기</button>
+            {:else}
+              <div class="view-mode-note">
+                <strong>{preferences.writingExperience === "typewriter" ? "고정 타점 보기" : "연속 캔버스"}</strong>
+                <small>{preferences.writingExperience === "typewriter" ? "종이가 타점 아래에서 이동합니다." : "페이지 경계 없이 문단에 집중합니다."}</small>
+              </div>
+            {/if}
           </div>
         {/if}
       </div>
@@ -3242,12 +3492,14 @@
             readOnly={currentDocument.readOnly}
             fallbackTitle={documentFallbackTitle}
             documentPath={currentDocument.path}
-            fontFamily={preferences.fontFamily}
-            {writingStyle}
+            fontFamily={currentFontFamily}
+            experience={preferences.writingExperience}
             fitMode={preferences.pageFitMode}
             focusMode={preferences.focusMode}
-            typewriterMode={preferences.typewriterMode}
-            soundEnabled={preferences.soundEnabled}
+            {sessionWords}
+            {sessionSentences}
+            {sessionParagraphs}
+            {sessionMarks}
             resolveImage={resolveManuscriptImage}
             onready={handlePaperReady}
             onchange={onEditorChange}
@@ -3269,7 +3521,7 @@
               <SourceEditor
                 value={editorValue}
                 readOnly={currentDocument.readOnly}
-                fontFamily={preferences.fontFamily}
+                fontFamily={currentFontFamily}
                 onready={handleSourceReady}
                 onchange={onEditorChange}
                 onselection={(value) => handleEditorSelection("source", value)}
@@ -3779,7 +4031,7 @@
               onclick={() => (advancedSettingsOpen = !advancedSettingsOpen)}
             >
               <span>고급 설정</span>
-              <small>{advancedSettingsOpen ? "접기" : "타자기·연구 연결"}</small>
+              <small>{advancedSettingsOpen ? "접기" : "쓰기 감각·연구 연결"}</small>
             </button>
           </section>
 
@@ -3787,20 +4039,12 @@
             <section class="panel-section advanced-settings">
               <p class="eyebrow">쓰기 감각</p>
               <label class="switch-row">
-                <div><strong>타자기 스크롤</strong><small>커서를 화면 가운데에 유지</small></div>
-                <input type="checkbox" bind:checked={preferences.typewriterMode} onchange={savePreferences} />
-              </label>
-              <label class="switch-row">
                 <div><strong>집중 집필</strong><small>현재 장만 남기고 패널과 헤더를 조용히 감춤</small></div>
                 <input type="checkbox" checked={preferences.focusSheetMode} onchange={toggleSingleSheetMode} />
               </label>
               <label class="switch-row">
-                <div><strong>절제된 타건음</strong><small>기본값은 꺼짐</small></div>
-                <input type="checkbox" bind:checked={preferences.soundEnabled} onchange={savePreferences} />
-              </label>
-              <label class="switch-row">
-                <div><strong>몰입 중 도구막대 숨기기</strong><small>계속 타이핑하면 옅어지고, 마우스를 움직이거나 멈추면 다시 보임</small></div>
-                <input type="checkbox" bind:checked={preferences.immersiveChrome} onchange={saveImmersiveChromePreference} />
+                <div><strong>몰입 캔버스 자동 정리</strong><small>계속 타이핑하면 도구와 패널만 물러나고 원고 위치는 유지</small></div>
+                <input type="checkbox" bind:checked={preferences.flowAutoHideChrome} onchange={saveFlowChromePreference} />
               </label>
             </section>
 
@@ -4422,6 +4666,17 @@
     transition: opacity 120ms ease;
   }
 
+  .panel,
+  .statusbar {
+    transition: opacity 520ms ease;
+  }
+
+  .flow-chrome-hidden .panel,
+  .flow-chrome-hidden .statusbar {
+    opacity: 0.035;
+    pointer-events: none;
+  }
+
   .panel-toggle,
   .format-button,
   .toolbar-icon-button,
@@ -4615,6 +4870,154 @@
 
   .formatting-toolbar {
     justify-content: center;
+  }
+
+  .experience-picker {
+    display: flex;
+    min-width: 0;
+  }
+
+  .experience-segmented {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--rule) 76%, transparent);
+    border-radius: 11px;
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--surface-raised) 64%, transparent), transparent),
+      color-mix(in srgb, var(--chrome) 78%, transparent);
+    padding: 2px;
+    box-shadow: inset 0 1px color-mix(in srgb, white 24%, transparent);
+  }
+
+  .experience-segment {
+    display: flex;
+    height: 30px;
+    align-items: center;
+    gap: 6px;
+    border-radius: 8px;
+    padding: 0 9px 0 7px;
+    color: var(--ink-muted);
+    white-space: nowrap;
+  }
+
+  .experience-glyph {
+    display: grid;
+    width: 20px;
+    height: 20px;
+    place-items: center;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--ink-strong) 5%, transparent);
+  }
+
+  .experience-glyph svg {
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.45;
+  }
+
+  .experience-segment-copy {
+    display: grid;
+    gap: 0;
+    text-align: left;
+  }
+
+  .experience-segment-copy strong {
+    font-size: 10px;
+    font-weight: 720;
+    line-height: 1.05;
+  }
+
+  .experience-segment-copy small {
+    color: var(--ink-faint);
+    font-size: 8px;
+    font-weight: 580;
+    line-height: 1.15;
+  }
+
+  .experience-segment:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--ink-strong) 5%, transparent);
+    color: var(--ink-strong);
+  }
+
+  .experience-segment.active {
+    background: var(--surface-raised);
+    box-shadow: 0 1px 5px color-mix(in srgb, var(--ink-strong) 14%, transparent);
+    color: var(--accent);
+  }
+
+  .experience-segment[data-experience="typewriter"].active .experience-glyph {
+    background: #30322f;
+    color: #e1c994;
+  }
+
+  .experience-segment[data-experience="literary"].active .experience-glyph {
+    background: color-mix(in srgb, #9a6847 14%, var(--surface-raised));
+    color: #95603e;
+  }
+
+  .experience-segment[data-experience="flow"].active .experience-glyph {
+    background: color-mix(in srgb, var(--link) 13%, var(--surface-raised));
+    color: var(--link);
+  }
+
+  .toolbar-menu-host.experience-compact {
+    display: none;
+  }
+
+  .experience-current {
+    gap: 6px;
+  }
+
+  .experience-current > svg:first-child {
+    width: 16px;
+    height: 16px;
+  }
+
+  .experience-menu {
+    width: 220px;
+  }
+
+  .experience-menu button {
+    display: flex;
+    height: auto;
+    align-items: center;
+    padding: 8px 10px;
+  }
+
+  .experience-menu-copy { display: grid; gap: 2px; }
+
+  .experience-menu button strong {
+    color: inherit;
+    font-size: var(--type-control);
+  }
+
+  .experience-menu button small {
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+  }
+
+  .view-mode-note {
+    display: grid;
+    gap: 3px;
+    max-width: 220px;
+    padding: 9px 11px;
+  }
+
+  .view-mode-note strong {
+    color: var(--ink-strong);
+    font-size: var(--type-control);
+  }
+
+  .view-mode-note small {
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+    line-height: 1.45;
   }
 
   .document-toolbar {
@@ -6613,6 +7016,14 @@
 
     .font-select select {
       width: 108px;
+    }
+
+    .experience-segmented {
+      display: none;
+    }
+
+    .toolbar-menu-host.experience-compact {
+      display: flex;
     }
   }
 

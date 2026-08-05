@@ -2,7 +2,7 @@
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EditorApi } from "./types";
+import type { EditorApi, WritingActivity } from "./types";
 import MarkdownSourceEditor from "./MarkdownSourceEditor.svelte";
 
 beforeEach(() => {
@@ -36,6 +36,7 @@ describe("Markdown source editor", () => {
   it("exposes the shared editing and source-scroll API", async () => {
     let api: EditorApi | null = null;
     const changes: string[] = [];
+    const activities: WritingActivity[] = [];
     const target = document.createElement("div");
     target.style.height = "600px";
     document.body.append(target);
@@ -45,6 +46,7 @@ describe("Markdown source editor", () => {
         value: "# 제목\n\n본문",
         onready: (value) => (api = value),
         onchange: (value) => changes.push(value),
+        onactivity: (activity) => activities.push(activity),
       },
     });
     await tick();
@@ -70,6 +72,11 @@ describe("Markdown source editor", () => {
     await tick();
     expect(api!.getContent()).toBe("# 제목\n\n새 본문 이어쓰기");
     expect(target.querySelector(".cm-ghost-text")).toBeNull();
+    expect(activities.at(-1)).toMatchObject({
+      source: "source",
+      origin: "autocomplete",
+      wordDelta: 0,
+    });
     unmount(component);
   });
 });

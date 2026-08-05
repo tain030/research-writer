@@ -85,7 +85,7 @@ describe("writing workspace toolbar", () => {
     const documentTools = topbar.querySelector(".document-toolbar")!;
     expect(formatting.querySelector(".style-select")).not.toBeNull();
     expect(formatting.querySelector(".font-select")).not.toBeNull();
-    expect(formatting.querySelector(".writing-style-toggle")).not.toBeNull();
+    expect(formatting.querySelector(".experience-picker")).not.toBeNull();
     expect(documentTools.querySelector('[aria-label="삽입 메뉴"]')).not.toBeNull();
     expect(documentTools.querySelector('[aria-label="보기 메뉴"]')).not.toBeNull();
     expect(
@@ -114,11 +114,12 @@ describe("writing workspace toolbar", () => {
     )!;
     view.click();
     await tick();
-    const viewItems = Array.from(
-      target.querySelectorAll<HTMLButtonElement>('[data-menu="view"] button'),
-      (button) => button.textContent?.trim(),
+    expect(target.querySelector('[data-menu="view"]')?.textContent).toContain(
+      "고정 타점 보기",
     );
-    expect(viewItems).toEqual(["페이지에 맞추기", "페이지 너비에 맞추기"]);
+    expect(
+      target.querySelectorAll<HTMLButtonElement>('[data-menu="view"] button'),
+    ).toHaveLength(0);
 
     target
       .querySelector<HTMLButtonElement>(
@@ -137,7 +138,7 @@ describe("writing workspace toolbar", () => {
     unmount(component);
   });
 
-  it("switches between paired typewriter and literary writing styles", async () => {
+  it("switches among the three persisted writing experiences", async () => {
     const target = document.createElement("div");
     document.body.append(target);
     const component = mount(Page, { target });
@@ -145,39 +146,115 @@ describe("writing workspace toolbar", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await tick();
 
-    const toggle = target.querySelector<HTMLButtonElement>(
-      ".formatting-toolbar .writing-style-toggle",
+    const typewriter = target.querySelector<HTMLButtonElement>(
+      '.experience-segment[data-experience="typewriter"]',
+    )!;
+    const literary = target.querySelector<HTMLButtonElement>(
+      '.experience-segment[data-experience="literary"]',
+    )!;
+    const flow = target.querySelector<HTMLButtonElement>(
+      '.experience-segment[data-experience="flow"]',
     )!;
     const font = target.querySelector<HTMLSelectElement>(
       ".formatting-toolbar .font-select select",
     )!;
     const paper = target.querySelector<HTMLElement>(".paper-editor-shell")!;
 
-    expect(font.value).toBe("NanumGothicCoding");
-    expect(toggle.getAttribute("aria-pressed")).toBe("true");
-    expect(toggle.getAttribute("aria-label")).toBe(
-      "문학형 집필 스타일로 전환",
-    );
+    expect(font.value).toBe("Goorm Sans Code");
+    expect(typewriter.getAttribute("aria-checked")).toBe("true");
     expect(paper.classList.contains("writing-typewriter")).toBe(true);
 
-    toggle.click();
-    await tick();
-    expect(font.value).toBe("MaruBuri");
-    expect(toggle.getAttribute("aria-pressed")).toBe("false");
-    expect(toggle.getAttribute("aria-label")).toBe(
-      "타자기형 집필 스타일로 전환",
-    );
+    literary.click();
+    await vi.waitFor(() => expect(font.value).toBe("MaruBuri"));
+    expect(literary.getAttribute("aria-checked")).toBe("true");
     expect(paper.classList.contains("writing-literary")).toBe(true);
     expect(
       JSON.parse(localStorage.getItem("research-writer.preferences")!)
-        .fontFamily,
-    ).toBe("MaruBuri");
+        .writingExperience,
+    ).toBe("literary");
 
-    font.value = "NanumGothicCoding";
-    font.dispatchEvent(new Event("change", { bubbles: true }));
-    await tick();
-    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    flow.click();
+    await vi.waitFor(() => expect(font.value).toBe("Pretendard"));
+    expect(flow.getAttribute("aria-checked")).toBe("true");
+    expect(paper.classList.contains("writing-flow")).toBe(true);
+
+    typewriter.click();
+    await vi.waitFor(() => expect(font.value).toBe("Goorm Sans Code"));
+    expect(typewriter.getAttribute("aria-checked")).toBe("true");
     expect(paper.classList.contains("writing-typewriter")).toBe(true);
+    unmount(component);
+  });
+
+  it("remembers a separate font for every writing experience", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    let component = mount(Page, { target });
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+
+    const experience = (id: string) =>
+      target.querySelector<HTMLButtonElement>(
+        `.experience-segment[data-experience="${id}"]`,
+      )!;
+    const selectedFont = () =>
+      target.querySelector<HTMLSelectElement>(
+        ".formatting-toolbar .font-select select",
+      )!;
+    const chooseFont = async (family: string) => {
+      const select = selectedFont();
+      select.value = family;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await tick();
+    };
+
+    await chooseFont("NanumGothicCoding");
+    experience("literary").click();
+    await vi.waitFor(() => expect(selectedFont().value).toBe("MaruBuri"));
+    await chooseFont("Pretendard");
+    experience("flow").click();
+    await vi.waitFor(() => expect(selectedFont().value).toBe("Pretendard"));
+    await chooseFont("MaruBuri");
+
+    experience("typewriter").click();
+    await vi.waitFor(() =>
+      expect(selectedFont().value).toBe("NanumGothicCoding"),
+    );
+    experience("typewriter").click();
+    await tick();
+    expect(selectedFont().value).toBe("NanumGothicCoding");
+
+    experience("literary").click();
+    await vi.waitFor(() => expect(selectedFont().value).toBe("Pretendard"));
+    experience("flow").click();
+    await vi.waitFor(() => expect(selectedFont().value).toBe("MaruBuri"));
+
+    expect(
+      JSON.parse(localStorage.getItem("research-writer.preferences")!),
+    ).toMatchObject({
+      schemaVersion: 6,
+      writingExperience: "flow",
+      fontFamilyByExperience: {
+        typewriter: "NanumGothicCoding",
+        literary: "Pretendard",
+        flow: "MaruBuri",
+      },
+    });
+
+    unmount(component);
+    target.replaceChildren();
+    component = mount(Page, { target });
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+
+    expect(selectedFont().value).toBe("MaruBuri");
+    experience("typewriter").click();
+    await vi.waitFor(() =>
+      expect(selectedFont().value).toBe("NanumGothicCoding"),
+    );
+    experience("literary").click();
+    await vi.waitFor(() => expect(selectedFont().value).toBe("Pretendard"));
     unmount(component);
   });
 
@@ -217,6 +294,16 @@ describe("writing workspace toolbar", () => {
     settings.click();
     await tick();
     expect(target.querySelector('#right-panel option[value="system"]')).toBeNull();
+    target
+      .querySelector<HTMLButtonElement>(".settings-advanced-toggle")!
+      .click();
+    await tick();
+    expect(target.querySelector("#right-panel")?.textContent).toContain(
+      "몰입 캔버스 자동 정리",
+    );
+    expect(target.querySelector("#right-panel")?.textContent).not.toContain(
+      "타건음",
+    );
     unmount(component);
   });
 

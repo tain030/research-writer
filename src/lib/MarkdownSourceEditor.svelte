@@ -30,11 +30,18 @@
     WidgetType,
     type DecorationSet,
   } from "@codemirror/view";
+  import {
+    writingActivity,
+    writingInputFromBeforeInput,
+    writingInputFromKeydown,
+    type PendingWritingInput,
+  } from "./writing-activity";
   import type {
     EditorApi,
     EditorChangeContext,
     EditorSelection,
     ScrollAnchor,
+    WritingActivity,
   } from "./types";
 
   interface Props {
@@ -44,7 +51,7 @@
     onready?: (api: EditorApi | null) => void;
     onchange?: (value: string, context: EditorChangeContext) => void;
     onselection?: (selection: EditorSelection) => void;
-    onactivity?: () => void;
+    onactivity?: (activity: WritingActivity) => void;
     onscrollanchor?: (anchor: ScrollAnchor) => void;
     onfocuschange?: (focused: boolean) => void;
   }
@@ -52,7 +59,7 @@
   let {
     value,
     readOnly = false,
-    fontFamily = "NanumGothicCoding",
+    fontFamily = "Goorm Sans Code",
     onready,
     onchange,
     onselection,
@@ -67,7 +74,8 @@
   let lastValue = "";
   let lastSelectionSignature = "";
   let scrollFrame: number | null = null;
-  let compositionNeedsCommit = false;
+  let compositionBefore: string | null = null;
+  let pendingInput: PendingWritingInput | null = null;
   const externalUpdate = Annotation.define<boolean>();
   const setSourceGhost = StateEffect.define<{ pos: number; text: string }>();
   const clearSourceGhost = StateEffect.define<null>();
@@ -183,6 +191,7 @@
 
   function replaceRange(from: number, to: number, text: string): void {
     if (!view || readOnly) return;
+    pendingInput = { kind: "other", origin: "programmatic" };
     const safeFrom = Math.max(0, Math.min(from, view.state.doc.length));
     const safeTo = Math.max(safeFrom, Math.min(to, view.state.doc.length));
     view.dispatch({
@@ -236,6 +245,7 @@
   function acceptGhostText(target: EditorView): boolean {
     const ghost = target.state.field(sourceGhostField);
     if (!ghost.text || ghost.pos === null) return false;
+    pendingInput = { kind: "other", origin: "autocomplete" };
     target.dispatch({
       changes: { from: ghost.pos, insert: ghost.text },
       selection: { anchor: ghost.pos + ghost.text.length },
@@ -377,18 +387,54 @@
             return false;
           },
           blur: () => {
+            pendingInput = null;
             onfocuschange?.(false);
+            return false;
+          },
+          compositionstart: () => {
+            compositionBefore = view?.state.doc.toString() ?? lastValue;
             return false;
           },
           compositionend: () => {
             queueMicrotask(() => {
-              if (!view || !compositionNeedsCommit) return;
-              compositionNeedsCommit = false;
+              if (!view || compositionBefore === null) return;
+              const before = compositionBefore;
+              compositionBefore = null;
               const next = view.state.doc.toString();
               lastValue = next;
               onchange?.(next, { composing: false });
-              onactivity?.();
+              onactivity?.(
+                writingActivity(
+                  before,
+                  next,
+                  "source",
+                  pendingInput ?? { kind: "character", origin: "keyboard" },
+                ),
+              );
+              pendingInput = null;
             });
+            return false;
+          },
+          beforeinput: (event) => {
+            pendingInput = writingInputFromBeforeInput(event as InputEvent);
+            if (pendingInput?.kind === "enter" && view) {
+              const head = view.state.selection.main.head;
+              pendingInput.paragraphHadContent = Boolean(
+                view.state.doc.lineAt(head).text.trim(),
+              );
+            }
+            return false;
+          },
+          keydown: (event) => {
+            const keyboardInput = writingInputFromKeydown(event);
+            if (!keyboardInput) return false;
+            pendingInput = keyboardInput;
+            if (keyboardInput.kind === "enter" && view) {
+              const head = view.state.selection.main.head;
+              pendingInput.paragraphHadContent = Boolean(
+                view.state.doc.lineAt(head).text.trim(),
+              );
+            }
             return false;
           },
           scroll: () => {
@@ -408,10 +454,16 @@
           if (isExternal) return;
           const composing = update.view.composing;
           onchange?.(next, { composing });
-          if (composing) compositionNeedsCommit = true;
-          else {
-            compositionNeedsCommit = false;
-            onactivity?.();
+          if (!composing && compositionBefore === null) {
+            onactivity?.(
+              writingActivity(
+                update.startState.doc.toString(),
+                next,
+                "source",
+                pendingInput,
+              ),
+            );
+            pendingInput = null;
           }
         }),
       ],
@@ -456,7 +508,7 @@
 
 <div
   class="source-shell"
-  style={`--source-font: "${fontFamily.replaceAll('"', '\\"')}", NanumGothicCoding, monospace`}
+  style={`--source-font: "${fontFamily.replaceAll('"', '\\"')}", "Goorm Sans Code", NanumGothicCoding, monospace`}
 >
   <header class="source-heading">
     <div>

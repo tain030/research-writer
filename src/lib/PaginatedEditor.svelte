@@ -9,6 +9,7 @@
   import TaskItem from "@tiptap/extension-task-item";
   import Placeholder from "@tiptap/extension-placeholder";
   import { TextSelection } from "@tiptap/pm/state";
+  import type { EditorView } from "@tiptap/pm/view";
   import { Marked, marked as sharedMarked } from "marked";
   import {
     PaperPagination,
@@ -24,16 +25,58 @@
     editorGhostText,
     setEditorGhostText,
   } from "./ghost-text";
+  import { HeadingInputGuard } from "./heading-input-guard";
+  import { MarkdownHeading } from "./markdown-heading";
+  import {
+    documentPositionToMarkdownOffset,
+    markdownOffsetToDocumentPosition,
+  } from "./markdown-position-map";
+  import { flashInsertedEditorInk, InkFeedback } from "./ink-feedback";
+  import { ActiveWritingBlock } from "./active-writing-block";
+  import {
+    resolveCaretLineGeometry,
+    type CaretLineGeometry,
+    type RectLike,
+    type WritingBlockKind,
+  } from "./caret-line-geometry";
+  import {
+    writingActivity,
+    writingInputFromBeforeInput,
+    writingInputFromKeydown,
+    type PendingWritingInput,
+  } from "./writing-activity";
+  import {
+    carriageReturnDuration as resolveCarriageReturnDuration,
+    isTypebarKey,
+    renderedTranslateX,
+    resolveCarriageOrigin,
+    resolveCarriageTarget,
+    resolveScrollbarGutter,
+    typebarOriginForCode,
+    typewriterStrikeBottomClearance,
+  } from "./typewriter-carriage";
+  import {
+    resolvePlatenScrollFrame,
+    TYPEWRITER_PLATEN_DIAMETER,
+    typewriterPlatenLinePitch,
+    type PlatenDirection,
+  } from "./typewriter-platen";
   import type {
     EditorApi,
     EditorChangeContext,
     EditorSelection,
     FocusMode,
     ScrollAnchor,
-    WritingStyle,
+    WritingActivity,
+    WritingExperience,
   } from "./types";
 
   export type PageFitMode = "page" | "width";
+
+  interface TypebarStrike {
+    id: number;
+    origin: number;
+  }
 
   interface Props {
     value: string;
@@ -41,16 +84,18 @@
     fallbackTitle?: string;
     documentPath?: string;
     fontFamily?: string;
-    writingStyle?: WritingStyle;
+    experience?: WritingExperience;
     fitMode?: PageFitMode;
     focusMode?: FocusMode;
-    typewriterMode?: boolean;
-    soundEnabled?: boolean;
+    sessionWords?: number;
+    sessionSentences?: number;
+    sessionParagraphs?: number;
+    sessionMarks?: Array<"sentence" | "paragraph">;
     resolveImage?: (relativePath: string) => Promise<string | null>;
     onready?: (api: EditorApi | null) => void;
     onchange?: (value: string, context: EditorChangeContext) => void;
     onselection?: (selection: EditorSelection) => void;
-    onactivity?: () => void;
+    onactivity?: (activity: WritingActivity) => void;
     onscrollanchor?: (anchor: ScrollAnchor) => void;
     onfocuschange?: (focused: boolean) => void;
   }
@@ -60,12 +105,14 @@
     readOnly = false,
     fallbackTitle = "제목 없는 원고",
     documentPath = "",
-    fontFamily = "NanumGothicCoding",
-    writingStyle = "typewriter",
+    fontFamily = "Goorm Sans Code",
+    experience = "typewriter",
     fitMode = "width",
     focusMode = "off",
-    typewriterMode = true,
-    soundEnabled = false,
+    sessionWords = 0,
+    sessionSentences = 0,
+    sessionParagraphs = 0,
+    sessionMarks = [],
     resolveImage,
     onready,
     onchange,
@@ -83,9 +130,10 @@
   const PAGE_BODY = (297 - 22 - 18) * MM_TO_PX;
   const PAGE_GAP = 28;
   const PAGE_EPSILON = 0.75;
-
   let scroller: HTMLDivElement;
   let viewport: HTMLDivElement;
+  let paperWindow: HTMLDivElement;
+  let typewriterMachine = $state<HTMLDivElement>();
   let editorMount: HTMLDivElement;
   let measureHost: HTMLDivElement;
   let editor: TiptapEditor | null = null;
@@ -93,19 +141,65 @@
   let mounted = false;
   let internalUpdate = false;
   let composing = false;
+  let compositionBefore: string | null = null;
+  let pendingInput: PendingWritingInput | null = null;
   let lastValue = "";
   let frontmatter = "";
   let layoutFrame: number | null = null;
   let layoutTimer: ReturnType<typeof setTimeout> | null = null;
   let scrollFrame: number | null = null;
+  let programmaticScrollReleaseFrame: number | null = null;
+  let platenIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  let platenDetentTimer: ReturnType<typeof setTimeout> | null = null;
   let activeLineFrame: number | null = null;
+  let carriageFrame: number | null = null;
+  let workspaceFrame: number | null = null;
   let pageCount = $state(1);
   let viewedPageIndex = $state(0);
   let viewportWidth = $state(PAGE_WIDTH + 48);
   let viewportHeight = $state(PAGE_HEIGHT + 48);
+  let continuousHeight = $state(PAGE_HEIGHT);
   let layoutBusy = $state(false);
-  let activeSyntax = $state("");
-  let activeWritingLine = $state<{ top: number; height: number } | null>(null);
+  let activeFormatLabel = $state("");
+  let caretLine = $state<CaretLineGeometry | null>(null);
+  let caretAlignedToStrike = $state(false);
+  let carriageShift = $state(0);
+  let carriageOrigin = $state(0);
+  let typewriterScrollbarGutter = $state(0);
+  let carriageReturning = $state(false);
+  let carriageStepping = $state(false);
+  let carriageAdvancePending = false;
+  let typebarStriking = $state(false);
+  let typebarStrikes = $state<TypebarStrike[]>([]);
+  let lineFeeding = $state(false);
+  let platenRolling = $state(false);
+  let platenDetenting = $state(false);
+  let platenAngle = $state(0);
+  let platenSurfaceOffset = $state(0);
+  let platenDirection = $state<PlatenDirection>(0);
+  let platenIntensity = $state(0);
+  let platenDetentSequence = $state(0);
+  let carriageReturnMs = $state(180);
+  let marginWarning = $state(false);
+  let literaryCompletion = $state<"sentence" | "paragraph" | null>(null);
+  let nextTypebarStrikeId = 0;
+  let lastPhysicalTypebarAt = Number.NEGATIVE_INFINITY;
+  const typebarTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  let carriageStepTimer: ReturnType<typeof setTimeout> | null = null;
+  let returnTimer: ReturnType<typeof setTimeout> | null = null;
+  let lineFeedFrame: number | null = null;
+  let lineFeedTimer: ReturnType<typeof setTimeout> | null = null;
+  let lineFeedTarget: number | null = null;
+  let lineFeedPending = false;
+  let programmaticScrollGuard = false;
+  let programmaticScrollTarget: number | null = null;
+  let literaryTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastCarriageLineTop: number | null = null;
+  let lastPlatenScrollTop = 0;
+  let lastPlatenScrollAt = 0;
+  let lastFlowBlock: HTMLElement | null = null;
+  let renderedExperience: WritingExperience | null = null;
+  let workspaceTransitionTarget: WritingExperience | null = null;
   let layoutWaiters: Array<() => void> = [];
   let resolvedImageDocument = "";
   let imageDocumentInitialized = false;
@@ -113,20 +207,65 @@
   const imageViews = new Set<{ refresh: () => void }>();
   const imageWork = new Set<Promise<unknown>>();
 
+  let effectiveFitMode = $derived(
+    experience === "literary" ? fitMode : "width",
+  );
   let pageScale = $derived.by(() => {
-    const width = Math.max(1, viewportWidth - (fitMode === "page" ? 32 : 48));
+    if (experience === "flow") return 1;
+    const width = Math.max(
+      1,
+      viewportWidth - (effectiveFitMode === "page" ? 32 : 48),
+    );
     const widthScale = width / PAGE_WIDTH;
-    if (fitMode === "width") return Math.max(0.35, Math.min(1.28, widthScale));
+    if (effectiveFitMode === "width") {
+      return Math.max(0.35, Math.min(1.28, widthScale));
+    }
     const heightScale = Math.max(1, viewportHeight - 32) / PAGE_HEIGHT;
     return Math.max(0.2, Math.min(1.08, widthScale, heightScale));
   });
   let pagePeriod = $derived(PAGE_HEIGHT + PAGE_GAP);
   let stackHeight = $derived(PAGE_HEIGHT * pageCount + PAGE_GAP * (pageCount - 1));
-  let visibleHeight = $derived(fitMode === "page" ? PAGE_HEIGHT : stackHeight);
+  let flowWidth = $derived(Math.max(280, Math.min(720, viewportWidth - 64)));
+  let typewriterLineAperture = $derived(
+    Math.max(
+      22,
+      Math.min(58, (caretLine?.height ?? 22) * pageScale + 8),
+    ),
+  );
+  let typewriterStrikeBottom = $derived(
+    typewriterStrikeBottomClearance(typewriterLineAperture),
+  );
+  let typewriterPlatenPitch = $derived(typewriterPlatenLinePitch(pageScale));
+  let typewriterPaperTension = $derived(
+    -platenDirection * platenIntensity * 1.4,
+  );
+  let typewriterTopRunway = $derived(
+    Math.max(
+      84,
+      viewportHeight - typewriterStrikeBottom - PAGE_TOP * pageScale,
+    ),
+  );
+  let typewriterBottomRunway = $derived(
+    Math.max(
+      150,
+      typewriterStrikeBottom + PAGE_BOTTOM * pageScale + 16,
+    ),
+  );
+  let flowTopRunway = $derived(Math.max(104, viewportHeight * 0.5 - 88));
+  let flowBottomRunway = $derived(Math.max(176, viewportHeight * 0.5));
+  let visibleHeight = $derived(
+    experience === "flow"
+      ? Math.max(viewportHeight, continuousHeight)
+      : effectiveFitMode === "page"
+        ? PAGE_HEIGHT
+        : stackHeight,
+  );
   let paperFontFallback = $derived(
-    writingStyle === "typewriter"
-      ? "NanumGothicCoding, monospace"
-      : "MaruBuri, Pretendard, serif",
+    experience === "typewriter"
+      ? '"Goorm Sans Code", NanumGothicCoding, monospace'
+      : experience === "flow"
+        ? "Pretendard, sans-serif"
+        : "MaruBuri, Pretendard, serif",
   );
 
   function splitFrontmatter(source: string): { prefix: string; body: string } {
@@ -161,21 +300,23 @@
   }
 
   function documentToSourcePosition(position: number): number {
-    return frontmatter.length + serializedPrefix(position).length;
+    if (!editor) return 0;
+    return documentPositionToMarkdownOffset(position, {
+      documentSize: editor.state.doc.content.size,
+      frontmatterLength: frontmatter.length,
+      serializedPrefixLength: (prefixPosition) =>
+        serializedPrefix(prefixPosition).length,
+    });
   }
 
   function sourceToDocumentPosition(offset: number): number {
     if (!editor) return 0;
-    const target = Math.max(0, offset - frontmatter.length);
-    const max = editor.state.doc.content.size;
-    let low = 0;
-    let high = max;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      if (serializedPrefix(middle).length <= target) low = middle;
-      else high = middle - 1;
-    }
-    return Math.max(1, Math.min(low, max));
+    return markdownOffsetToDocumentPosition(offset, {
+      documentSize: editor.state.doc.content.size,
+      frontmatterLength: frontmatter.length,
+      serializedPrefixLength: (prefixPosition) =>
+        serializedPrefix(prefixPosition).length,
+    });
   }
 
   function lineAt(source: string, offset: number): number {
@@ -188,12 +329,11 @@
 
   function currentPage(): number {
     if (!editor) return 1;
-    const stack = editorMount.closest<HTMLElement>(".paper-stack");
-    const stackRect = stack?.getBoundingClientRect();
-    if (!stackRect) return viewedPageIndex + 1;
-    const caret = editor.view.coordsAtPos(editor.state.selection.head);
-    const unscaled = (caret.top - stackRect.top) / pageScale;
-    return Math.max(1, Math.min(pageCount, Math.floor(unscaled / pagePeriod) + 1));
+    const position = editor.state.selection.head;
+    const page =
+      paperPageBreaks(editor.view).filter((pageBreak) => pageBreak.pos <= position)
+        .length + 1;
+    return Math.max(1, Math.min(pageCount, page));
   }
 
   function selectionInfo(): EditorSelection {
@@ -211,124 +351,618 @@
     };
   }
 
-  function updateActiveBlock(): void {
-    if (!editor) return;
-    editor.view.dom
-      .querySelectorAll(".is-active-writing-block")
-      .forEach((element) => element.classList.remove("is-active-writing-block"));
+  function activeBlockElement(): HTMLElement | null {
+    if (!editor) return null;
+    const nativeAnchor = window.getSelection()?.anchorNode;
+    const nativeElement =
+      nativeAnchor instanceof Element ? nativeAnchor : nativeAnchor?.parentElement;
+    const nativeBlock = nativeElement?.closest<HTMLElement>(
+      "h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,td,th",
+    );
+    if (nativeBlock && editor.view.dom.contains(nativeBlock)) return nativeBlock;
+    const resolved = editor.state.selection.$from;
+    for (let depth = resolved.depth; depth > 0; depth -= 1) {
+      try {
+        const node = editor.view.nodeDOM(resolved.before(depth));
+        const element = node instanceof Element ? node : node?.parentElement;
+        const block = element?.closest<HTMLElement>(
+          "h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,td,th",
+        );
+        if (block) return block;
+      } catch {
+        // Some inline positions do not expose a node boundary at this depth.
+      }
+    }
     const dom = editor.view.domAtPos(editor.state.selection.head).node;
     const element = dom instanceof Element ? dom : dom.parentElement;
-    const block = element?.closest<HTMLElement>(
-      "h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,table",
+    const direct = element?.closest<HTMLElement>(
+      "h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,td,th",
     );
-    block?.classList.add("is-active-writing-block");
+    if (direct) return direct;
+    const offset = editor.view.domAtPos(editor.state.selection.head).offset;
+    const child = element?.childNodes[offset];
+    return child instanceof HTMLElement
+      ? child.closest<HTMLElement>("h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,td,th")
+      : null;
+  }
+
+  function updateActiveBlock(): HTMLElement | null {
+    if (!editor) return null;
+    const block = activeBlockElement();
 
     const parent = editor.state.selection.$from.parent;
     const headingLevel = parent.type.name === "heading" ? Number(parent.attrs.level) : 0;
-    if (headingLevel) activeSyntax = `${"#".repeat(headingLevel)} 제목`;
-    else if (editor.isActive("bold")) activeSyntax = "** 굵게 **";
-    else if (editor.isActive("italic")) activeSyntax = "* 기울임 *";
-    else if (editor.isActive("code")) activeSyntax = "` 코드 `";
-    else if (editor.isActive("blockquote")) activeSyntax = "> 인용";
-    else if (editor.isActive("bulletList")) activeSyntax = "- 목록";
-    else if (editor.isActive("orderedList")) activeSyntax = "1. 목록";
-    else activeSyntax = "";
+    if (headingLevel) activeFormatLabel = `${headingLevel}단계 제목`;
+    else if (editor.isActive("bold")) activeFormatLabel = "굵게";
+    else if (editor.isActive("italic")) activeFormatLabel = "기울임";
+    else if (editor.isActive("code")) activeFormatLabel = "코드";
+    else if (editor.isActive("blockquote")) activeFormatLabel = "인용";
+    else if (editor.isActive("bulletList")) activeFormatLabel = "글머리 목록";
+    else if (editor.isActive("orderedList")) activeFormatLabel = "번호 목록";
+    else activeFormatLabel = "";
+    return block;
   }
 
-  function updateActiveWritingLine(): void {
+  function writingBlockKind(block: HTMLElement | null): WritingBlockKind {
+    if (!block) return "other";
+    if (/^H[1-6]$/u.test(block.tagName)) return "heading";
+    if (block.tagName === "LI") return "list-item";
+    if (block.tagName === "BLOCKQUOTE") return "blockquote";
+    if (block.tagName === "PRE") return "code";
+    if (block.tagName === "TD" || block.tagName === "TH") return "table-cell";
+    if (block.tagName === "P") return "paragraph";
+    return "other";
+  }
+
+  function caretClientRects(position: number): RectLike[] {
+    if (!editor) return [];
+    const result: DOMRect[] = [];
+    const addRange = (node: Text, from: number, to: number): void => {
+      if (from < 0 || to <= from || to > node.length) return;
+      const range = document.createRange();
+      range.setStart(node, from);
+      range.setEnd(node, to);
+      result.push(...Array.from(range.getClientRects()));
+    };
+    const collectTextEdge = (node: Node | undefined, fromEnd: boolean): void => {
+      if (!node) return;
+      let current = node;
+      while (current.nodeType !== Node.TEXT_NODE && current.childNodes.length) {
+        current = fromEnd
+          ? current.childNodes[current.childNodes.length - 1]
+          : current.childNodes[0];
+      }
+      if (!(current instanceof Text) || !current.length) return;
+      addRange(current, fromEnd ? current.length - 1 : 0, fromEnd ? current.length : 1);
+    };
+
+    try {
+      const domPosition = editor.view.domAtPos(position);
+      if (domPosition.node instanceof Text) {
+        addRange(
+          domPosition.node,
+          Math.max(0, domPosition.offset - 1),
+          domPosition.offset,
+        );
+        addRange(domPosition.node, domPosition.offset, domPosition.offset + 1);
+      } else {
+        const children = domPosition.node.childNodes;
+        collectTextEdge(children[domPosition.offset - 1], true);
+        collectTextEdge(children[domPosition.offset], false);
+      }
+    } catch {
+      return [];
+    }
+    return result;
+  }
+
+  function updateCaretLine(): void {
     if (
       !editor ||
       !editor.isFocused ||
       readOnly ||
+      experience === "flow" ||
       !(editor.state.selection instanceof TextSelection) ||
       !editor.state.selection.empty
     ) {
-      activeWritingLine = null;
+      caretLine = null;
       return;
     }
     const stack = editorMount.closest<HTMLElement>(".paper-stack");
     if (!stack || pageScale <= 0) {
-      activeWritingLine = null;
+      caretLine = null;
       return;
     }
     try {
       const caret = editor.view.coordsAtPos(editor.state.selection.head);
       const stackRect = stack.getBoundingClientRect();
-      const dom = editor.view.domAtPos(editor.state.selection.head).node;
-      const element = dom instanceof Element ? dom : dom.parentElement;
-      const block = element?.closest<HTMLElement>(
-        "h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,td,th",
-      );
-      const computedLineHeight = Number.parseFloat(
-        getComputedStyle(block ?? editor.view.dom).lineHeight,
-      );
-      const top = (caret.top - stackRect.top) / pageScale;
-      const measuredHeight = (caret.bottom - caret.top) / pageScale;
-      const naturalHeight = Math.max(
-        1,
-        measuredHeight,
-        Number.isFinite(computedLineHeight) ? computedLineHeight : 26,
-      );
-      if (!Number.isFinite(top) || !Number.isFinite(naturalHeight)) {
-        activeWritingLine = null;
-        return;
-      }
-      const height =
-        writingStyle === "typewriter"
-          ? Math.min(naturalHeight, 27)
-          : naturalHeight;
-      const guideTop = top + (naturalHeight - height) / 2;
-      activeWritingLine = { top: Math.max(0, guideTop), height };
+      const block = activeBlockElement();
+      caretLine = resolveCaretLineGeometry({
+        caret,
+        lineRects: caretClientRects(editor.state.selection.head),
+        stack: stackRect,
+        scale: pageScale,
+        pageWidth: PAGE_WIDTH,
+        pageHeight: PAGE_HEIGHT,
+        pageGap: PAGE_GAP,
+        pageTopInset: PAGE_TOP,
+        pageBottomInset: PAGE_BOTTOM,
+        pageHorizontalInset: 20 * MM_TO_PX,
+        blockKind: writingBlockKind(block),
+      });
     } catch {
-      activeWritingLine = null;
+      caretLine = null;
     }
   }
 
-  function scheduleActiveWritingLine(): void {
+  function scheduleCaretLine(): void {
     if (activeLineFrame !== null) cancelAnimationFrame(activeLineFrame);
     activeLineFrame = requestAnimationFrame(() => {
       activeLineFrame = null;
-      updateActiveWritingLine();
+      updateCaretLine();
+    });
+  }
+
+  function clearProgrammaticScrollMarker(): void {
+    if (programmaticScrollReleaseFrame !== null) {
+      cancelAnimationFrame(programmaticScrollReleaseFrame);
+    }
+    programmaticScrollReleaseFrame = null;
+    programmaticScrollGuard = false;
+    programmaticScrollTarget = null;
+  }
+
+  function markProgrammaticScroll(
+    target: number | null = null,
+  ): void {
+    clearProgrammaticScrollMarker();
+    programmaticScrollGuard = true;
+    programmaticScrollTarget = target;
+    programmaticScrollReleaseFrame = requestAnimationFrame(() => {
+      programmaticScrollReleaseFrame = requestAnimationFrame(() => {
+        programmaticScrollReleaseFrame = null;
+        programmaticScrollGuard = false;
+        programmaticScrollTarget = null;
+      });
+    });
+  }
+
+  function setProgrammaticScrollTop(target: number): void {
+    if (!scroller) return;
+    const normalized = Math.max(0, target);
+    markProgrammaticScroll(normalized);
+    scroller.scrollTop = normalized;
+    programmaticScrollTarget = scroller.scrollTop;
+  }
+
+  function consumeProgrammaticScroll(): boolean {
+    if (!scroller || !programmaticScrollGuard) return false;
+    const matches =
+      programmaticScrollTarget === null ||
+      Math.abs(scroller.scrollTop - programmaticScrollTarget) <= 1;
+    clearProgrammaticScrollMarker();
+    return matches;
+  }
+
+  function resetCarriage(): void {
+    cancelLineFeed(false);
+    clearProgrammaticScrollMarker();
+    carriageShift = 0;
+    caretAlignedToStrike = false;
+    marginWarning = false;
+    lastCarriageLineTop = null;
+    carriageAdvancePending = false;
+  }
+
+  function triggerCarriageReturn(feedLine = false): void {
+    if (returnTimer) clearTimeout(returnTimer);
+    carriageReturnMs = resolveCarriageReturnDuration(carriageShift);
+    carriageReturning = true;
+    returnTimer = setTimeout(() => {
+      carriageReturning = false;
+      returnTimer = null;
+    }, carriageReturnMs);
+    if (!feedLine) return;
+    lineFeedPending = true;
+    lineFeeding = true;
+    if (lineFeedTimer) clearTimeout(lineFeedTimer);
+    lineFeedTimer = setTimeout(() => {
+      lineFeedPending = false;
+      lineFeeding = false;
+      lineFeedTimer = null;
+    }, 240);
+  }
+
+  function cancelCarriageReturn(): void {
+    if (returnTimer) clearTimeout(returnTimer);
+    returnTimer = null;
+    carriageReturning = false;
+  }
+
+  function stopTypebarStrike(): void {
+    for (const timer of typebarTimers.values()) clearTimeout(timer);
+    typebarTimers.clear();
+    typebarStrikes = [];
+    typebarStriking = false;
+  }
+
+  function cancelLineFeed(snapToTarget: boolean): void {
+    if (lineFeedFrame !== null) cancelAnimationFrame(lineFeedFrame);
+    lineFeedFrame = null;
+    if (lineFeedTimer) clearTimeout(lineFeedTimer);
+    lineFeedTimer = null;
+    if (snapToTarget && scroller && lineFeedTarget !== null) {
+      setProgrammaticScrollTop(lineFeedTarget);
+    }
+    lineFeedTarget = null;
+    lineFeedPending = false;
+    lineFeeding = false;
+  }
+
+  function startLineFeed(target: number): void {
+    if (!scroller) return;
+    cancelLineFeed(true);
+    const start = scroller.scrollTop;
+    const distance = target - start;
+    lineFeedTarget = target;
+    lineFeeding = true;
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion || Math.abs(distance) <= 1) {
+      setProgrammaticScrollTop(target);
+      cancelLineFeed(false);
+      return;
+    }
+    let startedAt: number | null = null;
+    const animate = (time: number) => {
+      if (!scroller || lineFeedTarget === null) return;
+      startedAt ??= time;
+      const progress = Math.min(1, (time - startedAt) / 160);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setProgrammaticScrollTop(start + distance * eased);
+      if (progress < 1) {
+        lineFeedFrame = requestAnimationFrame(animate);
+        return;
+      }
+      setProgrammaticScrollTop(target);
+      lineFeedFrame = null;
+      lineFeedTarget = null;
+      lineFeeding = false;
+      if (lineFeedTimer) clearTimeout(lineFeedTimer);
+      lineFeedTimer = null;
+      scheduleCaretLine();
+      scheduleCarriagePosition();
+    };
+    lineFeedFrame = requestAnimationFrame(animate);
+    lineFeedTimer = setTimeout(() => {
+      if (lineFeedFrame !== null) cancelAnimationFrame(lineFeedFrame);
+      if (scroller && lineFeedTarget !== null) {
+        setProgrammaticScrollTop(lineFeedTarget);
+      }
+      lineFeedFrame = null;
+      lineFeedTarget = null;
+      lineFeeding = false;
+      lineFeedTimer = null;
+      scheduleCaretLine();
+      scheduleCarriagePosition();
+    }, 220);
+  }
+
+  function triggerTypebarStrike(code = ""): void {
+    if (experience !== "typewriter" || !mounted) {
+      return;
+    }
+    const id = ++nextTypebarStrikeId;
+    const strike = { id, origin: typebarOriginForCode(code, id) };
+    typebarStrikes = [...typebarStrikes.slice(-3), strike];
+    typebarStriking = true;
+    const timer = setTimeout(() => {
+      typebarTimers.delete(id);
+      typebarStrikes = typebarStrikes.filter((item) => item.id !== id);
+      typebarStriking = typebarStrikes.length > 0;
+    }, 100);
+    typebarTimers.set(id, timer);
+  }
+
+  function triggerCarriageStep(): void {
+    if (carriageStepTimer) clearTimeout(carriageStepTimer);
+    carriageStepping = true;
+    carriageStepTimer = setTimeout(() => {
+      carriageStepping = false;
+      carriageStepTimer = null;
+    }, 60);
+  }
+
+  function triggerLiteraryCompletion(
+    kind: "sentence" | "paragraph",
+  ): void {
+    if (literaryTimer) clearTimeout(literaryTimer);
+    literaryCompletion = kind;
+    literaryTimer = setTimeout(() => {
+      literaryCompletion = null;
+      literaryTimer = null;
+    }, 650);
+  }
+
+  function alignTypewriterLine(): boolean {
+    if (!editor || !scroller || lineFeedFrame !== null) return false;
+    const coordinates = editor.view.coordsAtPos(editor.state.selection.head);
+    const viewportRect = scroller.getBoundingClientRect();
+    const caretCenter = (coordinates.top + coordinates.bottom) / 2;
+    const delta = caretCenter - (viewportRect.bottom - typewriterStrikeBottom);
+    if (Math.abs(delta) <= 1) {
+      if (lineFeedPending) cancelLineFeed(false);
+      return true;
+    }
+    const previousTop = scroller.scrollTop;
+    const target = Math.max(0, scroller.scrollTop + delta);
+    if (lineFeedPending) {
+      startLineFeed(target);
+      return false;
+    }
+    setProgrammaticScrollTop(target);
+    return Math.abs(delta - (scroller.scrollTop - previousTop)) <= 1;
+  }
+
+  function caretMatchesTypewriterStrike(): boolean {
+    if (
+      !editor ||
+      !editor.isFocused ||
+      readOnly ||
+      experience !== "typewriter" ||
+      lineFeedFrame !== null ||
+      !(editor.state.selection instanceof TextSelection) ||
+      !editor.state.selection.empty ||
+      !scroller
+    ) {
+      return false;
+    }
+    try {
+      const caret = editor.view.coordsAtPos(editor.state.selection.head);
+      const viewportRect = scroller.getBoundingClientRect();
+      const caretCenter = (caret.top + caret.bottom) / 2;
+      return (
+        Math.abs(
+          caretCenter - (viewportRect.bottom - typewriterStrikeBottom),
+        ) <= 2
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function prepareTypewriterInput(): void {
+    if (
+      experience !== "typewriter" ||
+      readOnly ||
+      !editor ||
+      !(editor.state.selection instanceof TextSelection) ||
+      !editor.state.selection.empty ||
+      caretAlignedToStrike
+    ) {
+      return;
+    }
+    if (lineFeedFrame !== null) cancelLineFeed(true);
+    updateCarriagePosition();
+  }
+
+  function handleTypewriterTitleBoundaryKey(
+    view: EditorView,
+    event: KeyboardEvent,
+  ): boolean {
+    if (
+      experience !== "typewriter" ||
+      readOnly ||
+      (event.key !== "Home" && event.key !== "End") ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.isComposing ||
+      view.composing ||
+      !(view.state.selection instanceof TextSelection)
+    ) {
+      return false;
+    }
+    const selection = view.state.selection;
+    const head = selection.$head;
+    if (
+      head.parent.type.name !== "heading" ||
+      Number(head.parent.attrs.level) !== 1
+    ) {
+      return false;
+    }
+    const target =
+      event.key === "Home" ? head.start(head.depth) : head.end(head.depth);
+    const nextSelection = event.shiftKey
+      ? TextSelection.create(view.state.doc, selection.anchor, target)
+      : TextSelection.create(view.state.doc, target);
+    event.preventDefault();
+    if (!nextSelection.eq(selection)) {
+      view.dispatch(view.state.tr.setSelection(nextSelection));
+    }
+    scheduleCaretLine();
+    scheduleCarriagePosition();
+    return true;
+  }
+
+  function updateCarriagePosition(): void {
+    if (
+      !editor ||
+      !editor.isFocused ||
+      readOnly ||
+      experience !== "typewriter"
+    ) {
+      resetCarriage();
+      return;
+    }
+    if (
+      !(editor.state.selection instanceof TextSelection) ||
+      !editor.state.selection.empty
+    ) {
+      caretAlignedToStrike = false;
+      marginWarning = false;
+      lastCarriageLineTop = null;
+      carriageAdvancePending = false;
+      return;
+    }
+    if (!scroller || !paperWindow) {
+      caretAlignedToStrike = false;
+      marginWarning = false;
+      return;
+    }
+
+    const aligned = alignTypewriterLine();
+    try {
+      const caret = editor.view.coordsAtPos(editor.state.selection.head);
+      const scrollerBounds = scroller.getBoundingClientRect();
+      const machineBounds = typewriterMachine?.getBoundingClientRect();
+      const strikeBounds =
+        machineBounds && machineBounds.width > 0
+          ? machineBounds
+          : scrollerBounds;
+      const paperRect = paperWindow.getBoundingClientRect();
+      const stack = editorMount.closest<HTMLElement>(".paper-stack");
+      const stackRect = stack?.getBoundingClientRect();
+      if (!stackRect || pageScale <= 0) return;
+      const strikePoint = strikeBounds.left + strikeBounds.width * 0.5;
+      const renderedShift = renderedTranslateX(
+        getComputedStyle(paperWindow).transform,
+      );
+      if (renderedShift === null) {
+        carriageAdvancePending = false;
+        return;
+      }
+      if (machineBounds) {
+        const nextOrigin = resolveCarriageOrigin({
+          paperLeft: paperRect.left,
+          paperWidth: paperRect.width,
+          renderedShift,
+          machineLeft: machineBounds.left,
+          machineWidth: machineBounds.width,
+        });
+        if (nextOrigin !== null) carriageOrigin = nextOrigin;
+      }
+      const nextShift = resolveCarriageTarget({
+        renderedShift,
+        caretLeft: caret.left,
+        strikePoint,
+      });
+      if (nextShift === null) {
+        carriageAdvancePending = false;
+        return;
+      }
+      const lineTop = (caret.top - stackRect.top) / pageScale;
+      const lineHeight = Math.max(1, (caret.bottom - caret.top) / pageScale);
+      if (
+        carriageAdvancePending &&
+        lastCarriageLineTop !== null &&
+        !carriageReturning &&
+        lineTop > lastCarriageLineTop + lineHeight * 0.55
+      ) {
+        triggerCarriageReturn(true);
+      }
+      lastCarriageLineTop = lineTop;
+      carriageShift = nextShift;
+      caretAlignedToStrike = aligned;
+      carriageAdvancePending = false;
+      const caretOnPaper = (caret.left - paperRect.left) / pageScale;
+      marginWarning = caretOnPaper >= PAGE_WIDTH - 28 * MM_TO_PX;
+    } catch {
+      caretAlignedToStrike = false;
+      carriageAdvancePending = false;
+    }
+  }
+
+  function scheduleCarriagePosition(): void {
+    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
+    carriageFrame = requestAnimationFrame(() => {
+      carriageFrame = null;
+      updateCarriagePosition();
     });
   }
 
   function notifySelection(): void {
-    updateActiveBlock();
-    scheduleActiveWritingLine();
+    if (experience === "typewriter") markProgrammaticScroll();
+    const block = updateActiveBlock();
+    scheduleCaretLine();
+    scheduleCarriagePosition();
     const selected = selectionInfo();
     viewedPageIndex = Math.max(0, (selected.page ?? 1) - 1);
     onselection?.(selected);
-    if (typewriterMode && fitMode === "width" && editor?.isFocused) {
-      centerCaret();
-    }
+    if (experience === "flow" && editor?.isFocused) centerFlowBlock(block);
+    settleWorkspaceTransition(block);
   }
 
-  function centerCaret(): void {
-    if (!editor || !scroller) return;
-    const coordinates = editor.view.coordsAtPos(editor.state.selection.head);
+  function settleWorkspaceTransition(block: HTMLElement | null): void {
+    if (workspaceTransitionTarget !== experience || !scroller) return;
+    if (workspaceFrame !== null) cancelAnimationFrame(workspaceFrame);
+    workspaceFrame = requestAnimationFrame(() => {
+      workspaceFrame = null;
+      if (workspaceTransitionTarget !== experience || !scroller) return;
+      workspaceTransitionTarget = null;
+      if (experience === "literary") {
+        scroller.scrollTop = Math.max(0, (currentPage() - 1) * pagePeriod * pageScale);
+      } else if (experience === "flow") {
+        lastFlowBlock = null;
+        centerFlowBlock(block);
+      } else {
+        scheduleCarriagePosition();
+      }
+    });
+  }
+
+  function centerFlowBlock(block = activeBlockElement()): void {
+    if (!editor || !scroller || !block || experience !== "flow") return;
+    const blockRect = block.getBoundingClientRect();
     const viewportRect = scroller.getBoundingClientRect();
-    const delta = coordinates.top - (viewportRect.top + viewportRect.height * 0.47);
-    if (Math.abs(delta) > 18) scroller.scrollTop += delta;
+    const center = (blockRect.top + blockRect.bottom) / 2;
+    const lower = viewportRect.top + viewportRect.height * 0.42;
+    const upper = viewportRect.top + viewportRect.height * 0.58;
+    if (center < lower || center > upper || block !== lastFlowBlock) {
+      scroller.scrollTop += center - (viewportRect.top + viewportRect.height * 0.5);
+    }
+    lastFlowBlock = block;
   }
 
-  function playKeystroke(): void {
-    if (!soundEnabled || typeof AudioContext === "undefined") return;
-    try {
-      const context = new AudioContext();
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = "triangle";
-      oscillator.frequency.value = 112 + Math.random() * 10;
-      gain.gain.setValueAtTime(0.018, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.035);
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start();
-      oscillator.stop(context.currentTime + 0.04);
-      oscillator.addEventListener("ended", () => void context.close(), { once: true });
-    } catch {
-      // Sound is deliberately optional and must never interrupt writing.
+  function handleWritingFeedback(activity: WritingActivity): void {
+    if (activity.origin !== "keyboard") return;
+    if (experience === "typewriter") {
+      if (editor) {
+        flashInsertedEditorInk(
+          editor.view,
+          activity.insertedText,
+          "typewriter",
+        );
+      }
+      carriageAdvancePending = true;
+      if (activity.kind === "enter") {
+        if (!carriageReturning) triggerCarriageReturn(true);
+      } else {
+        cancelCarriageReturn();
+        cancelLineFeed(true);
+        triggerCarriageStep();
+      }
+      scheduleCarriagePosition();
+      return;
     }
+    if (experience === "literary" && editor) {
+      flashInsertedEditorInk(editor.view, activity.insertedText, "literary");
+      if (activity.paragraphDelta > 0) triggerLiteraryCompletion("paragraph");
+      else if (activity.sentenceDelta > 0) triggerLiteraryCompletion("sentence");
+    }
+    if (experience === "flow") {
+      centerFlowBlock();
+    }
+  }
+
+  function updateContinuousHeight(): void {
+    if (!editor || experience !== "flow") return;
+    continuousHeight = Math.max(
+      viewportHeight,
+      editor.view.dom.scrollHeight,
+      editorMount.scrollHeight,
+    );
   }
 
   function trackImageWork<T>(work: Promise<T>): Promise<T> {
@@ -447,15 +1081,33 @@
     },
   }).configure({ allowBase64: false, inline: false });
 
+  function emitWritingActivity(
+    before: string,
+    after: string,
+    input: PendingWritingInput | null,
+  ): void {
+    const activity = writingActivity(before, after, "paper", input);
+    handleWritingFeedback(activity);
+    onactivity?.(activity);
+  }
+
   function emitChange(): void {
     if (!editor || internalUpdate) return;
+    const before = lastValue;
     const next = canonicalMarkdown();
     if (next === lastValue || differsOnlyByTerminalBlankLines(next, lastValue)) {
+      if (!editor.view.composing && !composing && pendingInput) {
+        emitWritingActivity(before, next, pendingInput);
+        pendingInput = null;
+      }
       return;
     }
     lastValue = next;
     onchange?.(next, { composing: editor.view.composing || composing });
-    if (!editor.view.composing && !composing) onactivity?.();
+    if (!editor.view.composing && !composing && compositionBefore === null) {
+      emitWritingActivity(before, next, pendingInput);
+      pendingInput = null;
+    }
   }
 
   function outerHeight(element: HTMLElement): number {
@@ -671,7 +1323,8 @@
     viewedPageIndex = Math.min(viewedPageIndex, pageCount - 1);
     measureHost.replaceChildren();
     await tick();
-    updateActiveWritingLine();
+    updateCaretLine();
+    updateContinuousHeight();
     layoutBusy = false;
     resolveLayoutWaiters();
   }
@@ -712,6 +1365,7 @@
 
   function replaceRange(from: number, to: number, text: string): void {
     if (!editor || readOnly) return;
+    pendingInput = { kind: "other", origin: "programmatic" };
     const start = sourceToDocumentPosition(from);
     const end = sourceToDocumentPosition(to);
     const range = { from: Math.min(start, end), to: Math.max(start, end) };
@@ -804,14 +1458,122 @@
   }
 
   function measureViewport(): void {
-    if (!viewport) return;
-    viewportWidth = viewport.clientWidth || PAGE_WIDTH + 48;
-    viewportHeight = viewport.clientHeight || PAGE_HEIGHT + 48;
-    void tick().then(scheduleActiveWritingLine);
+    if (!scroller) return;
+    viewportWidth = scroller.clientWidth || PAGE_WIDTH + 48;
+    viewportHeight = scroller.clientHeight || PAGE_HEIGHT + 48;
+    typewriterScrollbarGutter = resolveScrollbarGutter(
+      scroller.offsetWidth,
+      scroller.clientWidth,
+    );
+    void tick().then(() => {
+      scheduleCaretLine();
+      scheduleCarriagePosition();
+      updateContinuousHeight();
+    });
+  }
+
+  function resetPlatenMotion(syncToPaper = true): void {
+    if (platenIdleTimer) clearTimeout(platenIdleTimer);
+    if (platenDetentTimer) clearTimeout(platenDetentTimer);
+    platenIdleTimer = null;
+    platenDetentTimer = null;
+    platenRolling = false;
+    platenDetenting = false;
+    platenDirection = 0;
+    platenIntensity = 0;
+    const top = syncToPaper && scroller ? Math.max(0, scroller.scrollTop) : 0;
+    const frame = resolvePlatenScrollFrame({
+      previousTop: top,
+      nextTop: top,
+      linePitch: typewriterPlatenPitch,
+      platenDiameter: TYPEWRITER_PLATEN_DIAMETER,
+    });
+    platenAngle = frame.angleDeg;
+    platenSurfaceOffset = frame.surfaceOffsetPx;
+    lastPlatenScrollTop = top;
+    lastPlatenScrollAt = 0;
+  }
+
+  function updatePlatenFromScroll(): void {
+    if (!scroller || experience !== "typewriter") return;
+    const now = performance.now();
+    const nextTop = Math.max(0, scroller.scrollTop);
+    const frame = resolvePlatenScrollFrame({
+      previousTop: lastPlatenScrollTop,
+      nextTop,
+      linePitch: typewriterPlatenPitch,
+      platenDiameter: TYPEWRITER_PLATEN_DIAMETER,
+      elapsedMs: lastPlatenScrollAt > 0 ? now - lastPlatenScrollAt : undefined,
+    });
+    lastPlatenScrollTop = nextTop;
+    lastPlatenScrollAt = now;
+    platenAngle = frame.angleDeg;
+    platenSurfaceOffset = frame.surfaceOffsetPx;
+    if (frame.direction === 0) return;
+
+    platenRolling = true;
+    platenDirection = frame.direction;
+    platenIntensity = frame.intensity;
+    if (platenIdleTimer) clearTimeout(platenIdleTimer);
+    platenIdleTimer = setTimeout(() => {
+      platenRolling = false;
+      platenDirection = 0;
+      platenIntensity = 0;
+      platenIdleTimer = null;
+    }, 96);
+
+    if (frame.detentCrossings === 0) return;
+    platenDetentSequence += frame.detentCrossings;
+    platenDetenting = true;
+    if (platenDetentTimer) clearTimeout(platenDetentTimer);
+    platenDetentTimer = setTimeout(() => {
+      platenDetenting = false;
+      platenDetentTimer = null;
+    }, 88);
+  }
+
+  function centerCarriageForFreeScroll(): void {
+    if (experience !== "typewriter") return;
+    clearProgrammaticScrollMarker();
+    if (lineFeedFrame !== null || lineFeedPending) cancelLineFeed(false);
+    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
+    carriageFrame = null;
+    cancelCarriageReturn();
+    if (carriageStepTimer) clearTimeout(carriageStepTimer);
+    carriageStepTimer = null;
+    carriageStepping = false;
+    carriageAdvancePending = false;
+    lastCarriageLineTop = null;
+    marginWarning = false;
+    caretAlignedToStrike = false;
+    carriageShift = 0;
+  }
+
+  function handleFreeScrollIntent(): void {
+    centerCarriageForFreeScroll();
+  }
+
+  function handleScrollPointerDown(event: PointerEvent): void {
+    if (experience !== "typewriter" || !scroller) return;
+    const bounds = scroller.getBoundingClientRect();
+    const scrollbarHitWidth = Math.max(typewriterScrollbarGutter, 12);
+    if (
+      event.pointerType === "touch" ||
+      (event.target === scroller &&
+        event.clientX >= bounds.right - scrollbarHitWidth)
+    ) {
+      centerCarriageForFreeScroll();
+    }
   }
 
   function handleScroll(): void {
-    if (fitMode === "page" || scrollFrame !== null) return;
+    const programmatic =
+      experience === "typewriter" && consumeProgrammaticScroll();
+    updatePlatenFromScroll();
+    if (experience === "typewriter" && programmatic) {
+      caretAlignedToStrike = caretMatchesTypewriterStrike();
+    }
+    if (effectiveFitMode === "page" || scrollFrame !== null) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = null;
       onscrollanchor?.(currentAnchor());
@@ -834,7 +1596,12 @@
       contentType: "markdown",
       editable: !readOnly,
       extensions: [
-        StarterKit.configure({ link: { openOnClick: false } }),
+        HeadingInputGuard,
+        StarterKit.configure({
+          heading: false,
+          link: { openOnClick: false },
+        }),
+        MarkdownHeading,
         Markdown.configure({
           marked: isolatedMarkdown,
           markedOptions: { gfm: true, breaks: false },
@@ -849,7 +1616,9 @@
         }),
         ...ResearchMarkdownExtensions,
         FocusSentence,
+        ActiveWritingBlock,
         GhostText,
+        InkFeedback,
         PaperPagination,
       ],
       editorProps: {
@@ -862,14 +1631,55 @@
         handleDOMEvents: {
           compositionstart: () => {
             composing = true;
+            compositionBefore = lastValue;
             return false;
           },
           compositionend: () => {
             composing = false;
             queueMicrotask(() => {
-              emitChange();
-              playKeystroke();
+              if (!editor || compositionBefore === null) return;
+              const before = compositionBefore;
+              const next = canonicalMarkdown();
+              compositionBefore = null;
+              if (
+                next !== lastValue &&
+                !differsOnlyByTerminalBlankLines(next, lastValue)
+              ) {
+                lastValue = next;
+                onchange?.(next, { composing: false });
+              }
+              emitWritingActivity(
+                before,
+                next,
+                pendingInput ?? { kind: "character", origin: "keyboard" },
+              );
+              pendingInput = null;
             });
+            return false;
+          },
+          beforeinput: (_view, event) => {
+            const inputEvent = event as InputEvent;
+            pendingInput = writingInputFromBeforeInput(inputEvent);
+            if (
+              pendingInput?.origin === "keyboard" &&
+              (pendingInput.kind === "character" ||
+                pendingInput.kind === "space" ||
+                pendingInput.kind === "enter")
+            ) {
+              prepareTypewriterInput();
+            }
+            if (
+              experience === "typewriter" &&
+              pendingInput?.kind === "character" &&
+              performance.now() - lastPhysicalTypebarAt > 80
+            ) {
+              triggerTypebarStrike();
+            }
+            if (pendingInput?.kind === "enter" && editor) {
+              pendingInput.paragraphHadContent = Boolean(
+                editor.state.selection.$from.parent.textContent.trim(),
+              );
+            }
             return false;
           },
           focus: () => {
@@ -879,19 +1689,42 @@
           blur: () => {
             queueMicrotask(() => {
               if (!mounted || editor?.isFocused) return;
-              activeWritingLine = null;
+              caretLine = null;
+              resetCarriage();
+              lastFlowBlock = null;
+              pendingInput = null;
               onfocuschange?.(false);
             });
             return false;
           },
         },
         handleKeyDown: (view, event) => {
+          if (handleTypewriterTitleBoundaryKey(view, event)) return true;
+          const keyboardInput = writingInputFromKeydown(event);
+          if (keyboardInput) {
+            pendingInput = keyboardInput;
+            prepareTypewriterInput();
+            if (keyboardInput.kind === "enter") {
+              if (experience === "typewriter") triggerCarriageReturn(true);
+              pendingInput.paragraphHadContent = Boolean(
+                view.state.selection.$from.parent.textContent.trim(),
+              );
+            }
+          }
+          if (
+            experience === "typewriter" &&
+            isTypebarKey(event)
+          ) {
+            lastPhysicalTypebarAt = performance.now();
+            triggerTypebarStrike(event.code);
+          }
           const ghost = editorGhostText(view);
           if (event.key === "Escape" && ghost) {
             clearEditorGhostText(view);
             return true;
           }
           if (event.key !== "Tab" || !ghost) return false;
+          pendingInput = { kind: "other", origin: "autocomplete" };
           const completion = ghost.text.replace(/\r?\n+/gu, " ");
           const end = ghost.pos + completion.length;
           const transaction = view.state.tr.insertText(completion, ghost.pos);
@@ -905,20 +1738,33 @@
       },
       onUpdate: ({ transaction }) => {
         if (!transaction.docChanged) return;
+        if (experience === "typewriter") markProgrammaticScroll();
         emitChange();
-        if (!composing) playKeystroke();
+        updateActiveBlock();
         scheduleLayout();
-        scheduleActiveWritingLine();
+        scheduleCaretLine();
+        scheduleCarriagePosition();
       },
-      onSelectionUpdate: notifySelection,
+      onSelectionUpdate: ({ transaction }) => {
+        if (
+          experience === "typewriter" &&
+          !transaction.docChanged &&
+          (lineFeedFrame !== null || lineFeedPending)
+        ) {
+          cancelLineFeed(true);
+        }
+        notifySelection();
+      },
       onTransaction: ({ transaction }) => {
         if (transaction.docChanged) scheduleLayout();
       },
       onFocus: notifySelection,
     });
     resizeObserver = new ResizeObserver(measureViewport);
-    resizeObserver.observe(viewport);
+    resizeObserver.observe(scroller);
+    scroller.addEventListener("pointerdown", handleScrollPointerDown);
     measureViewport();
+    resetPlatenMotion(experience === "typewriter");
     scheduleLayout();
     notifySelection();
     onready?.(api());
@@ -945,19 +1791,40 @@
     const editable = !readOnly;
     if (mounted && editor) {
       editor.setEditable(editable, false);
-      if (readOnly) activeWritingLine = null;
-      else scheduleActiveWritingLine();
+      if (readOnly) caretLine = null;
+      else scheduleCaretLine();
     }
   });
 
   $effect(() => {
     fontFamily;
-    writingStyle;
+    const nextExperience = experience;
     fitMode;
     focusMode;
     void tick().then(() => {
+      const changed =
+        renderedExperience !== null && nextExperience !== renderedExperience;
+      renderedExperience = nextExperience;
+      if (changed) {
+        workspaceTransitionTarget = nextExperience;
+      }
+      const block = updateActiveBlock();
+      if (nextExperience !== "typewriter") {
+        resetCarriage();
+        resetPlatenMotion(false);
+      } else if (changed) {
+        resetPlatenMotion(true);
+      }
+      if (nextExperience !== "flow") lastFlowBlock = null;
       scheduleLayout();
-      scheduleActiveWritingLine();
+      scheduleCaretLine();
+      scheduleCarriagePosition();
+      updateContinuousHeight();
+      if (changed && nextExperience === "literary" && scroller) {
+        scroller.scrollTop = Math.max(0, (currentPage() - 1) * pagePeriod * pageScale);
+      } else if (nextExperience === "flow") {
+        centerFlowBlock(block);
+      }
     });
   });
 
@@ -979,7 +1846,18 @@
     if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     if (layoutTimer !== null) clearTimeout(layoutTimer);
     if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
+    clearProgrammaticScrollMarker();
+    if (platenIdleTimer) clearTimeout(platenIdleTimer);
+    if (platenDetentTimer) clearTimeout(platenDetentTimer);
     if (activeLineFrame !== null) cancelAnimationFrame(activeLineFrame);
+    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
+    if (workspaceFrame !== null) cancelAnimationFrame(workspaceFrame);
+    stopTypebarStrike();
+    cancelLineFeed(false);
+    if (carriageStepTimer) clearTimeout(carriageStepTimer);
+    if (returnTimer) clearTimeout(returnTimer);
+    if (literaryTimer) clearTimeout(literaryTimer);
+    scroller?.removeEventListener("pointerdown", handleScrollPointerDown);
     resizeObserver?.disconnect();
     resizeObserver = null;
     editor?.destroy();
@@ -993,47 +1871,161 @@
 </script>
 
 <div
-  class:fit-page={fitMode === "page"}
-  class:focus-paragraph={focusMode === "paragraph"}
-  class:focus-sentence={focusMode === "sentence"}
-  class:writing-literary={writingStyle === "literary"}
-  class:writing-typewriter={writingStyle === "typewriter"}
+  class:fit-page={effectiveFitMode === "page"}
+  class:focus-paragraph={focusMode === "paragraph" && experience !== "flow"}
+  class:focus-sentence={focusMode === "sentence" && experience !== "flow"}
+  class:writing-literary={experience === "literary"}
+  class:writing-typewriter={experience === "typewriter"}
+  class:writing-flow={experience === "flow"}
+  class:typewriter-caret-visible={experience === "typewriter" && caretAlignedToStrike && Boolean(caretLine)}
+  class:carriage-returning={carriageReturning}
+  class:carriage-stepping={carriageStepping}
+  class:typebar-striking={typebarStriking}
+  class:line-feeding={lineFeeding}
+  class:platen-rolling={platenRolling}
+  class:platen-detenting={platenDetenting}
+  class:margin-warning={marginWarning}
   class="paper-editor-shell"
-  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", ${paperFontFallback};--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px`}
+  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", ${paperFontFallback};--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px;--carriage-origin:${carriageOrigin}px;--carriage-shift:${carriageShift}px;--carriage-track-duration:90ms;--carriage-step-duration:48ms;--carriage-return-duration:${carriageReturnMs}ms;--typewriter-scrollbar-gutter:${typewriterScrollbarGutter}px;--typewriter-paper-width:${PAGE_WIDTH * pageScale}px;--typewriter-strike-bottom:${typewriterStrikeBottom}px;--typewriter-strike-y:calc(100% - var(--typewriter-strike-bottom));--typewriter-line-aperture:${typewriterLineAperture}px;--typewriter-platen-angle:${platenAngle}deg;--typewriter-platen-surface:${platenSurfaceOffset}px;--typewriter-platen-intensity:${platenIntensity};--typewriter-paper-tension:${typewriterPaperTension}px;--typewriter-platen-pitch:${typewriterPlatenPitch}px;--flow-width:${flowWidth}px;--typewriter-top-runway:${typewriterTopRunway}px;--typewriter-bottom-runway:${typewriterBottomRunway}px;--flow-top-runway:${flowTopRunway}px;--flow-bottom-runway:${flowBottomRunway}px`}
 >
   <div class="paper-toolbar-note" aria-live="polite">
-    <span>에디토리얼 A4</span>
-    {#if activeSyntax}<small>{activeSyntax}</small>{/if}
+    <span>
+      {experience === "typewriter"
+          ? "타자기"
+        : experience === "literary"
+          ? "문학 서재"
+          : "몰입 캔버스"}
+      · {experience === "flow" ? "연속" : "A4"}
+    </span>
+    {#if activeFormatLabel}<small>{activeFormatLabel}</small>{/if}
     {#if layoutBusy}<small>조판 중…</small>{/if}
   </div>
 
+  {#if experience === "typewriter"}
+    <div
+      class:active={caretAlignedToStrike && Boolean(caretLine)}
+      class="typewriter-machine"
+      bind:this={typewriterMachine}
+      style={`--line-aperture:var(--typewriter-line-aperture);--strike-caret-height:${Math.max(16, Math.min(50, (caretLine?.height ?? 22) * pageScale - 2))}px`}
+      data-platen-detent={platenDetentSequence}
+      aria-hidden="true"
+    >
+      <div class="typewriter-frame-rear">
+        <span class="typewriter-rail-recess"></span>
+        <span class="typewriter-fixed-guide-rail"></span>
+      </div>
+      <div class="typewriter-typebasket"></div>
+      <div class="typewriter-carriage-layer typewriter-carriage-underlay">
+        <span class="typewriter-moving-channel"></span>
+        <span class="typewriter-bearing-shoe is-left"><i></i></span>
+        <span class="typewriter-bearing-shoe is-right"><i></i></span>
+      </div>
+      <div class="typewriter-frame-front">
+        <span class="typewriter-front-bevel"></span>
+        <span class="typewriter-typing-well"></span>
+      </div>
+      <div class="typewriter-carriage-layer typewriter-carriage-upper">
+        <span class="typewriter-carriage-side-plate is-left">
+          <i class="typewriter-platen-bearing"></i>
+          <i class="typewriter-bail-pivot"></i>
+        </span>
+        <span class="typewriter-carriage-side-plate is-right">
+          <i class="typewriter-platen-bearing"></i>
+          <i class="typewriter-bail-pivot"></i>
+        </span>
+        <span class="typewriter-paper-wrap"></span>
+        <span class="typewriter-platen"></span>
+        <span class="typewriter-paper-scale"></span>
+        <span class="typewriter-bail-arm is-left"><i></i></span>
+        <span class="typewriter-bail-arm is-right"><i></i></span>
+        <span class="typewriter-paper-bail">
+          <i class="typewriter-bail-roller is-first"></i>
+          <i class="typewriter-bail-roller is-second"></i>
+          <i class="typewriter-bail-roller is-third"></i>
+          <i class="typewriter-bail-roller is-fourth"></i>
+        </span>
+        <span class="typewriter-carriage-knob is-left"><i></i></span>
+        <span class="typewriter-carriage-knob is-right"><i></i></span>
+        <span class="typewriter-index-wheel"></span>
+        {#if platenDetenting}
+          {#key platenDetentSequence}
+            <span class="typewriter-detent-pawl"></span>
+          {/key}
+        {/if}
+        <span class="typewriter-return-lever">
+          <i></i>
+        </span>
+      </div>
+      <div class="typewriter-strike-rail">
+        <span class="typewriter-ribbon-band"></span>
+        <span class="typewriter-segment"></span>
+        {#each typebarStrikes as strike (strike.id)}
+          <span
+            class="typewriter-live-typebar"
+            style={`--strike-origin:${strike.origin}`}
+          >
+            <i></i>
+            <b></b>
+          </span>
+        {/each}
+        {#if caretAlignedToStrike && caretLine}
+          <span class="typewriter-strike-caret"></span>
+        {/if}
+        <span class="typewriter-type-guide">
+          <span class="typewriter-strike-pulse"></span>
+        </span>
+      </div>
+    </div>
+  {/if}
+
   <div
-    class:fit-page={fitMode === "page"}
+    class:fit-page={effectiveFitMode === "page"}
     class="paper-scroller"
     bind:this={scroller}
+    onwheel={handleFreeScrollIntent}
     onscroll={handleScroll}
   >
     <div class="paper-viewport" bind:this={viewport}>
       <div
-        class:fit-page={fitMode === "page"}
+        class:fit-page={effectiveFitMode === "page"}
         class="paper-window"
-        style={`width:${PAGE_WIDTH * pageScale}px;height:${visibleHeight * pageScale}px`}
+        bind:this={paperWindow}
+        style={`width:${experience === "flow" ? flowWidth : PAGE_WIDTH * pageScale}px;height:${experience === "flow" ? visibleHeight : visibleHeight * pageScale}px`}
       >
         <div
           class="paper-stack"
-          style={`width:${PAGE_WIDTH}px;min-height:${stackHeight}px;transform:translateY(-${fitMode === "page" ? viewedPageIndex * pagePeriod * pageScale : 0}px) scale(${pageScale})`}
+          style={experience === "flow"
+            ? `width:${flowWidth}px;min-height:${visibleHeight}px`
+            : `width:${PAGE_WIDTH}px;min-height:${stackHeight}px;transform:translateY(-${effectiveFitMode === "page" ? viewedPageIndex * pagePeriod * pageScale : 0}px) scale(${pageScale})`}
         >
           <div class="paper-sheet-layer" aria-hidden="true">
             {#each Array(pageCount) as _, index}
               <div class="paper-sheet"><span>{index + 1}</span></div>
             {/each}
           </div>
-          {#if activeWritingLine}
+          {#if experience === "literary" && caretLine}
             <div
-              class="active-writing-line"
-              style={`top:${activeWritingLine.top}px;height:${activeWritingLine.height}px`}
+              class="literary-caret-mark"
+              style={`top:${caretLine.top}px;height:${caretLine.height}px;left:${caretLine.bodyLeft - 20}px`}
               aria-hidden="true"
             ></div>
+            {#if literaryCompletion}
+              <div
+                class:paragraph={literaryCompletion === "paragraph"}
+                class="literary-completion-mark"
+                style={`top:${caretLine.top + caretLine.height / 2}px;left:${caretLine.bodyLeft - 34}px`}
+                aria-hidden="true"
+              ></div>
+            {/if}
+            <div
+              class="literary-folio-trail"
+              style={`top:${caretLine.pageIndex * pagePeriod + PAGE_HEIGHT - 106}px`}
+              aria-hidden="true"
+            >
+              {#each Array(Math.min(9, sessionParagraphs)) as _, index (`folio-${index}`)}
+                <span></span>
+              {/each}
+            </div>
           {/if}
           <div class="paper-editor-mount" bind:this={editorMount}></div>
         </div>
@@ -1041,12 +2033,28 @@
     </div>
   </div>
 
-  {#if fitMode === "page" && pageCount > 1}
+  {#if experience === "literary" && effectiveFitMode === "page" && pageCount > 1}
     <nav class="paper-page-navigator" aria-label="쪽 이동">
       <button aria-label="이전 쪽" disabled={viewedPageIndex === 0} onclick={() => changePage(-1)}>‹</button>
       <span>{viewedPageIndex + 1} / {pageCount}</span>
       <button aria-label="다음 쪽" disabled={viewedPageIndex >= pageCount - 1} onclick={() => changePage(1)}>›</button>
     </nav>
+  {/if}
+
+  {#if experience === "flow"}
+    <div class="flow-session-dock" aria-live="polite">
+      <div class="flow-session-copy">
+        <small>이번 세션</small>
+        <strong>{sessionWords}<span>단어</span></strong>
+        <strong>{sessionSentences}<span>문장</span></strong>
+        <strong>{sessionParagraphs}<span>문단</span></strong>
+      </div>
+      <div class="flow-session-trace" aria-hidden="true">
+        {#each sessionMarks as mark, index (`${index}-${mark}`)}
+          <span class:paragraph={mark === "paragraph"}></span>
+        {/each}
+      </div>
+    </div>
   {/if}
 
   <div class="paper-measure-host" bind:this={measureHost} aria-hidden="true"></div>
@@ -1066,6 +2074,26 @@
       var(--desk);
   }
 
+  .paper-editor-shell.writing-typewriter {
+    background: var(--typewriter-desk-surface);
+    box-shadow:
+      inset 0 1px var(--typewriter-desk-inset-top),
+      inset 0 -40px 96px var(--typewriter-desk-inset-bottom);
+  }
+
+  .paper-editor-shell.writing-literary {
+    background:
+      radial-gradient(ellipse at 50% -4%, rgba(255, 243, 215, 0.34), transparent 54%),
+      linear-gradient(120deg, rgba(117, 74, 43, 0.1), transparent 34%),
+      color-mix(in srgb, var(--desk) 85%, #9b7655);
+  }
+
+  .paper-editor-shell.writing-flow {
+    background:
+      radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--surface-raised) 38%, transparent), transparent 62%),
+      color-mix(in srgb, var(--desk) 92%, #aab1ad);
+  }
+
   .paper-scroller,
   .paper-viewport {
     width: 100%;
@@ -1080,6 +2108,32 @@
     scrollbar-gutter: stable;
   }
 
+  .writing-typewriter .paper-scroller {
+    --typewriter-paper-mask-start: calc(
+      var(--typewriter-strike-y) + var(--typewriter-line-aperture) / 2
+    );
+    --typewriter-paper-mask-end: calc(
+      var(--typewriter-paper-mask-start) + 14px
+    );
+    overflow-x: hidden;
+    -webkit-mask-image: linear-gradient(
+      180deg,
+      #000 0,
+      #000 var(--typewriter-paper-mask-start),
+      transparent var(--typewriter-paper-mask-end)
+    );
+    mask-image: linear-gradient(
+      180deg,
+      #000 0,
+      #000 var(--typewriter-paper-mask-start),
+      transparent var(--typewriter-paper-mask-end)
+    );
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+  }
+
   .paper-scroller.fit-page {
     overflow: hidden;
     scrollbar-gutter: auto;
@@ -1092,6 +2146,16 @@
     padding: 48px 24px 100px;
   }
 
+  .writing-typewriter .paper-viewport {
+    padding-top: var(--typewriter-top-runway);
+    padding-bottom: var(--typewriter-bottom-runway);
+  }
+
+  .writing-flow .paper-viewport {
+    align-items: flex-start;
+    padding: var(--flow-top-runway) 32px var(--flow-bottom-runway);
+  }
+
   .paper-viewport:has(.paper-window.fit-page) {
     align-items: center;
     padding: 16px;
@@ -1100,6 +2164,21 @@
   .paper-window {
     position: relative;
     flex: 0 0 auto;
+  }
+
+  .writing-typewriter .paper-window {
+    transform: translate3d(var(--carriage-shift), 0, 0);
+    transition: transform var(--carriage-track-duration) cubic-bezier(0.2, 0.72, 0.28, 1);
+    will-change: transform;
+  }
+
+  .writing-typewriter.carriage-stepping .paper-window {
+    transition: transform var(--carriage-step-duration) cubic-bezier(0.18, 0.78, 0.24, 1);
+  }
+
+  .writing-typewriter.carriage-returning .paper-window {
+    transition-duration: var(--carriage-return-duration);
+    transition-timing-function: cubic-bezier(0.16, 0.92, 0.26, 1.08);
   }
 
   .paper-window.fit-page { overflow: hidden; }
@@ -1133,6 +2212,29 @@
     box-shadow: var(--shadow-paper);
   }
 
+  .writing-typewriter .paper-sheet {
+    border-color: rgba(49, 45, 39, 0.32);
+    background-image:
+      linear-gradient(rgba(83, 70, 52, 0.018), rgba(83, 70, 52, 0.018)),
+      var(--hanji-texture);
+    box-shadow:
+      0 1px 1px rgba(0, 0, 0, 0.24),
+      0 20px 58px rgba(0, 0, 0, 0.38);
+  }
+
+  .writing-literary .paper-sheet {
+    border-color: rgba(119, 84, 53, 0.16);
+    background-color: color-mix(in srgb, var(--sheet) 94%, #fff5dc);
+    background-image:
+      linear-gradient(90deg, rgba(139, 99, 62, 0.018), transparent 18%, transparent 82%, rgba(139, 99, 62, 0.018)),
+      var(--hanji-texture);
+    box-shadow:
+      0 1px 2px rgba(77, 54, 37, 0.12),
+      0 28px 72px rgba(77, 54, 37, 0.22);
+  }
+
+  .writing-flow .paper-sheet-layer { display: none; }
+
   .paper-sheet span {
     position: absolute;
     right: 0;
@@ -1150,42 +2252,1471 @@
     min-height: 297mm;
   }
 
-  .active-writing-line {
+  .writing-flow .paper-editor-mount {
+    width: 100%;
+    min-height: 100%;
+  }
+
+  /*
+   * A full-scale portable typewriter cropped by the bottom of the viewport.
+   * The carriage follows the paper while the type guide and chassis stay fixed.
+   */
+  .typewriter-machine {
+    --typewriter-enamel: #294744;
+    --typewriter-enamel-deep: #172824;
+    --typewriter-enamel-light: #466963;
+    --typewriter-rubber: #111413;
+    --typewriter-metal: #b8bcb7;
+    --typewriter-metal-deep: #686f6c;
+    --typewriter-metal-dark: #343a37;
+    --typewriter-ribbon: #171617;
+    --typewriter-grip: #5b2f2a;
+    --typewriter-warning: #d19a53;
     position: absolute;
-    z-index: 1;
-    left: 20mm;
-    box-sizing: border-box;
-    width: 170mm;
+    z-index: 6;
+    inset: 0;
+    right: var(--typewriter-scrollbar-gutter);
+    overflow: hidden;
+    isolation: isolate;
     pointer-events: none;
   }
 
-  .writing-typewriter .active-writing-line {
-    border-top: 0.5px solid color-mix(in srgb, var(--writing-graphite) 10%, transparent);
-    border-bottom: 0.5px solid color-mix(in srgb, var(--writing-graphite) 12%, transparent);
-    background: color-mix(in srgb, var(--writing-graphite) 3%, transparent);
+  .typewriter-typebasket {
+    position: absolute;
+    z-index: 3;
+    top: calc(var(--typewriter-strike-y) + var(--line-aperture) / 2 - 4px);
+    left: 50%;
+    width: 120px;
+    height: 36px;
+    transform: translate(-50%, 9px) scale(0.94);
+    clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%);
+    background:
+      repeating-conic-gradient(from 248deg at 50% 118%, transparent 0deg 7deg, rgba(184, 188, 183, 0.42) 7.2deg 8deg),
+      radial-gradient(ellipse at 50% 112%, #0c100f 0 40%, #424a47 42% 52%, transparent 54%);
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.48));
+    opacity: 0;
+    transition: opacity 54ms ease-out, transform 72ms cubic-bezier(0.2, 0.76, 0.28, 1);
   }
 
-  .writing-typewriter .active-writing-line::before,
-  .writing-typewriter .active-writing-line::after {
+  .typebar-striking .typewriter-typebasket {
+    transform: translate(-50%, 0) scale(1);
+    opacity: 0.42;
+  }
+
+  .typewriter-paper-wrap {
+    position: absolute;
+    z-index: 2;
+    top: calc(var(--line-aperture) / 2 + 3px);
+    right: 44px;
+    left: 44px;
+    height: 22px;
+    transform-origin: top center;
+    border-radius: 0 0 48% 48% / 0 0 15px 15px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(117, 105, 84, 0.07) 48%, rgba(46, 42, 35, 0.2)),
+      var(--sheet);
+    box-shadow:
+      inset 0 -6px 8px rgba(44, 39, 31, 0.16),
+      0 1px 2px rgba(0, 0, 0, 0.2);
+  }
+
+  .typewriter-platen {
+    position: absolute;
+    z-index: 3;
+    top: calc(var(--line-aperture) / 2 + 7px);
+    right: 26px;
+    left: 26px;
+    height: 18px;
+    border: 1px solid #080a0b;
+    border-radius: 999px;
+    background:
+      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 4px),
+      linear-gradient(180deg, #333735 0, #1d211f 27%, var(--typewriter-rubber) 66%, #272c29 100%);
+    background-size: auto 8px, auto;
+    box-shadow:
+      inset 0 2px 2px rgba(255, 255, 255, 0.09),
+      inset 0 -2px 3px rgba(0, 0, 0, 0.9),
+      0 2px 4px rgba(0, 0, 0, 0.32);
+  }
+
+  .typewriter-paper-scale {
+    position: absolute;
+    z-index: 4;
+    top: calc(var(--line-aperture) / 2 + 1px);
+    right: 44px;
+    left: 44px;
+    height: 8px;
+    border-top: 1px solid rgba(207, 211, 207, 0.72);
+    background: repeating-linear-gradient(90deg, rgba(210, 214, 211, 0.55) 0 1px, transparent 1px 18px);
+    mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent);
+    opacity: 0.42;
+  }
+
+  .typewriter-paper-bail {
+    position: absolute;
+    z-index: 6;
+    top: calc(var(--line-aperture) / -2 - 13px);
+    right: 44px;
+    left: 44px;
+    height: 2px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #d4d7d3, #777d79 62%, #424844);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.32),
+      inset 0 1px rgba(255, 255, 255, 0.64);
+  }
+
+  .typewriter-bail-roller {
+    position: absolute;
+    top: -4px;
+    width: 31px;
+    height: 10px;
+    transform: translateX(-50%);
+    border: 1px solid #111516;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #424744, #141716 56%, #292e2b);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.11),
+      0 1px 2px rgba(0, 0, 0, 0.28);
+  }
+
+  .typewriter-bail-roller.is-first { left: 12%; }
+  .typewriter-bail-roller.is-second { left: 37%; }
+  .typewriter-bail-roller.is-third { left: 63%; }
+  .typewriter-bail-roller.is-fourth { left: 88%; }
+
+  .typewriter-carriage-knob {
+    position: absolute;
+    z-index: 4;
+    top: calc(var(--line-aperture) / 2 + 8px);
+    width: 29px;
+    height: 22px;
+    border: 1px solid #080a0b;
+    border-radius: 8px;
+    background:
+      repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 4px),
+      linear-gradient(180deg, #303432, var(--typewriter-rubber) 60%, #232825);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.12),
+      0 2px 5px rgba(0, 0, 0, 0.42);
+  }
+
+  .typewriter-carriage-knob::before {
     position: absolute;
     top: 50%;
-    width: 2mm;
-    height: 0.5px;
-    background: color-mix(in srgb, var(--writing-graphite) 22%, transparent);
+    left: 50%;
+    width: 9px;
+    height: 9px;
+    transform: translate(-50%, -50%);
+    border: 1px solid var(--typewriter-metal-deep);
+    border-radius: 50%;
+    background: linear-gradient(145deg, #c3c7c2, #646b67 54%, #242a27);
     content: "";
   }
 
-  .writing-typewriter .active-writing-line::before { right: 100%; }
-  .writing-typewriter .active-writing-line::after { left: 100%; }
+  .typewriter-carriage-knob.is-left { left: -14px; }
+  .typewriter-carriage-knob.is-right { right: -14px; }
 
-  .writing-literary .active-writing-line::before {
+  .typewriter-return-lever {
     position: absolute;
-    top: 50%;
-    right: calc(100% + 2mm);
-    width: 4mm;
-    height: 0.65px;
-    background: color-mix(in srgb, var(--writing-margin) 66%, transparent);
+    z-index: 2;
+    top: calc(var(--line-aperture) / 2 + 22px);
+    left: 16px;
+    width: 128px;
+    height: 4px;
+    transform: translateX(-92%) rotate(-10deg);
+    transform-origin: right center;
+    border: 1px solid #444b48;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #d9dcd8, #969c98 46%, #5b625f);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.62),
+      0 2px 4px rgba(0, 0, 0, 0.32);
+  }
+
+  .typewriter-return-lever i {
+    position: absolute;
+    top: -5px;
+    left: -3px;
+    width: 31px;
+    height: 12px;
+    border: 1px solid #0c0f10;
+    border-radius: 9px 5px 5px 9px;
+    background: linear-gradient(180deg, #76443c, var(--typewriter-grip) 58%, #38201d);
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.12);
+  }
+
+  .carriage-returning .typewriter-return-lever {
+    animation: typewriter-lever-return var(--carriage-return-duration) cubic-bezier(0.2, 0.74, 0.25, 1) both;
+  }
+
+  .typewriter-strike-rail {
+    position: absolute;
+    z-index: 7;
+    top: var(--typewriter-strike-y);
+    left: 50%;
+    width: min(1020px, calc(100% - 34px));
+    height: var(--line-aperture);
+    transform: translate(-50%, -50%);
+    transition:
+      opacity 140ms ease,
+      filter 140ms ease;
+  }
+
+  .typewriter-strike-rail::before {
+    position: absolute;
+    right: 38%;
+    bottom: -8px;
+    left: 38%;
+    height: 9px;
+    background: radial-gradient(ellipse at 50% 0, rgba(8, 12, 11, 0.18), transparent 68%);
     content: "";
+  }
+
+  .typewriter-strike-rail::after {
+    position: absolute;
+    right: 16%;
+    bottom: -11px;
+    left: 16%;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(184, 188, 183, 0.14) 12%,
+      rgba(184, 188, 183, 0.32) 50%,
+      rgba(184, 188, 183, 0.14) 88%,
+      transparent
+    );
+    content: "";
+  }
+
+  .typewriter-ribbon-band {
+    position: absolute;
+    z-index: 1;
+    right: 19%;
+    bottom: -11px;
+    left: 19%;
+    height: 5px;
+    border-top: 1px solid rgba(107, 70, 62, 0.38);
+    border-bottom: 1px solid #080a0b;
+    background:
+      linear-gradient(180deg, #282222, var(--typewriter-ribbon) 62%, #0b0c0b);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
+    opacity: 0.82;
+  }
+
+  .typewriter-segment {
+    position: absolute;
+    z-index: 2;
+    bottom: -29px;
+    left: 50%;
+    width: 88px;
+    height: 20px;
+    transform: translateX(-50%);
+    clip-path: polygon(9% 100%, 0 32%, 12% 5%, 35% 0, 65% 0, 88% 5%, 100% 32%, 91% 100%);
+    border-top: 1px solid rgba(207, 211, 206, 0.48);
+    background: linear-gradient(180deg, #777e7a 0, #3e4643 22%, #171d1b 72%, #0e1311 100%);
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.46));
+    opacity: 0.86;
+  }
+
+  .typewriter-live-typebar {
+    --typebar-rest-angle: calc(var(--strike-origin) * -8deg);
+    --typebar-impact-angle: calc(var(--strike-origin) * -38deg);
+    position: absolute;
+    z-index: 3;
+    bottom: -82px;
+    left: calc(50% + var(--strike-origin) * 54px);
+    width: 4px;
+    height: 82px;
+    transform-origin: 50% 100%;
+    border: 1px solid #404845;
+    border-radius: 3px 3px 1px 1px;
+    background: linear-gradient(90deg, #363d3a, var(--typewriter-metal) 48%, #515854);
+    box-shadow:
+      inset 1px 0 rgba(255, 255, 255, 0.18),
+      0 2px 3px rgba(0, 0, 0, 0.45);
+    animation: typewriter-typebar-strike 96ms cubic-bezier(0.2, 0.84, 0.26, 1) both;
+  }
+
+  .typewriter-live-typebar i {
+    position: absolute;
+    top: -7px;
+    left: 50%;
+    width: 15px;
+    height: 8px;
+    transform: translateX(-50%);
+    border: 1px solid #292f2c;
+    border-radius: 2px;
+    background:
+      linear-gradient(180deg, #c9ccc8, #777e7a 46%, #333936),
+      var(--typewriter-metal);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.4),
+      0 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  .typewriter-live-typebar b {
+    position: absolute;
+    top: -13px;
+    left: 50%;
+    width: 23px;
+    height: 10px;
+    transform: translateX(-50%);
+    border-top: 1px solid rgba(91, 47, 42, 0.94);
+    border-right: 1px solid rgba(177, 184, 180, 0.62);
+    border-left: 1px solid rgba(177, 184, 180, 0.62);
+    border-radius: 7px 7px 2px 2px;
+    opacity: 0;
+    animation: typewriter-ribbon-vibrator 96ms ease-out both;
+  }
+
+  .typewriter-machine.active .typewriter-strike-rail { opacity: 1; }
+
+  .typewriter-strike-caret {
+    position: absolute;
+    z-index: 5;
+    top: 50%;
+    left: 50%;
+    width: 1.5px;
+    height: var(--strike-caret-height);
+    transform: translate(-50%, -50%);
+    border-radius: 1px;
+    background: #b9bfbc;
+    box-shadow: 0 0 4px rgba(185, 191, 188, 0.18);
+  }
+
+  .typewriter-type-guide {
+    position: absolute;
+    z-index: 4;
+    bottom: -25px;
+    left: 50%;
+    width: 36px;
+    height: 25px;
+    transform: translateX(-50%);
+    clip-path: polygon(0 100%, 10% 25%, 35% 25%, 43% 0, 57% 0, 65% 25%, 90% 25%, 100% 100%);
+    background: linear-gradient(90deg, #202624, #6f7773 25%, #b8bcb7 49%, #686f6c 73%, #191f1d);
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
+    transition: filter 120ms ease;
+  }
+
+  .typewriter-strike-pulse {
+    position: absolute;
+    z-index: 2;
+    top: 1px;
+    left: 50%;
+    width: 8px;
+    height: 3px;
+    transform: translateX(-50%);
+    border-radius: 1px;
+    background: var(--typewriter-metal-deep);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+    opacity: 0.62;
+    transition:
+      background-color 120ms ease,
+      box-shadow 120ms ease,
+      opacity 120ms ease;
+  }
+
+  .typewriter-machine.active .typewriter-strike-pulse { opacity: 0.88; }
+
+  .typebar-striking .typewriter-strike-pulse {
+    background: var(--typewriter-metal);
+    box-shadow: 0 -1px 4px rgba(224, 231, 226, 0.22);
+  }
+
+  .margin-warning .typewriter-strike-pulse {
+    background: var(--typewriter-warning);
+    box-shadow: 0 0 0 3px rgba(201, 149, 82, 0.12);
+  }
+
+  .line-feeding .typewriter-platen {
+    animation: typewriter-platen-feed 160ms linear both;
+  }
+
+  .line-feeding .typewriter-paper-wrap {
+    animation: typewriter-paper-feed 160ms cubic-bezier(0.2, 0.72, 0.26, 1) both;
+  }
+
+  .line-feeding .typewriter-carriage-knob::before {
+    animation: typewriter-knob-feed 160ms linear both;
+  }
+
+  @keyframes typewriter-typebar-strike {
+    0% {
+      transform: translateX(-50%) rotate(var(--typebar-rest-angle)) translateY(18px) scaleY(0.88);
+      opacity: 0.34;
+    }
+    35% {
+      transform: translateX(-50%) rotate(var(--typebar-impact-angle)) translateY(-3px) scaleY(1);
+      opacity: 1;
+    }
+    47%, 58% {
+      transform: translateX(-50%) rotate(var(--typebar-impact-angle)) translateY(-7px) scaleY(1.02);
+      opacity: 1;
+    }
+    100% {
+      transform: translateX(-50%) rotate(var(--typebar-rest-angle)) translateY(18px) scaleY(0.88);
+      opacity: 0;
+    }
+  }
+
+  @keyframes typewriter-ribbon-vibrator {
+    0%, 26%, 100% { transform: translateX(-50%) translateY(6px); opacity: 0; }
+    43%, 60% { transform: translateX(-50%) translateY(-2px); opacity: 1; }
+  }
+
+  @keyframes typewriter-lever-return {
+    0% { transform: translateX(-92%) rotate(-10deg); }
+    44% { transform: translateX(-92%) rotate(-2deg); }
+    100% { transform: translateX(-92%) rotate(-10deg); }
+  }
+
+  @keyframes typewriter-platen-feed {
+    from { background-position: 0 0, 0 0; }
+    to { background-position: 0 8px, 0 0; }
+  }
+
+  @keyframes typewriter-paper-feed {
+    0% { transform: translateY(4px) scaleY(0.92); filter: brightness(0.94); }
+    100% { transform: translateY(0) scaleY(1); filter: brightness(1); }
+  }
+
+  @keyframes typewriter-knob-feed {
+    from { transform: translate(-50%, -50%) rotate(0deg); }
+    to { transform: translate(-50%, -50%) rotate(24deg); }
+  }
+
+  /*
+   * Contemporary precision-instrument skin. The paper and carriage mechanics
+   * stay legible, while colored enamel and decorative vintage hardware are
+   * deliberately removed from the visible machine edge.
+   */
+  .typewriter-machine {
+    --typewriter-enamel: var(--typewriter-body);
+    --typewriter-enamel-deep: var(--typewriter-body-deep);
+    --typewriter-enamel-light: var(--typewriter-body-light);
+    --typewriter-rubber: #080a0b;
+    --typewriter-metal: #d8d8d3;
+    --typewriter-metal-deep: #808583;
+    --typewriter-metal-dark: #3e4445;
+    --typewriter-ribbon: #090a0b;
+    --typewriter-grip: #121516;
+    --typewriter-warning: #c79a54;
+  }
+
+  .typewriter-typebasket {
+    top: calc(var(--typewriter-strike-y) + var(--line-aperture) / 2 - 3px);
+    width: 104px;
+    height: 31px;
+    transform: translate(-50%, 10px) scale(0.92);
+    background:
+      repeating-conic-gradient(
+        from 250deg at 50% 118%,
+        transparent 0deg 8.5deg,
+        rgba(192, 194, 190, 0.48) 8.8deg 9.6deg
+      ),
+      radial-gradient(ellipse at 50% 114%, #080a0b 0 42%, #343a3b 44% 51%, transparent 53%);
+    opacity: 0;
+  }
+
+  .typebar-striking .typewriter-typebasket {
+    transform: translate(-50%, 1px) scale(1);
+    opacity: 0.34;
+  }
+
+  .typewriter-paper-wrap {
+    top: calc(var(--line-aperture) / 2 + 3px);
+    right: 43px;
+    left: 43px;
+    height: 23px;
+    transform: translateY(var(--typewriter-paper-tension));
+    border-radius: 0 0 50% 50% / 0 0 13px 13px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(95, 88, 75, 0.05) 50%, rgba(24, 23, 21, 0.22)),
+      var(--sheet);
+    box-shadow:
+      inset 0 -7px 8px rgba(35, 32, 27, 0.17),
+      0 1px 2px rgba(0, 0, 0, 0.24);
+    transition: transform 72ms cubic-bezier(0.2, 0.72, 0.28, 1);
+  }
+
+  .typewriter-platen {
+    top: calc(var(--line-aperture) / 2 + 6px);
+    right: 25px;
+    left: 25px;
+    height: 20px;
+    border-color: #020303;
+    background:
+      repeating-linear-gradient(
+        0deg,
+        rgba(255, 255, 255, 0.026) 0 1px,
+        transparent 1px 5px
+      ),
+      linear-gradient(180deg, #323638 0, #171a1b 25%, #070809 62%, #202425 100%);
+    background-position:
+      0 calc(0px - var(--typewriter-platen-surface)),
+      0 0;
+    background-size: auto 10px, auto;
+    box-shadow:
+      inset 0 2px 2px rgba(255, 255, 255, 0.1),
+      inset 0 -3px 4px rgba(0, 0, 0, 0.94),
+      0 2px 5px rgba(0, 0, 0, 0.44);
+  }
+
+  .typewriter-platen::after {
+    position: absolute;
+    top: 3px;
+    right: 14px;
+    left: 14px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(231, 232, 227, 0.12), transparent);
+    content: "";
+  }
+
+  .typewriter-paper-scale {
+    top: calc(var(--line-aperture) / 2);
+    right: 43px;
+    left: 43px;
+    height: 7px;
+    border-color: rgba(219, 220, 216, 0.62);
+    background: repeating-linear-gradient(
+      90deg,
+      rgba(218, 219, 214, 0.5) 0 1px,
+      transparent 1px 12px,
+      rgba(218, 219, 214, 0.3) 12px 13px,
+      transparent 13px 24px
+    );
+    opacity: 0.46;
+  }
+
+  .typewriter-paper-bail {
+    top: calc(var(--line-aperture) / -2 - 12px);
+    right: 42px;
+    left: 42px;
+    height: 2px;
+    background: linear-gradient(180deg, #eeeeea, #9a9e9b 58%, #4f5555);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.36),
+      inset 0 1px rgba(255, 255, 255, 0.7);
+  }
+
+  .typewriter-bail-roller {
+    top: -3px;
+    width: 27px;
+    height: 8px;
+    border-color: #050607;
+    background:
+      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px),
+      linear-gradient(180deg, #303435, #090b0c 58%, #1d2021);
+    background-position:
+      0 calc(0px - var(--typewriter-platen-surface)),
+      0 0;
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.1),
+      0 1px 2px rgba(0, 0, 0, 0.36);
+  }
+
+  .typewriter-carriage-knob {
+    top: calc(var(--line-aperture) / 2 + 3px);
+    width: 30px;
+    height: 30px;
+    border-color: #040506;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 30%, #34393a, #151819 46%, #080a0b 78%);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.12),
+      inset 0 -2px 3px rgba(0, 0, 0, 0.72),
+      0 2px 6px rgba(0, 0, 0, 0.5);
+  }
+
+  .typewriter-carriage-knob::before { display: none; }
+
+  .typewriter-carriage-knob.is-left { left: -13px; }
+  .typewriter-carriage-knob.is-right { right: -13px; }
+
+  .typewriter-carriage-knob > i {
+    position: absolute;
+    inset: 4px;
+    transform: rotate(var(--typewriter-platen-angle));
+    border: 1px solid #666c6b;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle, #232728 0 31%, transparent 34%),
+      conic-gradient(from -2deg, #d9d9d4 0 4deg, #363b3c 4deg 356deg, #d9d9d4 356deg);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.1),
+      0 0 0 1px rgba(0, 0, 0, 0.35);
+  }
+
+  .typewriter-index-wheel {
+    position: absolute;
+    z-index: 5;
+    top: calc(var(--line-aperture) / 2 + 9px);
+    left: 20px;
+    width: 16px;
+    height: 16px;
+    transform: rotate(var(--typewriter-platen-angle));
+    border: 1px solid #585e5d;
+    border-radius: 50%;
+    background: repeating-conic-gradient(#8c918e 0 3deg, #252a2b 3deg 15deg);
+    box-shadow:
+      inset 0 0 0 4px #111415,
+      0 1px 2px rgba(0, 0, 0, 0.5);
+    opacity: 0.22;
+    transition: opacity 72ms ease;
+  }
+
+  .typewriter-detent-pawl {
+    position: absolute;
+    z-index: 7;
+    top: calc(var(--line-aperture) / 2 + 3px);
+    left: 29px;
+    width: 20px;
+    height: 3px;
+    transform-origin: left center;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #deded9, #777d7b 64%, #393e3f);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    animation: typewriter-detent-release 88ms cubic-bezier(0.2, 0.76, 0.22, 1) both;
+  }
+
+  .platen-rolling .typewriter-index-wheel { opacity: 0.58; }
+
+  .platen-detenting .typewriter-index-wheel {
+    opacity: 0.88;
+    animation: typewriter-index-seat 88ms cubic-bezier(0.18, 0.8, 0.24, 1) both;
+  }
+
+  .typewriter-return-lever {
+    top: calc(var(--line-aperture) / 2 + 22px);
+    left: 14px;
+    width: 122px;
+    height: 3px;
+    border: 0;
+    background: linear-gradient(180deg, #e2e2dd, #989d9a 48%, #555b5a);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.72),
+      0 2px 3px rgba(0, 0, 0, 0.36);
+  }
+
+  .typewriter-return-lever i {
+    top: -4px;
+    left: -2px;
+    width: 29px;
+    height: 10px;
+    border-color: #050607;
+    border-radius: 8px 3px 3px 8px;
+    background: linear-gradient(180deg, #292d2f, #111415 62%, #090b0c);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.1),
+      0 1px 2px rgba(0, 0, 0, 0.44);
+  }
+
+  .typewriter-strike-rail::before {
+    right: 44%;
+    bottom: -8px;
+    left: 44%;
+    height: 8px;
+    background: radial-gradient(ellipse at 50% 0, rgba(0, 0, 0, 0.28), transparent 72%);
+  }
+
+  .typewriter-strike-rail::after { display: none; }
+
+  .typewriter-ribbon-band {
+    right: 24%;
+    bottom: -9px;
+    left: 24%;
+    height: 3px;
+    border-color: #020303;
+    background: linear-gradient(180deg, #202324, #070809 68%);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.46);
+    opacity: 0.9;
+  }
+
+  .typewriter-segment {
+    bottom: -25px;
+    width: 74px;
+    height: 16px;
+    border-color: rgba(222, 223, 218, 0.52);
+    background: linear-gradient(180deg, #858b88 0, #444a4a 26%, #171b1c 72%, #090b0c 100%);
+    opacity: 0.78;
+  }
+
+  .typewriter-live-typebar {
+    bottom: -78px;
+    width: 3px;
+    height: 78px;
+    border-color: #4e5453;
+    background: linear-gradient(90deg, #3c4241, #d0d1cc 48%, #555b59);
+    box-shadow:
+      inset 1px 0 rgba(255, 255, 255, 0.22),
+      0 2px 3px rgba(0, 0, 0, 0.5);
+  }
+
+  .typewriter-live-typebar i {
+    border-color: #343938;
+    background: linear-gradient(180deg, #e0e0db, #858a87 48%, #373c3c);
+  }
+
+  .typewriter-live-typebar b {
+    border-top-color: rgba(20, 22, 23, 0.96);
+    border-right-color: rgba(206, 208, 203, 0.66);
+    border-left-color: rgba(206, 208, 203, 0.66);
+  }
+
+  .typewriter-strike-caret {
+    width: 1px;
+    background: #555b5a;
+    box-shadow: 0 0 0 1px rgba(232, 232, 227, 0.12);
+  }
+
+  .typewriter-type-guide {
+    bottom: -24px;
+    width: 32px;
+    height: 25px;
+    clip-path: none;
+    border: 0;
+    border-bottom: 3px solid #696f6d;
+    border-radius: 0 0 5px 5px;
+    background: transparent;
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
+  }
+
+  .typewriter-type-guide::before {
+    position: absolute;
+    top: 1px;
+    bottom: 0;
+    left: 2px;
+    width: 5px;
+    clip-path: polygon(38% 0, 100% 0, 100% 100%, 0 100%, 0 22%);
+    background: linear-gradient(90deg, #777d7b, #deded9 56%, #767c7a);
+    content: "";
+  }
+
+  .typewriter-type-guide::after {
+    position: absolute;
+    top: 1px;
+    right: 2px;
+    bottom: 0;
+    width: 5px;
+    clip-path: polygon(0 0, 62% 0, 100% 22%, 100% 100%, 0 100%);
+    background: linear-gradient(90deg, #6b716f, #d1d1cc 48%, #686e6c);
+    content: "";
+  }
+
+  .typewriter-strike-pulse {
+    top: 2px;
+    width: 7px;
+    height: 2px;
+    background: #676d6b;
+    box-shadow: none;
+  }
+
+  .typebar-striking .typewriter-strike-pulse {
+    background: #e0e0db;
+    box-shadow: 0 -1px 4px rgba(231, 232, 227, 0.3);
+  }
+
+  .line-feeding .typewriter-platen,
+  .line-feeding .typewriter-paper-wrap,
+  .line-feeding .typewriter-carriage-knob::before {
+    animation: none;
+  }
+
+  @keyframes typewriter-detent-release {
+    0% { transform: rotate(-7deg) translateY(2px); opacity: 0.48; }
+    42% { transform: rotate(8deg) translateY(-1px); opacity: 1; }
+    72% { transform: rotate(-2deg); opacity: 0.9; }
+    100% { transform: rotate(0); opacity: 0; }
+  }
+
+  @keyframes typewriter-index-seat {
+    0% { filter: brightness(0.86); }
+    48% { filter: brightness(1.2); }
+    100% { filter: brightness(1); }
+  }
+
+  /* A cropped precision rail supports the moving carriage without exposing a body shell. */
+  .typewriter-machine {
+    --typewriter-frame-width: min(940px, calc(100% - 18px));
+    --typewriter-carriage-width: calc(var(--typewriter-paper-width) + 104px);
+    --typewriter-frame-top: calc(
+      var(--typewriter-strike-y) + var(--line-aperture) / 2 + 13px
+    );
+    --typewriter-platen-center: calc(var(--line-aperture) / 2 + 16px);
+    --typewriter-frame-surface: var(--typewriter-chassis-surface);
+    --typewriter-frame-facet: var(--typewriter-chassis-deck-overlay);
+    --typewriter-frame-face: var(--typewriter-chassis-front-overlay);
+    --typewriter-carriage-surface: var(--typewriter-endcap-surface);
+    --typewriter-bearing-surface: var(--typewriter-race-surface);
+    --typewriter-channel-surface: var(--typewriter-support-surface);
+  }
+
+  .typewriter-frame-rear,
+  .typewriter-frame-front {
+    position: absolute;
+    left: 50%;
+    width: var(--typewriter-frame-width);
+    transform: translateX(-50%);
+  }
+
+  .typewriter-frame-rear {
+    z-index: 2;
+    top: var(--typewriter-frame-top);
+    height: 18px;
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--typewriter-body-deep) 78%, #000) 0 24%,
+      var(--typewriter-frame-surface) 25% 100%
+    );
+    box-shadow:
+      inset 0 1px var(--typewriter-body-inset-highlight),
+      inset 0 -5px 7px -5px var(--typewriter-body-inset-shadow);
+    filter: drop-shadow(0 -2px 5px var(--typewriter-body-cast-shadow));
+  }
+
+  .typewriter-rail-recess {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    right: 3.2%;
+    left: 3.2%;
+    height: 12px;
+    clip-path: polygon(0.5% 0, 99.5% 0, 100% 72%, 99.2% 100%, 0.8% 100%, 0 72%);
+    background: linear-gradient(
+      180deg,
+      rgba(0, 0, 0, 0.78),
+      color-mix(in srgb, var(--typewriter-body-deep) 84%, #000) 64%,
+      rgba(255, 255, 255, 0.035)
+    );
+    box-shadow:
+      inset 0 4px 6px rgba(0, 0, 0, 0.72),
+      0 1px var(--typewriter-body-inset-highlight);
+  }
+
+  .typewriter-fixed-guide-rail {
+    position: absolute;
+    z-index: 3;
+    top: 3px;
+    right: 4.6%;
+    left: 4.6%;
+    height: 6px;
+    border-radius: 2px;
+    background: var(--typewriter-bearing-surface);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.36),
+      inset 0 -2px 2px rgba(0, 0, 0, 0.8),
+      0 3px 5px rgba(0, 0, 0, 0.54);
+  }
+
+  .typewriter-carriage-layer {
+    position: absolute;
+    top: var(--typewriter-strike-y);
+    left: calc(50% + var(--carriage-origin));
+    width: var(--typewriter-carriage-width);
+    height: 1px;
+    transform: translate3d(calc(-50% + var(--carriage-shift)), 0, 0);
+    transition: transform var(--carriage-track-duration) cubic-bezier(0.2, 0.72, 0.28, 1);
+    will-change: transform;
+  }
+
+  .typewriter-carriage-underlay { z-index: 3; }
+  .typewriter-carriage-upper { z-index: 5; }
+
+  .writing-typewriter.carriage-stepping .typewriter-carriage-layer {
+    transition: transform var(--carriage-step-duration) cubic-bezier(0.18, 0.78, 0.24, 1);
+  }
+
+  .writing-typewriter.carriage-returning .typewriter-carriage-layer {
+    transition-duration: var(--carriage-return-duration);
+    transition-timing-function: cubic-bezier(0.16, 0.92, 0.26, 1.08);
+  }
+
+  .typewriter-moving-channel {
+    position: absolute;
+    top: calc(var(--line-aperture) / 2 + 17px);
+    right: 17px;
+    left: 17px;
+    height: 9px;
+    clip-path: polygon(0 18%, 1.2% 0, 98.8% 0, 100% 18%, 99.2% 100%, 0.8% 100%);
+    background: var(--typewriter-channel-surface);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.24),
+      inset 0 -4px 5px rgba(0, 0, 0, 0.68),
+      0 4px 7px var(--typewriter-contact-shadow);
+  }
+
+  .typewriter-moving-channel::before {
+    position: absolute;
+    top: 2px;
+    right: 12px;
+    left: 12px;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(232, 233, 228, 0.42) 8%,
+      rgba(232, 233, 228, 0.18) 50%,
+      rgba(232, 233, 228, 0.42) 92%,
+      transparent
+    );
+    content: "";
+  }
+
+  .typewriter-bearing-shoe {
+    position: absolute;
+    z-index: 2;
+    top: calc(var(--line-aperture) / 2 + 19px);
+    width: 76px;
+    height: 11px;
+    clip-path: polygon(7% 0, 93% 0, 100% 38%, 86% 100%, 14% 100%, 0 38%);
+    background: linear-gradient(
+      180deg,
+      #747a78 0,
+      #343a3a 30%,
+      #111516 72%,
+      #060809 100%
+    );
+    filter: drop-shadow(0 3px 3px var(--typewriter-contact-shadow));
+  }
+
+  .typewriter-bearing-shoe.is-left { left: 18%; }
+  .typewriter-bearing-shoe.is-right { right: 18%; }
+
+  .typewriter-bearing-shoe > i {
+    position: absolute;
+    top: 2px;
+    right: 8px;
+    left: 8px;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--typewriter-bearing-surface);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.42),
+      inset 0 -2px 2px rgba(0, 0, 0, 0.76),
+      0 2px 3px rgba(0, 0, 0, 0.62);
+  }
+
+  .typewriter-frame-front {
+    z-index: 4;
+    top: calc(var(--typewriter-frame-top) + 11px);
+    height: 7px;
+    clip-path: polygon(0.8% 0, 99.2% 0, 100% 100%, 0 100%);
+    background:
+      var(--typewriter-frame-face),
+      var(--typewriter-frame-surface);
+    box-shadow:
+      inset 0 2px 3px -2px var(--typewriter-body-inset-highlight),
+      inset 0 -4px 5px -3px var(--typewriter-body-inset-shadow);
+  }
+
+  .typewriter-front-bevel {
+    position: absolute;
+    top: 0;
+    right: 1.5%;
+    left: 1.5%;
+    height: 2px;
+    background: var(--typewriter-frame-facet);
+    box-shadow:
+      inset 0 1px var(--typewriter-body-inset-highlight),
+      inset 0 -2px 3px var(--typewriter-depth-edge);
+  }
+
+  .typewriter-typing-well {
+    position: absolute;
+    z-index: 2;
+    top: -8px;
+    left: 50%;
+    width: clamp(116px, 17vw, 154px);
+    height: 12px;
+    transform: translateX(-50%);
+    clip-path: polygon(8% 0, 92% 0, 100% 100%, 0 100%);
+    background: linear-gradient(180deg, #050708, #171b1b 62%, #080a0b);
+    box-shadow:
+      inset 0 5px 8px rgba(0, 0, 0, 0.84),
+      0 1px rgba(255, 255, 255, 0.08);
+  }
+
+  .typewriter-typing-well::after {
+    position: absolute;
+    right: 10%;
+    bottom: 2px;
+    left: 10%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #5e6462, transparent);
+    content: "";
+    opacity: 0.54;
+  }
+
+  .typewriter-carriage-side-plate {
+    position: absolute;
+    z-index: 6;
+    top: calc(var(--line-aperture) / 2 + 1px);
+    width: 44px;
+    height: 48px;
+    background: var(--typewriter-carriage-surface);
+    box-shadow:
+      inset 0 1px var(--typewriter-endcap-inset-highlight),
+      inset 0 -8px 10px -9px var(--typewriter-endcap-inset-shadow);
+    filter: drop-shadow(0 4px 5px var(--typewriter-endcap-cast-shadow));
+  }
+
+  .typewriter-carriage-side-plate.is-left {
+    left: 0;
+    clip-path: polygon(0 14%, 20% 0, 100% 0, 100% 72%, 78% 100%, 18% 100%, 0 82%);
+  }
+
+  .typewriter-carriage-side-plate.is-right {
+    right: 0;
+    clip-path: polygon(0 0, 80% 0, 100% 14%, 100% 82%, 82% 100%, 22% 100%, 0 72%);
+  }
+
+  .typewriter-carriage-side-plate::before {
+    position: absolute;
+    top: 1px;
+    right: 5px;
+    left: 5px;
+    height: 5px;
+    background: linear-gradient(180deg, var(--typewriter-body-inset-highlight), transparent);
+    content: "";
+    opacity: 0.72;
+  }
+
+  .typewriter-carriage-side-plate::after {
+    position: absolute;
+    bottom: -1px;
+    width: 18px;
+    height: 14px;
+    clip-path: polygon(14% 0, 86% 0, 100% 100%, 0 100%);
+    background: var(--typewriter-channel-surface);
+    box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.48);
+    content: "";
+  }
+
+  .typewriter-carriage-side-plate.is-left::after { right: 4px; }
+  .typewriter-carriage-side-plate.is-right::after { left: 4px; }
+
+  .typewriter-platen-bearing {
+    position: absolute;
+    z-index: 8;
+    top: 6px;
+    width: 17px;
+    height: 17px;
+    border: 1px solid rgba(3, 5, 6, 0.86);
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 42% 38%, #8d928f 0 10%, #252a2b 13% 37%, #080a0b 40% 64%, #555b59 68% 73%, #111415 76%);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.24),
+      0 2px 3px rgba(0, 0, 0, 0.58);
+  }
+
+  .typewriter-carriage-side-plate.is-left .typewriter-platen-bearing { right: 10px; }
+  .typewriter-carriage-side-plate.is-right .typewriter-platen-bearing { left: 10px; }
+
+  .typewriter-bail-pivot {
+    position: absolute;
+    z-index: 9;
+    top: 3px;
+    width: 9px;
+    height: 9px;
+    border: 1px solid #121617;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 32%, #e0e1dc, #737977 42%, #202526 72%);
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--typewriter-body-deep) 74%, transparent),
+      0 2px 2px rgba(0, 0, 0, 0.46);
+  }
+
+  .typewriter-carriage-side-plate.is-left .typewriter-bail-pivot { left: 5px; }
+  .typewriter-carriage-side-plate.is-right .typewriter-bail-pivot { right: 5px; }
+
+  .typewriter-paper-wrap {
+    z-index: 5;
+    top: calc(var(--line-aperture) / 2 + 3px);
+    right: auto;
+    left: 50%;
+    width: var(--typewriter-paper-width);
+    height: 24px;
+    transform: translate3d(-50%, var(--typewriter-paper-tension), 0);
+    border-radius: 0 0 50% 50% / 0 0 14px 14px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(95, 88, 75, 0.05) 50%, rgba(24, 23, 21, 0.22)),
+      var(--sheet);
+    box-shadow:
+      inset 0 -8px 9px rgba(35, 32, 27, 0.18),
+      0 2px 3px rgba(0, 0, 0, 0.26);
+    transition: transform 72ms cubic-bezier(0.2, 0.72, 0.28, 1);
+  }
+
+  .typewriter-platen {
+    z-index: 4;
+    top: calc(var(--line-aperture) / 2 + 5px);
+    right: 24px;
+    left: 24px;
+    height: 22px;
+    border: 1px solid #020303;
+    background:
+      repeating-linear-gradient(
+        0deg,
+        rgba(255, 255, 255, 0.026) 0 1px,
+        transparent 1px 5px
+      ),
+      linear-gradient(180deg, #3b3f40 0, #1a1d1e 24%, #070809 62%, #222627 100%);
+    background-position:
+      0 calc(0px - var(--typewriter-platen-surface)),
+      0 0;
+    background-size: auto 10px, auto;
+    box-shadow:
+      inset 0 2px 2px rgba(255, 255, 255, 0.11),
+      inset 0 -4px 5px rgba(0, 0, 0, 0.94),
+      0 4px 6px rgba(0, 0, 0, 0.52);
+    transition: background-position 56ms linear;
+  }
+
+  .typewriter-platen::before,
+  .typewriter-platen::after {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    width: 8px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, #656b69, #171b1c 58%, #050708);
+    content: "";
+  }
+
+  .typewriter-platen::before { left: 5px; }
+  .typewriter-platen::after { right: 5px; }
+
+  .typewriter-paper-scale {
+    z-index: 7;
+    top: calc(var(--line-aperture) / 2 - 1px);
+    right: 52px;
+    left: 52px;
+    height: 8px;
+    border-color: rgba(219, 220, 216, 0.58);
+    background: repeating-linear-gradient(
+      90deg,
+      rgba(218, 219, 214, 0.5) 0 1px,
+      transparent 1px 12px,
+      rgba(218, 219, 214, 0.28) 12px 13px,
+      transparent 13px 24px
+    );
+    mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent);
+    opacity: 0.44;
+  }
+
+  .typewriter-bail-arm {
+    position: absolute;
+    z-index: 8;
+    top: calc(var(--line-aperture) / -2 - 12px);
+    width: 47px;
+    height: calc(var(--line-aperture) + 20px);
+    background: linear-gradient(90deg, #4b5150, #d6d7d2 46%, #6f7573 68%, #202526);
+    filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.5));
+  }
+
+  .typewriter-bail-arm.is-left {
+    left: 6px;
+    clip-path: polygon(94% 0, 100% 1%, 10% 100%, 0 98%);
+  }
+
+  .typewriter-bail-arm.is-right {
+    right: 6px;
+    clip-path: polygon(0 1%, 6% 0, 100% 98%, 90% 100%);
+  }
+
+  .typewriter-bail-arm > i {
+    position: absolute;
+    top: -2px;
+    width: 9px;
+    height: 7px;
+    border: 1px solid #353a39;
+    border-radius: 3px;
+    background: linear-gradient(180deg, #e1e2dd, #777d7a 58%, #292e2f);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.48),
+      0 1px 2px rgba(0, 0, 0, 0.44);
+  }
+
+  .typewriter-bail-arm.is-left > i { right: -1px; }
+  .typewriter-bail-arm.is-right > i { left: -1px; }
+
+  .typewriter-paper-bail {
+    z-index: 9;
+    top: calc(var(--line-aperture) / -2 - 12px);
+    right: 52px;
+    left: 52px;
+    height: 3px;
+    border: 0;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #f0f1ec 0, #9da29f 48%, #4b5150 76%, #24292a);
+    box-shadow:
+      0 2px 3px rgba(0, 0, 0, 0.4),
+      inset 0 1px rgba(255, 255, 255, 0.76);
+  }
+
+  .typewriter-paper-bail::before,
+  .typewriter-paper-bail::after {
+    position: absolute;
+    top: -2px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 32%, #e5e6e1, #6e7472 58%, #202526 76%);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.48);
+    content: "";
+  }
+
+  .typewriter-paper-bail::before { left: -3px; }
+  .typewriter-paper-bail::after { right: -3px; }
+
+  .typewriter-bail-roller {
+    top: -3px;
+    width: 28px;
+    height: 9px;
+    border-color: #040506;
+    background:
+      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px),
+      linear-gradient(180deg, #343839, #090b0c 58%, #1d2122);
+    background-position:
+      0 calc(0px - var(--typewriter-platen-surface)),
+      0 0;
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.11),
+      0 2px 3px rgba(0, 0, 0, 0.4);
+    transition: background-position 56ms linear;
+  }
+
+  .typewriter-carriage-knob {
+    z-index: 7;
+    top: calc(var(--line-aperture) / 2 + 1px);
+    width: 30px;
+    height: 30px;
+    border-color: #040506;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 30%, #3b4041, #171a1b 46%, #07090a 78%);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.13),
+      inset 0 -3px 4px rgba(0, 0, 0, 0.74),
+      0 3px 6px rgba(0, 0, 0, 0.56);
+  }
+
+  .typewriter-carriage-knob.is-left { left: -15px; }
+  .typewriter-carriage-knob.is-right { right: -15px; }
+
+  .typewriter-carriage-knob > i {
+    position: absolute;
+    inset: 4px;
+    transform: rotate(var(--typewriter-platen-angle));
+    border: 1px solid #666c6b;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle, #232728 0 31%, transparent 34%),
+      conic-gradient(from -2deg, #d9d9d4 0 4deg, #363b3c 4deg 356deg, #d9d9d4 356deg);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.1),
+      0 0 0 1px rgba(0, 0, 0, 0.35);
+    transition: transform 56ms linear;
+  }
+
+  .typewriter-index-wheel {
+    z-index: 8;
+    top: calc(var(--line-aperture) / 2 + 8px);
+    left: 17px;
+    width: 16px;
+    height: 16px;
+  }
+
+  .typewriter-detent-pawl {
+    z-index: 10;
+    top: calc(var(--line-aperture) / 2 + 2px);
+    left: 27px;
+  }
+
+  .typewriter-return-lever {
+    z-index: 4;
+    top: calc(var(--line-aperture) / 2 + 17px);
+    left: 13px;
+    width: 126px;
+    height: 4px;
+    transform-origin: right center;
+    border: 0;
+    background: linear-gradient(180deg, #e4e5e0, #969c99 48%, #4b5150);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.72),
+      0 3px 4px rgba(0, 0, 0, 0.4);
+  }
+
+  .typewriter-return-lever i {
+    top: -4px;
+    left: -2px;
+    width: 30px;
+    height: 11px;
+    border-color: #050607;
+    border-radius: 8px 3px 3px 8px;
+    background: linear-gradient(180deg, #313536, #111415 62%, #080a0b);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.11),
+      0 2px 3px rgba(0, 0, 0, 0.48);
+  }
+
+  .typewriter-typebasket {
+    z-index: 4;
+    top: calc(var(--typewriter-strike-y) + var(--line-aperture) / 2 - 2px);
+    width: 108px;
+    height: 34px;
+    transform: translate(-50%, 11px) scale(0.92);
+    background:
+      repeating-conic-gradient(
+        from 250deg at 50% 118%,
+        transparent 0deg 8.5deg,
+        rgba(192, 194, 190, 0.5) 8.8deg 9.6deg
+      ),
+      radial-gradient(ellipse at 50% 114%, #080a0b 0 42%, #3a4040 44% 51%, transparent 53%);
+  }
+
+  .typebar-striking .typewriter-typebasket {
+    transform: translate(-50%, 1px) scale(1);
+    opacity: 0.38;
+  }
+
+  .typewriter-segment {
+    bottom: -31px;
+    width: 80px;
+    height: 20px;
+    clip-path: polygon(8% 100%, 0 35%, 12% 5%, 34% 0, 66% 0, 88% 5%, 100% 35%, 92% 100%);
+    background: linear-gradient(180deg, #888e8b 0, #454b4a 24%, #171b1c 70%, #080a0b 100%);
+    filter: drop-shadow(0 3px 3px rgba(0, 0, 0, 0.62));
+    opacity: 0.84;
+  }
+
+  .typewriter-ribbon-band {
+    right: auto;
+    bottom: -10px;
+    left: 50%;
+    width: 196px;
+    height: 4px;
+    transform: translateX(-50%);
+    border: 0;
+    border-radius: 1px;
+    background: linear-gradient(180deg, #252829, #050607 72%);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.06),
+      0 2px 3px rgba(0, 0, 0, 0.52);
+    opacity: 0.94;
+  }
+
+  .typewriter-ribbon-band::before,
+  .typewriter-ribbon-band::after {
+    position: absolute;
+    top: -3px;
+    width: 13px;
+    height: 10px;
+    border: 1px solid #080a0b;
+    border-radius: 50%;
+    background: radial-gradient(circle at 42% 35%, #666c6a, #171b1c 48%, #050708 74%);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.12),
+      0 2px 3px rgba(0, 0, 0, 0.52);
+    content: "";
+  }
+
+  .typewriter-ribbon-band::before { left: -5px; }
+  .typewriter-ribbon-band::after { right: -5px; }
+
+  .typewriter-type-guide {
+    bottom: -31px;
+    width: 32px;
+    height: 32px;
+    border-bottom: 5px solid #555b59;
+    border-radius: 0 0 5px 5px;
+    filter: drop-shadow(0 3px 2px rgba(0, 0, 0, 0.66));
+  }
+
+  .typewriter-type-guide::before,
+  .typewriter-type-guide::after {
+    top: 1px;
+    bottom: 1px;
+    width: 5px;
+  }
+
+  .typewriter-type-guide::before {
+    left: 2px;
+    background: linear-gradient(90deg, #626866, #e1e2dd 58%, #707674);
+  }
+
+  .typewriter-type-guide::after {
+    right: 2px;
+    background: linear-gradient(90deg, #666c6a, #d4d5d0 48%, #5e6462);
+  }
+
+  .typewriter-strike-pulse {
+    top: 2px;
+    width: 8px;
+    height: 3px;
+    background: #747a77;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.42);
+  }
+
+  .literary-caret-mark,
+  .literary-completion-mark,
+  .literary-folio-trail {
+    position: absolute;
+    z-index: 3;
+    pointer-events: none;
+  }
+
+  .literary-caret-mark {
+    width: 11px;
+    border-left: 1px solid rgba(137, 91, 57, 0.58);
+  }
+
+  .literary-caret-mark::before,
+  .literary-caret-mark::after {
+    position: absolute;
+    left: -1px;
+    width: 5px;
+    height: 1px;
+    background: rgba(137, 91, 57, 0.58);
+    content: "";
+  }
+
+  .literary-caret-mark::before { top: 0; }
+  .literary-caret-mark::after { bottom: 0; }
+
+  .literary-completion-mark {
+    width: 9px;
+    height: 9px;
+    transform: translateY(-50%) rotate(45deg);
+    border: 1px solid rgba(143, 93, 57, 0.62);
+    animation: literary-mark 650ms ease-out both;
+  }
+
+  .literary-completion-mark.paragraph {
+    border-radius: 50%;
+    background: rgba(143, 93, 57, 0.12);
+  }
+
+  @keyframes literary-mark {
+    from { opacity: 0; }
+    32% { opacity: 0.9; }
+    to { opacity: 0; }
+  }
+
+  .literary-folio-trail {
+    right: 12mm;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    height: 8px;
+  }
+
+  .literary-folio-trail span {
+    width: 5px;
+    height: 1px;
+    background: rgba(132, 91, 58, 0.36);
   }
 
   .paper-editor-mount :global(.ProseMirror),
@@ -1218,6 +3749,65 @@
     line-height: 1.85;
   }
 
+  .typewriter-caret-visible .paper-editor-mount :global(.ProseMirror) {
+    caret-color: transparent;
+  }
+
+  .writing-flow .paper-editor-mount :global(.ProseMirror),
+  .writing-flow .paper-measure-host :global(.ProseMirror) {
+    font-size: 11pt;
+    letter-spacing: -0.008em;
+    line-height: 1.78;
+  }
+
+  .writing-flow .paper-editor-mount :global(.ProseMirror) {
+    width: 100%;
+    min-height: 100%;
+    padding: 72px 34px 180px;
+    color: color-mix(in srgb, var(--ink-strong) 94%, #26302c);
+  }
+
+  .writing-flow .paper-editor-mount :global(.paper-page-break) {
+    width: 100%;
+    height: 0 !important;
+  }
+
+  .writing-literary .paper-editor-mount :global(.ProseMirror),
+  .writing-literary .paper-measure-host :global(.ProseMirror) {
+    font-size: 11.25pt;
+    line-height: 1.9;
+  }
+
+  .writing-literary .paper-editor-mount :global(.is-settling-ink) {
+    animation: ink-settle 240ms cubic-bezier(0.2, 0.72, 0.28, 1);
+  }
+
+  .writing-typewriter .paper-editor-mount :global(.is-typewriter-imprint) {
+    animation: typewriter-imprint 140ms steps(2, end);
+  }
+
+  @keyframes ink-settle {
+    from {
+      color: color-mix(in srgb, var(--accent) 68%, #28231f);
+      text-shadow: 0 0 0.8px color-mix(in srgb, var(--accent) 35%, transparent);
+    }
+    to {
+      color: inherit;
+      text-shadow: none;
+    }
+  }
+
+  @keyframes typewriter-imprint {
+    from {
+      color: #0e0d0c;
+      text-shadow: 0 0 0.6px rgba(24, 20, 17, 0.68);
+    }
+    to {
+      color: inherit;
+      text-shadow: none;
+    }
+  }
+
   .paper-editor-mount :global(.ProseMirror > *:first-child) { margin-top: 0; }
   .paper-editor-mount :global(.ProseMirror > *:last-child) { margin-bottom: 0; }
   .paper-editor-mount :global(.ProseMirror p) {
@@ -1241,6 +3831,34 @@
   .writing-typewriter .paper-editor-mount :global(.ProseMirror h4) {
     font-weight: 600;
     letter-spacing: 0.025em;
+  }
+  .writing-literary .paper-editor-mount :global(.ProseMirror h1) {
+    letter-spacing: -0.035em;
+  }
+  .writing-literary .paper-editor-mount :global(.ProseMirror h1::after) {
+    display: block;
+    width: 18mm;
+    height: 1px;
+    margin: 6mm auto 0;
+    background: linear-gradient(90deg, transparent, rgba(128, 86, 52, 0.42), transparent);
+    content: "";
+  }
+  .writing-flow .paper-editor-mount :global(.ProseMirror h1),
+  .writing-flow .paper-editor-mount :global(.ProseMirror h2),
+  .writing-flow .paper-editor-mount :global(.ProseMirror h3),
+  .writing-flow .paper-editor-mount :global(.ProseMirror h4) {
+    color: var(--ink-strong);
+    font-weight: 650;
+    letter-spacing: -0.018em;
+  }
+  .writing-flow .paper-editor-mount :global(.ProseMirror blockquote) {
+    border-left-color: color-mix(in srgb, var(--link) 54%, transparent);
+    color: var(--ink-muted);
+  }
+  .writing-flow .paper-editor-mount :global(.ProseMirror pre) {
+    border-color: color-mix(in srgb, var(--rule) 70%, transparent);
+    background: color-mix(in srgb, var(--surface-raised) 56%, transparent);
+    color: var(--ink);
   }
   .paper-editor-mount :global(.ProseMirror h1) {
     margin: 4mm 0 12mm;
@@ -1291,6 +3909,10 @@
     padding: 0.08em 0.25em;
     font-family: NanumGothicCoding, monospace;
     font-size: 0.88em;
+  }
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror pre),
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror code) {
+    font-family: var(--paper-font);
   }
   .paper-editor-mount :global(.ProseMirror pre code) { background: transparent; padding: 0; }
   .paper-editor-mount :global(.ProseMirror a) {
@@ -1385,6 +4007,17 @@
     content: attr(data-placeholder);
     pointer-events: none;
   }
+  .paper-editor-mount :global(.ProseMirror h1.is-empty::before),
+  .paper-editor-mount :global(.ProseMirror h2.is-empty::before),
+  .paper-editor-mount :global(.ProseMirror h3.is-empty::before),
+  .paper-editor-mount :global(.ProseMirror h4.is-empty::before) {
+    position: absolute;
+    inset: 0 0 auto;
+    width: 100%;
+    height: auto;
+    float: none;
+    text-align: inherit;
+  }
   .paper-editor-mount :global(.editor-ghost-text) {
     color: #9a8e85;
     font-style: normal;
@@ -1412,19 +4045,87 @@
     pointer-events: none;
     user-select: none;
   }
-  .paper-editor-mount :global(.is-active-writing-block::before) {
-    position: absolute;
-    right: calc(100% + 8px);
-    width: 7mm;
-    color: #aa8878;
-    font: 8pt/1.4 NanumGothicCoding, monospace;
-    opacity: 0.72;
-    text-align: right;
+  .writing-flow .paper-editor-mount :global(.ProseMirror > *) {
+    opacity: 0.4;
+    transition: opacity 180ms ease, color 180ms ease;
   }
-  .paper-editor-mount :global(h1.is-active-writing-block::before) { content: "#"; }
-  .paper-editor-mount :global(h2.is-active-writing-block::before) { content: "##"; }
-  .paper-editor-mount :global(h3.is-active-writing-block::before) { content: "###"; }
-  .paper-editor-mount :global(h4.is-active-writing-block::before) { content: "####"; }
+
+  .writing-flow .paper-editor-mount :global(.ProseMirror > .is-active-writing-block),
+  .writing-flow .paper-editor-mount :global(.ProseMirror > blockquote:has(.is-active-writing-block)),
+  .writing-flow .paper-editor-mount :global(.ProseMirror > ul:has(.is-active-writing-block)),
+  .writing-flow .paper-editor-mount :global(.ProseMirror > ol:has(.is-active-writing-block)),
+  .writing-flow .paper-editor-mount :global(.ProseMirror > table:has(.is-active-writing-block)) {
+    opacity: 1;
+  }
+
+  .flow-session-dock {
+    position: absolute;
+    z-index: 8;
+    right: 50%;
+    bottom: 18px;
+    display: flex;
+    min-width: min(560px, calc(100% - 48px));
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    transform: translateX(50%);
+    border: 1px solid color-mix(in srgb, var(--rule) 68%, transparent);
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+    padding: 9px 13px 9px 15px;
+    box-shadow: 0 12px 34px color-mix(in srgb, var(--ink-strong) 12%, transparent);
+    backdrop-filter: blur(14px);
+  }
+
+  .flow-session-copy {
+    display: flex;
+    align-items: baseline;
+    gap: 13px;
+    color: var(--ink-muted);
+    font-family: var(--ui-font);
+  }
+
+  .flow-session-copy small {
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+
+  .flow-session-copy strong {
+    color: var(--ink-strong);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .flow-session-copy strong span {
+    margin-left: 3px;
+    color: var(--ink-faint);
+    font-size: var(--type-micro);
+    font-weight: 600;
+  }
+
+  .flow-session-trace {
+    display: flex;
+    min-width: 86px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+  }
+
+  .flow-session-trace span {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--link) 62%, transparent);
+  }
+
+  .flow-session-trace span.paragraph {
+    width: 8px;
+    height: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--accent) 72%, transparent);
+  }
 
   .focus-paragraph .paper-editor-mount :global(.ProseMirror > *) { opacity: 0.36; transition: opacity 120ms ease; }
   .focus-paragraph .paper-editor-mount :global(.ProseMirror > .is-active-writing-block),
@@ -1508,6 +4209,117 @@
     background: transparent !important;
   }
 
+  @media (max-width: 760px) {
+    .typewriter-strike-rail {
+      width: calc(100% - 18px);
+    }
+    .typewriter-machine { --typewriter-frame-width: calc(100% - 14px); }
+    .writing-flow .paper-viewport {
+      padding-right: 20px;
+      padding-bottom: var(--flow-bottom-runway);
+      padding-left: 20px;
+    }
+    .writing-flow .paper-editor-mount :global(.ProseMirror) {
+      padding-right: 22px;
+      padding-left: 22px;
+    }
+    .flow-session-dock {
+      min-width: calc(100% - 32px);
+      gap: 10px;
+    }
+    .flow-session-copy { gap: 8px; }
+    .flow-session-copy small { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .writing-typewriter .paper-window,
+    .typewriter-carriage-layer,
+    .typewriter-strike-rail,
+    .typewriter-typebasket,
+    .typewriter-type-guide,
+    .typewriter-strike-pulse,
+    .typewriter-paper-wrap,
+    .typewriter-platen,
+    .typewriter-bail-roller,
+    .typewriter-carriage-knob > i,
+    .typewriter-index-wheel,
+    .typewriter-detent-pawl,
+    .typewriter-return-lever,
+    .typewriter-live-typebar,
+    .writing-flow .paper-editor-mount :global(.ProseMirror > *) {
+      transition-duration: 0.001ms !important;
+      animation-duration: 0.001ms !important;
+    }
+    .writing-literary .paper-editor-mount :global(.is-settling-ink),
+    .writing-typewriter .paper-editor-mount :global(.is-typewriter-imprint),
+    .literary-completion-mark {
+      animation-duration: 0.001ms !important;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .typewriter-caret-visible .paper-editor-mount :global(.ProseMirror) {
+      caret-color: CanvasText;
+    }
+    .typewriter-strike-caret { display: none; }
+    .typewriter-frame-rear,
+    .typewriter-frame-front,
+    .typewriter-rail-recess,
+    .typewriter-fixed-guide-rail,
+    .typewriter-moving-channel,
+    .typewriter-moving-channel::before,
+    .typewriter-bearing-shoe,
+    .typewriter-bearing-shoe > i,
+    .typewriter-front-bevel,
+    .typewriter-typing-well,
+    .typewriter-typing-well::after,
+    .typewriter-typebasket,
+    .typewriter-segment,
+    .typewriter-carriage-side-plate,
+    .typewriter-carriage-side-plate::before,
+    .typewriter-carriage-side-plate::after,
+    .typewriter-platen-bearing,
+    .typewriter-bail-pivot,
+    .typewriter-paper-wrap,
+    .typewriter-platen,
+    .typewriter-platen::before,
+    .typewriter-platen::after,
+    .typewriter-bail-arm,
+    .typewriter-bail-arm > i,
+    .typewriter-paper-bail,
+    .typewriter-paper-bail::before,
+    .typewriter-paper-bail::after,
+    .typewriter-bail-roller,
+    .typewriter-carriage-knob,
+    .typewriter-carriage-knob > i,
+    .typewriter-index-wheel,
+    .typewriter-detent-pawl,
+    .typewriter-return-lever,
+    .typewriter-return-lever i,
+    .typewriter-type-guide,
+    .typewriter-live-typebar,
+    .typewriter-live-typebar i,
+    .typewriter-live-typebar b {
+      border-color: CanvasText;
+      background: Canvas;
+      box-shadow: none;
+      filter: none;
+      forced-color-adjust: none;
+    }
+    .typewriter-strike-rail::before { background: transparent; }
+    .typewriter-strike-rail::after,
+    .typewriter-paper-scale,
+    .typewriter-ribbon-band,
+    .typewriter-ribbon-band::before,
+    .typewriter-ribbon-band::after,
+    .typewriter-strike-pulse {
+      border-color: CanvasText;
+      background: CanvasText;
+      box-shadow: none;
+      forced-color-adjust: none;
+    }
+  }
+
   @media print {
     @page { size: A4; margin: 0; }
     .paper-editor-shell,
@@ -1519,9 +4331,18 @@
       background: white;
     }
     .paper-viewport { display: block; padding: 0; }
-    .paper-window { width: 210mm !important; height: auto !important; overflow: visible; }
-    .paper-stack { min-height: 0 !important; transform: none !important; }
-    .paper-sheet-layer { gap: 0; }
+    .writing-typewriter .paper-scroller {
+      -webkit-mask-image: none;
+      mask-image: none;
+    }
+    .paper-window {
+      width: 210mm !important;
+      height: auto !important;
+      overflow: visible;
+      transform: none !important;
+    }
+    .paper-stack { width: 210mm !important; min-height: 0 !important; transform: none !important; }
+    .paper-sheet-layer { display: flex !important; gap: 0; }
     .paper-sheet {
       border: 0;
       background-color: var(--sheet);
@@ -1529,7 +4350,24 @@
       box-shadow: none;
       break-after: page;
     }
+    .writing-flow .paper-editor-mount {
+      width: 210mm !important;
+      min-height: 297mm !important;
+    }
+    .writing-flow .paper-editor-mount :global(.ProseMirror) {
+      width: 210mm !important;
+      min-height: 297mm !important;
+      padding: 22mm 20mm 18mm !important;
+    }
     .paper-editor-mount :global(.paper-page-break) { height: var(--page-rest); }
-    .paper-toolbar-note, .paper-page-navigator, .paper-measure-host, .active-writing-line { display: none; }
+    .writing-flow .paper-editor-mount :global(.ProseMirror > *) { opacity: 1; }
+    .paper-toolbar-note,
+    .paper-page-navigator,
+    .paper-measure-host,
+    .typewriter-machine,
+    .literary-caret-mark,
+    .literary-completion-mark,
+    .literary-folio-trail,
+    .flow-session-dock { display: none; }
   }
 </style>

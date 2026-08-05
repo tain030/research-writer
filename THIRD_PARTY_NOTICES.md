@@ -1,6 +1,9 @@
 # Third-party notices
 
-Research Writer bundles Pretendard and two NAVER fonts:
+Research Writer bundles Goorm Sans Code, Pretendard, and two NAVER fonts:
+
+- Goorm Sans Code Regular v1.0.1, downloaded from
+  [goorm's official font distribution](https://goorm-sans.goorm.io/).
 
 - Pretendard Regular and SemiBold v1.3.9, downloaded from the official
   [`orioncactus/pretendard`](https://github.com/orioncactus/pretendard)
@@ -16,7 +19,9 @@ files remain copyright their respective authors and are not covered by
 Research Writer's MIT license. Pretendard's copyright notice and complete
 license are included at
 [`static/fonts/Pretendard-OFL.txt`](static/fonts/Pretendard-OFL.txt); the
-NAVER font license is included at [`static/fonts/OFL.txt`](static/fonts/OFL.txt).
+Goorm Sans Code license is included at
+[`static/fonts/GoormSansCode-OFL.txt`](static/fonts/GoormSansCode-OFL.txt);
+the NAVER font license is included at [`static/fonts/OFL.txt`](static/fonts/OFL.txt).
 
 The completed-document preview bundles KaTeX and its math fonts. KaTeX is
 copyright 2013–2020 Khan Academy and other contributors and is distributed
