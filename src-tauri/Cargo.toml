@@ -1,6 +1,6 @@
 [package]
 name = "research-writer"
-version = "0.8.0"
+version = "0.8.1"
 description = "A quiet, local-first research writing editor"
 authors = ["tain"]
 edition = "2024"
