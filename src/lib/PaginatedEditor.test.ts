@@ -4,6 +4,7 @@ import type { Editor as TiptapEditor } from "@tiptap/core";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PaginatedEditor from "./PaginatedEditor.svelte";
+import { setPaperPageBreaks } from "./paper-pagination";
 import type {
   EditorApi,
   EditorChangeContext,
@@ -126,6 +127,54 @@ function typeCharacters(editable: HTMLElement, text: string): void {
 }
 
 describe("paginated editorial editor", () => {
+  it("removes stale page gaps when visual-line measurement fails", async () => {
+    let api: EditorApi | null = null;
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "첫 문단입니다.\n\n둘째 문단도 그대로 남아야 합니다.",
+        experience: "literary",
+        onready: (value) => (api = value),
+      },
+    });
+    await tick();
+    await api!.awaitLayout!();
+
+    const editable = target.querySelector<HTMLElement>(".ProseMirror")! as
+      HTMLElement & { editor: TiptapEditor };
+    const firstBlockEnd = editable.editor.state.doc.child(0).nodeSize;
+    setPaperPageBreaks(editable.editor.view, [
+      { pos: firstBlockEnd, restPx: 640 },
+    ]);
+    expect(target.querySelector(".paper-page-break")).not.toBeNull();
+
+    const measuredRect = HTMLElement.prototype.getBoundingClientRect;
+    const measurementFailure = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (
+          this.parentElement?.classList.contains("paper-measure-document")
+        ) {
+          throw new Error("synthetic pagination measurement failure");
+        }
+        return measuredRect.call(this);
+      });
+    const insertPosition = editable.editor.state.doc.content.size - 1;
+    editable.editor.view.dispatch(
+      editable.editor.state.tr.insertText(" 추가", insertPosition),
+    );
+    await api!.awaitLayout!();
+
+    expect(target.querySelector(".paper-page-break")).toBeNull();
+    expect(api!.getPageCount!()).toBe(1);
+    expect(api!.getContent()).toContain("첫 문단입니다.");
+    expect(api!.getContent()).toContain("둘째 문단도 그대로 남아야 합니다. 추가");
+    measurementFailure.mockRestore();
+    unmount(component);
+  });
+
   it("marks an empty document title with its title placeholder", async () => {
     let api: EditorApi | null = null;
     const target = document.createElement("div");
@@ -495,11 +544,20 @@ describe("paginated editorial editor", () => {
     expect(target.querySelectorAll(".typewriter-carriage-knob > i")).toHaveLength(2);
     expect(target.querySelector(".typewriter-index-wheel")).not.toBeNull();
     expect(target.querySelector(".typewriter-detent-pawl")).toBeNull();
+    expect(
+      carriageUpper.querySelector(":scope > .typewriter-return-lever"),
+    ).not.toBeNull();
+    expect(target.querySelector(".typewriter-return-lever-mount")).toBeNull();
     expect(target.querySelector(".typewriter-return-lever")).not.toBeNull();
     expect(target.querySelector(".typewriter-strike-rail")).not.toBeNull();
     expect(target.querySelector(".typewriter-segment")).not.toBeNull();
     expect(target.querySelector(".typewriter-type-guide")).not.toBeNull();
-    expect(target.querySelector(".typewriter-strike-pulse")).not.toBeNull();
+    expect(target.querySelector(".typewriter-strike-caret")).toBeNull();
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
+    expect(target.querySelector(".typewriter-ribbon-vibrator")).toBeNull();
+    expect(target.querySelector(".typewriter-type-slug")).toBeNull();
+    expect(machine.style.cssText).not.toContain("return-lever-hinge");
+    expect(machine.style.cssText).not.toContain("return-lever-connector");
     for (const layer of carriageLayers) {
       expect(layer.style.getPropertyValue("--carriage-shift")).toBe("");
     }
@@ -510,9 +568,16 @@ describe("paginated editorial editor", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await tick();
     expect(target.querySelector(".typewriter-strike-rail")).not.toBeNull();
-    expect(target.querySelector(".typewriter-strike-caret")).not.toBeNull();
+    expect(target.querySelector(".typewriter-type-guide")).not.toBeNull();
+    expect(target.querySelectorAll(".typewriter-strike-caret")).toHaveLength(1);
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
+    expect(target.querySelector(".typewriter-ribbon-vibrator")).toBeNull();
+    expect(target.querySelector(".typewriter-live-typebar")).toBeNull();
+    expect(target.querySelector(".typewriter-type-slug")).toBeNull();
+    expect(target.querySelector(".typewriter-strike-pulse")).toBeNull();
+    expect(target.querySelector(".typewriter-strike-marker")).toBeNull();
     expect(machine.classList.contains("active")).toBe(true);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(true);
     expect(target.querySelector(".active-writing-line")).toBeNull();
 
     api!.setSelection(api!.getContent().length, api!.getContent().length);
@@ -529,20 +594,25 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(target.querySelector(".typewriter-strike-rail")).not.toBeNull();
     expect(target.querySelector(".typewriter-strike-caret")).toBeNull();
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
     expect(machine.classList.contains("active")).toBe(false);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(false);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(false);
 
     api!.setSelection(4, 4);
     await new Promise((resolve) => setTimeout(resolve, 20));
     await tick();
     expect(target.querySelector(".typewriter-strike-rail")).not.toBeNull();
-    expect(target.querySelector(".typewriter-strike-caret")).not.toBeNull();
+    expect(target.querySelector(".typewriter-type-guide")).not.toBeNull();
+    expect(target.querySelectorAll(".typewriter-strike-caret")).toHaveLength(1);
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
+    expect(target.querySelector(".typewriter-live-typebar")).toBeNull();
     expect(machine.classList.contains("active")).toBe(true);
 
     editable.blur();
     await tick();
     expect(target.querySelector(".typewriter-strike-rail")).not.toBeNull();
     expect(target.querySelector(".typewriter-strike-caret")).toBeNull();
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
     expect(machine.classList.contains("active")).toBe(false);
     unmount(component);
   });
@@ -616,7 +686,7 @@ describe("paginated editorial editor", () => {
     ).toBeLessThan(0);
     expect(shell.style.getPropertyValue("--carriage-shift")).toBe("0px");
     expect(api!.getSelection()).toEqual(initialSelection);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(false);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(false);
 
     await new Promise((resolve) => setTimeout(resolve, 110));
     await tick();
@@ -641,7 +711,7 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(scroller.scrollTop).toBeCloseTo(alignedTop);
     expect(api!.getSelection()).toEqual(initialSelection);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(true);
     expect(shell.classList.contains("typebar-striking")).toBe(true);
     expect(shell.style.getPropertyValue("--carriage-shift")).toBe(initialShift);
 
@@ -652,11 +722,11 @@ describe("paginated editorial editor", () => {
     expect(scroller.scrollTop).toBeCloseTo(alignedTop);
     expect(api!.getSelection()).toEqual(initialSelection);
     expect(shell.style.getPropertyValue("--carriage-shift")).toBe("0px");
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(false);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(false);
     unmount(component);
   });
 
-  it("raises an independent typebar for every rapid physical or IME key", async () => {
+  it("restarts one Olympia typebar for every rapid physical or IME character", async () => {
     let api: EditorApi | null = null;
     const target = document.createElement("div");
     document.body.append(target);
@@ -674,6 +744,12 @@ describe("paginated editorial editor", () => {
     const editable = target.querySelector<HTMLElement>(".ProseMirror")!;
     api!.focus();
     await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(target.querySelector(".typewriter-type-guide")).not.toBeNull();
+    expect(target.querySelectorAll(".typewriter-strike-caret")).toHaveLength(1);
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
+    expect(target.querySelector(".typewriter-live-typebar")).toBeNull();
+    expect(target.querySelector(".typewriter-ribbon-vibrator")).toBeNull();
+    expect(target.querySelector(".typewriter-type-slug")).toBeNull();
 
     editable.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -684,9 +760,15 @@ describe("paginated editorial editor", () => {
       }),
     );
     await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(target.querySelector(".typewriter-strike-pulse")).not.toBeNull();
-    expect(shell.classList.contains("typebar-striking")).toBe(true);
+    const firstTypebar = target.querySelector(".typewriter-live-typebar");
+    const firstVibrator = target.querySelector(".typewriter-ribbon-vibrator");
     expect(target.querySelectorAll(".typewriter-live-typebar")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-type-slug")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-ribbon-vibrator")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-strike-caret")).toHaveLength(1);
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
+    expect(shell.classList.contains("typebar-striking")).toBe(true);
+    expect(target.querySelector(".typewriter-print-pointer")).toBeNull();
 
     editable.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -697,13 +779,23 @@ describe("paginated editorial editor", () => {
       }),
     );
     await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(target.querySelectorAll(".typewriter-live-typebar")).toHaveLength(2);
+    const secondTypebar = target.querySelector(".typewriter-live-typebar");
+    const secondVibrator = target.querySelector(".typewriter-ribbon-vibrator");
+    expect(target.querySelectorAll(".typewriter-live-typebar")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-type-slug")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-ribbon-vibrator")).toHaveLength(1);
+    expect(secondTypebar).not.toBe(firstTypebar);
+    expect(secondVibrator).not.toBe(firstVibrator);
 
-    await new Promise((resolve) => setTimeout(resolve, 110));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await tick();
     expect(shell.classList.contains("typebar-striking")).toBe(false);
     expect(target.querySelector(".typewriter-live-typebar")).toBeNull();
+    expect(target.querySelector(".typewriter-type-slug")).toBeNull();
+    expect(target.querySelector(".typewriter-ribbon-vibrator")).toBeNull();
+    expect(target.querySelector(".typewriter-type-guide")).not.toBeNull();
+    expect(target.querySelectorAll(".typewriter-strike-caret")).toHaveLength(1);
 
-    await new Promise((resolve) => setTimeout(resolve, 85));
     editable.dispatchEvent(
       new InputEvent("beforeinput", {
         inputType: "insertText",
@@ -714,8 +806,12 @@ describe("paginated editorial editor", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(target.querySelectorAll(".typewriter-live-typebar")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-type-slug")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-ribbon-vibrator")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-strike-caret")).toHaveLength(1);
 
-    await new Promise((resolve) => setTimeout(resolve, 110));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await tick();
 
     editable.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -728,8 +824,8 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(shell.classList.contains("typebar-striking")).toBe(false);
     expect(target.querySelector(".typewriter-live-typebar")).toBeNull();
+    expect(target.querySelector(".typewriter-ribbon-vibrator")).toBeNull();
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
     editable.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     api!.setSelection(2, 2);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -746,8 +842,11 @@ describe("paginated editorial editor", () => {
     expect(shell.classList.contains("typewriter-drafting")).toBe(false);
     expect(shell.classList.contains("typebar-striking")).toBe(true);
     expect(target.querySelectorAll(".typewriter-live-typebar")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-type-slug")).toHaveLength(1);
+    expect(target.querySelectorAll(".typewriter-ribbon-vibrator")).toHaveLength(1);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await tick();
     editable.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Enter",
@@ -759,8 +858,10 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(shell.classList.contains("carriage-returning")).toBe(true);
     expect(shell.classList.contains("line-feeding")).toBe(true);
+    expect(shell.classList.contains("typebar-striking")).toBe(false);
+    expect(target.querySelector(".typewriter-live-typebar")).toBeNull();
+    expect(target.querySelector(".typewriter-ribbon-vibrator")).toBeNull();
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
     editable.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Backspace",
@@ -771,6 +872,7 @@ describe("paginated editorial editor", () => {
     );
     await tick();
     expect(shell.classList.contains("typebar-striking")).toBe(false);
+    expect(target.querySelector(".typewriter-live-typebar")).toBeNull();
     unmount(component);
   });
 
@@ -794,18 +896,19 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(shell.classList.contains("typewriter-drafting")).toBe(false);
     expect(shell.classList.contains("typewriter-revision")).toBe(false);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(true);
 
     editable.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     api!.setSelection(6, 6);
     await new Promise((resolve) => setTimeout(resolve, 20));
     await tick();
     expect(shell.classList.contains("typewriter-revision")).toBe(false);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(true);
     expect(target.querySelector(".typewriter-strike-rail")).not.toBeNull();
     expect(target.querySelector(".typewriter-frame-rear")).not.toBeNull();
     expect(target.querySelector(".typewriter-machine.revision")).toBeNull();
-    expect(target.querySelector(".typewriter-strike-caret")).not.toBeNull();
+    expect(target.querySelector(".typewriter-type-guide")).not.toBeNull();
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
     expect(target.querySelector(".typewriter-revision-line")).toBeNull();
 
     typeCharacters(editable, "가");
@@ -813,7 +916,7 @@ describe("paginated editorial editor", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     await tick();
     expect(shell.classList.contains("typebar-striking")).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     editable.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }),
     );
@@ -830,7 +933,7 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(shell.classList.contains("typewriter-drafting")).toBe(false);
     expect(shell.classList.contains("typewriter-revision")).toBe(false);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(true);
     typeCharacters(editable, "나");
     expect(api!.getContent()).toContain("나");
 
@@ -1017,7 +1120,7 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(scrollTop).toBeGreaterThan(0);
     expect(shell.style.getPropertyValue("--carriage-shift")).toBe("120px");
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(true);
 
     scroller.scrollTop = scrollTop + 80;
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -1029,7 +1132,7 @@ describe("paginated editorial editor", () => {
     );
     await tick();
     expect(shell.style.getPropertyValue("--carriage-shift")).toBe("0px");
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(false);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(false);
     unmount(component);
   });
 
@@ -1126,9 +1229,10 @@ describe("paginated editorial editor", () => {
     await tick();
     expect(shell.classList.contains("typewriter-revision")).toBe(false);
     expect(shell.classList.contains("typewriter-drafting")).toBe(false);
-    expect(shell.classList.contains("typewriter-caret-visible")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(true);
     expect(target.querySelector(".typewriter-strike-rail")).not.toBeNull();
-    expect(target.querySelector(".typewriter-strike-caret")).not.toBeNull();
+    expect(target.querySelector(".typewriter-type-guide")).not.toBeNull();
+    expect(target.querySelector(".typewriter-strike-hammer")).toBeNull();
     expect(target.querySelector(".typewriter-revision-line")).toBeNull();
 
     typeCharacters(editable, "### ");

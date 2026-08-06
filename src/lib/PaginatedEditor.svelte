@@ -17,6 +17,12 @@
     setPaperPageBreaks,
     type PaperPageBreak,
   } from "./paper-pagination";
+  import {
+    planPaperPageBreaks,
+    resolvePageBlockGeometry,
+    type MeasuredPageBlock,
+    type PageBreakOpportunity,
+  } from "./paper-pagination-layout";
   import { ResearchMarkdownExtensions } from "./research-markdown";
   import { FocusSentence } from "./focus-sentence";
   import {
@@ -52,7 +58,6 @@
     resolveCarriageOrigin,
     resolveCarriageTarget,
     resolveScrollbarGutter,
-    typebarOriginForCode,
     typewriterStrikeBottomClearance,
   } from "./typewriter-carriage";
   import {
@@ -72,11 +77,6 @@
   } from "./types";
 
   export type PageFitMode = "page" | "width";
-
-  interface TypebarStrike {
-    id: number;
-    origin: number;
-  }
 
   interface Props {
     value: string;
@@ -130,6 +130,7 @@
   const PAGE_BODY = (297 - 22 - 18) * MM_TO_PX;
   const PAGE_GAP = 28;
   const PAGE_EPSILON = 0.75;
+  const TYPEBAR_STRIKE_MS = 140;
   let scroller: HTMLDivElement;
   let viewport: HTMLDivElement;
   let paperWindow: HTMLDivElement;
@@ -170,7 +171,7 @@
   let carriageStepping = $state(false);
   let carriageAdvancePending = false;
   let typebarStriking = $state(false);
-  let typebarStrikes = $state<TypebarStrike[]>([]);
+  let typebarStrikeId = $state(0);
   let lineFeeding = $state(false);
   let platenRolling = $state(false);
   let platenDetenting = $state(false);
@@ -184,7 +185,7 @@
   let literaryCompletion = $state<"sentence" | "paragraph" | null>(null);
   let nextTypebarStrikeId = 0;
   let lastPhysicalTypebarAt = Number.NEGATIVE_INFINITY;
-  const typebarTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  let typebarStrikeTimer: ReturnType<typeof setTimeout> | null = null;
   let carriageStepTimer: ReturnType<typeof setTimeout> | null = null;
   let returnTimer: ReturnType<typeof setTimeout> | null = null;
   let lineFeedFrame: number | null = null;
@@ -580,9 +581,8 @@
   }
 
   function stopTypebarStrike(): void {
-    for (const timer of typebarTimers.values()) clearTimeout(timer);
-    typebarTimers.clear();
-    typebarStrikes = [];
+    if (typebarStrikeTimer) clearTimeout(typebarStrikeTimer);
+    typebarStrikeTimer = null;
     typebarStriking = false;
   }
 
@@ -649,20 +649,17 @@
     }, 220);
   }
 
-  function triggerTypebarStrike(code = ""): void {
+  function triggerTypebarStrike(): void {
     if (experience !== "typewriter" || !mounted) {
       return;
     }
-    const id = ++nextTypebarStrikeId;
-    const strike = { id, origin: typebarOriginForCode(code, id) };
-    typebarStrikes = [...typebarStrikes.slice(-3), strike];
+    if (typebarStrikeTimer) clearTimeout(typebarStrikeTimer);
+    typebarStrikeId = ++nextTypebarStrikeId;
     typebarStriking = true;
-    const timer = setTimeout(() => {
-      typebarTimers.delete(id);
-      typebarStrikes = typebarStrikes.filter((item) => item.id !== id);
-      typebarStriking = typebarStrikes.length > 0;
-    }, 100);
-    typebarTimers.set(id, timer);
+    typebarStrikeTimer = setTimeout(() => {
+      typebarStriking = false;
+      typebarStrikeTimer = null;
+    }, TYPEBAR_STRIKE_MS);
   }
 
   function triggerCarriageStep(): void {
@@ -1110,15 +1107,6 @@
     }
   }
 
-  function outerHeight(element: HTMLElement): number {
-    const style = getComputedStyle(element);
-    return (
-      element.getBoundingClientRect().height +
-      (Number.parseFloat(style.marginTop) || 0) +
-      (Number.parseFloat(style.marginBottom) || 0)
-    );
-  }
-
   interface MeasuredCharacter {
     node: Text;
     offset: number;
@@ -1170,20 +1158,21 @@
     return offset;
   }
 
-  function splitTextBlockAcrossPages(
+  function visualLineBreakResolver(
     block: HTMLElement,
     blockIndex: number,
-    usedBeforeBlock: number,
-  ): { breaks: PaperPageBreak[]; remainder: number } | null {
-    const characters = measuredCharacters(block, blockIndex);
-    if (characters.length < 2) return null;
+  ): (
+    segmentStart: number,
+    available: number,
+  ) => PageBreakOpportunity | undefined {
     const blockRect = block.getBoundingClientRect();
-    if (blockRect.height <= 0) return null;
+    let characters: MeasuredCharacter[] | null = null;
     const bottoms = new Map<number, number>();
     const characterBottom = (index: number): number => {
       const cached = bottoms.get(index);
       if (cached !== undefined) return cached;
-      const character = characters[index];
+      const character = characters?.[index];
+      if (!character) return Number.NaN;
       const range = document.createRange();
       range.setStart(character.node, character.offset);
       range.setEnd(character.node, character.offset + 1);
@@ -1195,6 +1184,7 @@
       start: number,
       targetBottom: number,
     ): number => {
+      if (!characters) return -1;
       let low = start;
       let high = characters.length - 1;
       let result = start - 1;
@@ -1210,33 +1200,130 @@
       return result;
     };
 
-    const result: PaperPageBreak[] = [];
-    let startIndex = 0;
-    let segmentTop = blockRect.top;
-    let available = PAGE_BODY - usedBeforeBlock;
-    while (startIndex < characters.length) {
+    return (segmentStart, available) => {
+      characters ??= measuredCharacters(block, blockIndex);
+      if (
+        characters.length < 2 ||
+        !Number.isFinite(blockRect.top) ||
+        available <= PAGE_EPSILON
+      ) {
+        return undefined;
+      }
+      const start = lastCharacterAtOrBefore(
+        0,
+        blockRect.top + segmentStart + PAGE_EPSILON,
+      ) + 1;
       const boundary = lastCharacterAtOrBefore(
-        startIndex,
-        segmentTop + available,
+        start,
+        blockRect.top + segmentStart + available,
       );
-      if (boundary < startIndex || boundary >= characters.length - 1) break;
-      const boundaryBottom = characterBottom(boundary);
-      const consumed = Math.max(0, boundaryBottom - segmentTop);
-      result.push({
+      if (boundary < start || boundary >= characters.length - 1) {
+        return undefined;
+      }
+      const bottom = characterBottom(boundary);
+      return {
         pos: characters[boundary].modelPosition,
-        restPx:
-          Math.max(0, available - consumed) + PAGE_BOTTOM + PAGE_TOP,
-      });
-      startIndex = boundary + 1;
-      segmentTop = boundaryBottom;
-      available = PAGE_BODY;
-    }
-    if (result.length === 0) return null;
-    const lastBottom = characterBottom(characters.length - 1);
-    return {
-      breaks: result,
-      remainder: Math.max(0, lastBottom - segmentTop),
+        consumed: Math.max(0, bottom - blockRect.top),
+      };
     };
+  }
+
+  function measuredVisualTextHeight(
+    block: HTMLElement,
+    blockTop: number,
+  ): number | null {
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let lastCharacter: { node: Text; offset: number } | null = null;
+    let textNode = walker.nextNode();
+    while (textNode) {
+      const text = textNode.textContent ?? "";
+      const parent = textNode.parentElement;
+      if (
+        text.length > 0 &&
+        !parent?.closest(".inline-math, sup[data-footnote-reference]")
+      ) {
+        lastCharacter = { node: textNode as Text, offset: text.length - 1 };
+      }
+      textNode = walker.nextNode();
+    }
+    if (!lastCharacter) return null;
+    const range = document.createRange();
+    range.setStart(lastCharacter.node, lastCharacter.offset);
+    range.setEnd(lastCharacter.node, lastCharacter.offset + 1);
+    const height = range.getBoundingClientRect().bottom - blockTop;
+    return Number.isFinite(height) && height > PAGE_EPSILON ? height : null;
+  }
+
+  function measuredBlockGeometry(
+    block: HTMLElement,
+    next: HTMLElement | undefined,
+    useVisualTextBottom: boolean,
+  ): { contentHeight: number; afterGap: number } {
+    const rect = block.getBoundingClientRect();
+    const nextRect = next?.getBoundingClientRect();
+    const visualTextHeight = useVisualTextBottom
+      ? measuredVisualTextHeight(block, rect.top)
+      : null;
+    return resolvePageBlockGeometry({
+      boxHeight: rect.height,
+      visualContentHeight: visualTextHeight,
+      nextBlockOffset: nextRect ? nextRect.top - rect.top : null,
+      marginBottom: Number.parseFloat(getComputedStyle(block).marginBottom),
+    });
+  }
+
+  function isAtomicPageBlock(block: HTMLElement): boolean {
+    return (
+      block.matches(
+        "table, figure, img, .tableWrapper, .editorial-image, .display-math",
+      ) ||
+      Boolean(
+        block.querySelector(
+          ":scope > table, :scope > figure, :scope > img, :scope > .editorial-image, :scope > .display-math",
+        ),
+      )
+    );
+  }
+
+  function measuredPageBlocks(
+    blocks: HTMLElement[],
+    positions: number[],
+  ): MeasuredPageBlock[] {
+    return blocks.map((block, index) => {
+      const atomic = isAtomicPageBlock(block);
+      const hasBreakableText = !atomic && (block.textContent?.length ?? 0) > 1;
+      const heading = /^H[1-6]$/u.test(block.tagName);
+      const geometry = measuredBlockGeometry(
+        block,
+        blocks[index + 1],
+        hasBreakableText && !heading,
+      );
+      const computedLineHeight = Number.parseFloat(
+        getComputedStyle(block).lineHeight,
+      );
+      const fallbackLead = Number.isFinite(computedLineHeight)
+        ? computedLineHeight * 2
+        : 48;
+      const leadHeight = Math.min(
+        geometry.contentHeight,
+        fallbackLead,
+      );
+      return {
+        pos: positions[index] ?? 0,
+        contentHeight: geometry.contentHeight,
+        afterGap: geometry.afterGap,
+        kind: heading
+          ? "heading"
+          : hasBreakableText
+            ? "breakable"
+            : "atomic",
+        leadHeight,
+        opportunities: [],
+        breakAtOrBefore: hasBreakableText
+          ? visualLineBreakResolver(block, index)
+          : undefined,
+      };
+    });
   }
 
   function equalBreaks(left: PaperPageBreak[], right: PaperPageBreak[]): boolean {
@@ -1256,77 +1343,81 @@
     for (const resolve of waiters) resolve();
   }
 
+  function failOpenPaperPagination(): void {
+    if (editor && paperPageBreaks(editor.view).length > 0) {
+      setPaperPageBreaks(editor.view, []);
+    }
+    pageCount = 1;
+    viewedPageIndex = 0;
+  }
+
   async function reflowPages(): Promise<void> {
     if (!editor || !mounted || !measureHost) return;
     layoutBusy = true;
-    await document.fonts?.ready;
-    await tick();
-    const proseMirror = editor.view.dom;
-    const clone = proseMirror.cloneNode(true) as HTMLElement;
-    clone.removeAttribute("contenteditable");
-    clone
-      .querySelectorAll(".paper-page-break, .editor-ghost-text")
-      .forEach((node) => node.remove());
-    clone.classList.add("paper-measure-document");
-    clone.style.minHeight = "0";
-    clone.style.height = "auto";
-    measureHost.replaceChildren(clone);
-    await Promise.all(
-      Array.from(clone.querySelectorAll("img")).map((image) =>
-        image.decode ? image.decode().catch(() => undefined) : Promise.resolve(),
-      ),
-    );
+    try {
+      await document.fonts?.ready;
+      await tick();
+      if (!editor || !mounted) return;
+      const proseMirror = editor.view.dom;
+      const clone = proseMirror.cloneNode(true) as HTMLElement;
+      clone.removeAttribute("contenteditable");
+      clone
+        .querySelectorAll(".paper-page-break, .editor-ghost-text")
+        .forEach((node) => node.remove());
+      clone.classList.add("paper-measure-document");
+      clone.style.minHeight = "0";
+      clone.style.height = "auto";
+      measureHost.replaceChildren(clone);
+      await Promise.all(
+        Array.from(clone.querySelectorAll("img")).map((image) =>
+          image.decode
+            ? image.decode().catch(() => undefined)
+            : Promise.resolve(),
+        ),
+      );
 
-    const blocks = Array.from(clone.children).filter(
-      (element): element is HTMLElement =>
-        element instanceof HTMLElement && !element.classList.contains("paper-page-break"),
-    );
-    const positions: number[] = [];
-    editor.state.doc.forEach((_node, offset) => positions.push(offset));
-    const breaks: PaperPageBreak[] = [];
-    let used = 0;
+      const blocks = Array.from(clone.children).filter(
+        (element): element is HTMLElement =>
+          element instanceof HTMLElement &&
+          !element.classList.contains("paper-page-break"),
+      );
+      const positions: number[] = [];
+      editor.state.doc.forEach((_node, offset) => positions.push(offset));
+      if (blocks.length !== positions.length) {
+        throw new Error("Pagination measurement did not match the document.");
+      }
+      const breaks = planPaperPageBreaks(
+        measuredPageBlocks(blocks, positions),
+        {
+          body: PAGE_BODY,
+          top: PAGE_TOP,
+          bottom: PAGE_BOTTOM,
+          epsilon: PAGE_EPSILON,
+        },
+      );
 
-    blocks.forEach((block, index) => {
-      const height = outerHeight(block);
-      const next = blocks[index + 1];
-      const keepWithNext = /^H[1-6]$/.test(block.tagName) && Boolean(next);
-      const required = height + (keepWithNext && next ? outerHeight(next) : 0);
-      const splittable = ["P", "PRE"].includes(block.tagName);
-      if (
-        splittable &&
-        used + height > PAGE_BODY + PAGE_EPSILON &&
-        !keepWithNext
-      ) {
-        const split = splitTextBlockAcrossPages(block, index, used);
-        if (split) {
-          breaks.push(...split.breaks);
-          used = split.remainder;
-          return;
+      const current = paperPageBreaks(editor.view);
+      if (!equalBreaks(current, breaks)) {
+        setPaperPageBreaks(editor.view, breaks);
+      }
+      const appliedBreaks = paperPageBreaks(editor.view);
+      pageCount = Math.max(1, appliedBreaks.length + 1);
+      viewedPageIndex = Math.min(viewedPageIndex, pageCount - 1);
+    } catch {
+      failOpenPaperPagination();
+    } finally {
+      measureHost.replaceChildren();
+      try {
+        await tick();
+        if (mounted) {
+          updateCaretLine();
+          updateContinuousHeight();
         }
+      } finally {
+        layoutBusy = false;
+        resolveLayoutWaiters();
       }
-      if (index > 0 && used > 0 && used + required > PAGE_BODY + PAGE_EPSILON) {
-        breaks.push({
-          pos: positions[index] ?? 0,
-          restPx: Math.max(0, PAGE_BODY - used) + PAGE_BOTTOM + PAGE_TOP,
-        });
-        used = 0;
-      }
-      used += height;
-      if (used > PAGE_BODY && height > PAGE_BODY) {
-        used = Math.min(PAGE_BODY, used % PAGE_BODY || PAGE_BODY);
-      }
-    });
-
-    const current = paperPageBreaks(editor.view);
-    if (!equalBreaks(current, breaks)) setPaperPageBreaks(editor.view, breaks);
-    pageCount = Math.max(1, breaks.length + 1);
-    viewedPageIndex = Math.min(viewedPageIndex, pageCount - 1);
-    measureHost.replaceChildren();
-    await tick();
-    updateCaretLine();
-    updateContinuousHeight();
-    layoutBusy = false;
-    resolveLayoutWaiters();
+    }
   }
 
   function scheduleLayout(): void {
@@ -1339,6 +1430,7 @@
       layoutFrame = requestAnimationFrame(() => {
         layoutFrame = null;
         void reflowPages().catch(() => {
+          failOpenPaperPagination();
           layoutBusy = false;
           resolveLayoutWaiters();
         });
@@ -1716,7 +1808,7 @@
             isTypebarKey(event)
           ) {
             lastPhysicalTypebarAt = performance.now();
-            triggerTypebarStrike(event.code);
+            triggerTypebarStrike();
           }
           const ghost = editorGhostText(view);
           if (event.key === "Escape" && ghost) {
@@ -1877,7 +1969,7 @@
   class:writing-literary={experience === "literary"}
   class:writing-typewriter={experience === "typewriter"}
   class:writing-flow={experience === "flow"}
-  class:typewriter-caret-visible={experience === "typewriter" && caretAlignedToStrike && Boolean(caretLine)}
+  class:typewriter-strike-point-visible={experience === "typewriter" && caretAlignedToStrike && Boolean(caretLine)}
   class:carriage-returning={carriageReturning}
   class:carriage-stepping={carriageStepping}
   class:typebar-striking={typebarStriking}
@@ -1886,7 +1978,7 @@
   class:platen-detenting={platenDetenting}
   class:margin-warning={marginWarning}
   class="paper-editor-shell"
-  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", ${paperFontFallback};--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px;--carriage-origin:${carriageOrigin}px;--carriage-shift:${carriageShift}px;--carriage-track-duration:90ms;--carriage-step-duration:48ms;--carriage-return-duration:${carriageReturnMs}ms;--typewriter-scrollbar-gutter:${typewriterScrollbarGutter}px;--typewriter-paper-width:${PAGE_WIDTH * pageScale}px;--typewriter-strike-bottom:${typewriterStrikeBottom}px;--typewriter-strike-y:calc(100% - var(--typewriter-strike-bottom));--typewriter-line-aperture:${typewriterLineAperture}px;--typewriter-platen-angle:${platenAngle}deg;--typewriter-platen-surface:${platenSurfaceOffset}px;--typewriter-platen-intensity:${platenIntensity};--typewriter-paper-tension:${typewriterPaperTension}px;--typewriter-platen-pitch:${typewriterPlatenPitch}px;--flow-width:${flowWidth}px;--typewriter-top-runway:${typewriterTopRunway}px;--typewriter-bottom-runway:${typewriterBottomRunway}px;--flow-top-runway:${flowTopRunway}px;--flow-bottom-runway:${flowBottomRunway}px`}
+  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", ${paperFontFallback};--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px;--carriage-origin:${carriageOrigin}px;--carriage-shift:${carriageShift}px;--carriage-track-duration:90ms;--carriage-step-duration:48ms;--carriage-return-duration:${carriageReturnMs}ms;--typewriter-strike-duration:${TYPEBAR_STRIKE_MS}ms;--typewriter-scrollbar-gutter:${typewriterScrollbarGutter}px;--typewriter-paper-width:${PAGE_WIDTH * pageScale}px;--typewriter-strike-bottom:${typewriterStrikeBottom}px;--typewriter-strike-y:calc(100% - var(--typewriter-strike-bottom));--typewriter-line-aperture:${typewriterLineAperture}px;--typewriter-platen-angle:${platenAngle}deg;--typewriter-platen-surface:${platenSurfaceOffset}px;--typewriter-platen-intensity:${platenIntensity};--typewriter-paper-tension:${typewriterPaperTension}px;--typewriter-platen-pitch:${typewriterPlatenPitch}px;--flow-width:${flowWidth}px;--typewriter-top-runway:${typewriterTopRunway}px;--typewriter-bottom-runway:${typewriterBottomRunway}px;--flow-top-runway:${flowTopRunway}px;--flow-bottom-runway:${flowBottomRunway}px`}
 >
   <div class="paper-toolbar-note" aria-live="polite">
     <span>
@@ -1959,20 +2051,18 @@
       <div class="typewriter-strike-rail">
         <span class="typewriter-ribbon-band"></span>
         <span class="typewriter-segment"></span>
-        {#each typebarStrikes as strike (strike.id)}
-          <span
-            class="typewriter-live-typebar"
-            style={`--strike-origin:${strike.origin}`}
-          >
-            <i></i>
-            <b></b>
-          </span>
-        {/each}
         {#if caretAlignedToStrike && caretLine}
           <span class="typewriter-strike-caret"></span>
         {/if}
         <span class="typewriter-type-guide">
-          <span class="typewriter-strike-pulse"></span>
+          {#if caretAlignedToStrike && caretLine && typebarStriking}
+            {#key typebarStrikeId}
+              <span class="typewriter-ribbon-vibrator"></span>
+              <span class="typewriter-live-typebar">
+                <i class="typewriter-type-slug"></i>
+              </span>
+            {/key}
+          {/if}
         </span>
       </div>
     </div>
@@ -2057,7 +2147,7 @@
     </div>
   {/if}
 
-  <div class="paper-measure-host" bind:this={measureHost} aria-hidden="true"></div>
+  <div class="paper-measure-host paper-editor-mount" bind:this={measureHost} aria-hidden="true"></div>
 </div>
 
 <style>
@@ -2422,12 +2512,12 @@
 
   .typewriter-return-lever {
     position: absolute;
-    z-index: 2;
-    top: calc(var(--line-aperture) / 2 + 22px);
-    left: 16px;
-    width: 128px;
+    z-index: 9;
+    top: calc(var(--line-aperture) / 2 + 5px);
+    right: calc(100% - 30px);
+    width: 126px;
     height: 4px;
-    transform: translateX(-92%) rotate(-10deg);
+    transform: rotate(8deg);
     transform-origin: right center;
     border: 1px solid #444b48;
     border-radius: 999px;
@@ -2435,6 +2525,22 @@
     box-shadow:
       inset 0 1px rgba(255, 255, 255, 0.62),
       0 2px 4px rgba(0, 0, 0, 0.32);
+  }
+
+  .typewriter-return-lever::after {
+    position: absolute;
+    top: 50%;
+    right: -5px;
+    width: 10px;
+    height: 10px;
+    transform: translateY(-50%);
+    border: 1px solid #343a38;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 34%, #e2e4df, #747b78 48%, #202624 76%);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.42),
+      0 2px 3px rgba(0, 0, 0, 0.42);
+    content: "";
   }
 
   .typewriter-return-lever i {
@@ -2523,71 +2629,7 @@
     opacity: 0.86;
   }
 
-  .typewriter-live-typebar {
-    --typebar-rest-angle: calc(var(--strike-origin) * -8deg);
-    --typebar-impact-angle: calc(var(--strike-origin) * -38deg);
-    position: absolute;
-    z-index: 3;
-    bottom: -82px;
-    left: calc(50% + var(--strike-origin) * 54px);
-    width: 4px;
-    height: 82px;
-    transform-origin: 50% 100%;
-    border: 1px solid #404845;
-    border-radius: 3px 3px 1px 1px;
-    background: linear-gradient(90deg, #363d3a, var(--typewriter-metal) 48%, #515854);
-    box-shadow:
-      inset 1px 0 rgba(255, 255, 255, 0.18),
-      0 2px 3px rgba(0, 0, 0, 0.45);
-    animation: typewriter-typebar-strike 96ms cubic-bezier(0.2, 0.84, 0.26, 1) both;
-  }
-
-  .typewriter-live-typebar i {
-    position: absolute;
-    top: -7px;
-    left: 50%;
-    width: 15px;
-    height: 8px;
-    transform: translateX(-50%);
-    border: 1px solid #292f2c;
-    border-radius: 2px;
-    background:
-      linear-gradient(180deg, #c9ccc8, #777e7a 46%, #333936),
-      var(--typewriter-metal);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.4),
-      0 1px 2px rgba(0, 0, 0, 0.5);
-  }
-
-  .typewriter-live-typebar b {
-    position: absolute;
-    top: -13px;
-    left: 50%;
-    width: 23px;
-    height: 10px;
-    transform: translateX(-50%);
-    border-top: 1px solid rgba(91, 47, 42, 0.94);
-    border-right: 1px solid rgba(177, 184, 180, 0.62);
-    border-left: 1px solid rgba(177, 184, 180, 0.62);
-    border-radius: 7px 7px 2px 2px;
-    opacity: 0;
-    animation: typewriter-ribbon-vibrator 96ms ease-out both;
-  }
-
   .typewriter-machine.active .typewriter-strike-rail { opacity: 1; }
-
-  .typewriter-strike-caret {
-    position: absolute;
-    z-index: 5;
-    top: 50%;
-    left: 50%;
-    width: 1.5px;
-    height: var(--strike-caret-height);
-    transform: translate(-50%, -50%);
-    border-radius: 1px;
-    background: #b9bfbc;
-    box-shadow: 0 0 4px rgba(185, 191, 188, 0.18);
-  }
 
   .typewriter-type-guide {
     position: absolute;
@@ -2603,34 +2645,61 @@
     transition: filter 120ms ease;
   }
 
-  .typewriter-strike-pulse {
+  .typewriter-live-typebar {
+    position: absolute;
+    z-index: 3;
+    bottom: -24px;
+    left: 50%;
+    box-sizing: border-box;
+    width: 4px;
+    height: 60px;
+    transform-origin: 50% 100%;
+    border: 1px solid #3f4644;
+    border-radius: 2px;
+    background: linear-gradient(90deg, #252a28, #a9ada8 48%, #363c39);
+    box-shadow:
+      inset 1px 0 rgba(255, 255, 255, 0.16),
+      0 2px 3px rgba(0, 0, 0, 0.42);
+    backface-visibility: hidden;
+    pointer-events: none;
+    animation: typewriter-typebar-strike var(--typewriter-strike-duration) linear both;
+  }
+
+  .typewriter-type-slug {
+    position: absolute;
+    top: -6px;
+    left: 50%;
+    box-sizing: border-box;
+    width: 13px;
+    height: 7px;
+    transform: translateX(-50%);
+    border: 1px solid #292e2c;
+    border-radius: 2px;
+    background: linear-gradient(180deg, #b8bbb6, #555b58 58%, #1f2422);
+    box-shadow:
+      inset 0 1px rgba(255, 255, 255, 0.28),
+      0 1px 2px rgba(0, 0, 0, 0.45);
+  }
+
+  .typewriter-ribbon-vibrator {
     position: absolute;
     z-index: 2;
-    top: 1px;
+    top: 7px;
     left: 50%;
-    width: 8px;
-    height: 3px;
-    transform: translateX(-50%);
-    border-radius: 1px;
-    background: var(--typewriter-metal-deep);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
-    opacity: 0.62;
-    transition:
-      background-color 120ms ease,
-      box-shadow 120ms ease,
-      opacity 120ms ease;
+    box-sizing: border-box;
+    width: 18px;
+    height: 9px;
+    border-top: 2px solid #171314;
+    border-right: 2px solid #929793;
+    border-left: 2px solid #929793;
+    border-radius: 5px 5px 1px 1px;
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.46));
+    pointer-events: none;
+    animation: typewriter-ribbon-lift var(--typewriter-strike-duration) linear both;
   }
 
-  .typewriter-machine.active .typewriter-strike-pulse { opacity: 0.88; }
-
-  .typebar-striking .typewriter-strike-pulse {
-    background: var(--typewriter-metal);
-    box-shadow: 0 -1px 4px rgba(224, 231, 226, 0.22);
-  }
-
-  .margin-warning .typewriter-strike-pulse {
-    background: var(--typewriter-warning);
-    box-shadow: 0 0 0 3px rgba(201, 149, 82, 0.12);
+  .margin-warning .typewriter-type-guide {
+    border-bottom-color: #8d6030;
   }
 
   .line-feeding .typewriter-platen {
@@ -2647,32 +2716,56 @@
 
   @keyframes typewriter-typebar-strike {
     0% {
-      transform: translateX(-50%) rotate(var(--typebar-rest-angle)) translateY(18px) scaleY(0.88);
-      opacity: 0.34;
+      transform: translateX(-50%) translateY(20px) rotateX(62deg);
+      opacity: 0;
     }
-    35% {
-      transform: translateX(-50%) rotate(var(--typebar-impact-angle)) translateY(-3px) scaleY(1);
+    12% {
+      transform: translateX(-50%) translateY(14px) rotateX(48deg);
+      opacity: 0.38;
+    }
+    30% {
+      transform: translateX(-50%) translateY(1px) rotateX(8deg);
+      opacity: 1;
+      animation-timing-function: cubic-bezier(0.1, 0.72, 0.2, 1);
+    }
+    32%, 39% {
+      transform: translateX(-50%) translateY(-2px) rotateX(0deg);
       opacity: 1;
     }
-    47%, 58% {
-      transform: translateX(-50%) rotate(var(--typebar-impact-angle)) translateY(-7px) scaleY(1.02);
-      opacity: 1;
+    46% {
+      transform: translateX(-50%) translateY(2px) rotateX(12deg);
+      opacity: 0.86;
+      animation-timing-function: cubic-bezier(0.22, 0.05, 0.36, 1);
     }
     100% {
-      transform: translateX(-50%) rotate(var(--typebar-rest-angle)) translateY(18px) scaleY(0.88);
+      transform: translateX(-50%) translateY(20px) rotateX(62deg);
       opacity: 0;
     }
   }
 
-  @keyframes typewriter-ribbon-vibrator {
-    0%, 26%, 100% { transform: translateX(-50%) translateY(6px); opacity: 0; }
-    43%, 60% { transform: translateX(-50%) translateY(-2px); opacity: 1; }
+  @keyframes typewriter-ribbon-lift {
+    0%, 16%, 100% {
+      transform: translateX(-50%) translateY(7px);
+      opacity: 0;
+    }
+    24% {
+      transform: translateX(-50%) translateY(2px);
+      opacity: 0.72;
+    }
+    30%, 42% {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+    55% {
+      transform: translateX(-50%) translateY(7px);
+      opacity: 0;
+    }
   }
 
   @keyframes typewriter-lever-return {
-    0% { transform: translateX(-92%) rotate(-10deg); }
-    44% { transform: translateX(-92%) rotate(-2deg); }
-    100% { transform: translateX(-92%) rotate(-10deg); }
+    0% { transform: rotate(8deg); }
+    44% { transform: rotate(2deg); }
+    100% { transform: rotate(8deg); }
   }
 
   @keyframes typewriter-platen-feed {
@@ -2724,8 +2817,8 @@
   }
 
   .typebar-striking .typewriter-typebasket {
-    transform: translate(-50%, 1px) scale(1);
-    opacity: 0.34;
+    transform: translate(-50%, 10px) scale(0.92);
+    opacity: 0.18;
   }
 
   .typewriter-paper-wrap {
@@ -2892,9 +2985,6 @@
   }
 
   .typewriter-return-lever {
-    top: calc(var(--line-aperture) / 2 + 22px);
-    left: 14px;
-    width: 122px;
     height: 3px;
     border: 0;
     background: linear-gradient(180deg, #e2e2dd, #989d9a 48%, #555b5a);
@@ -2946,44 +3036,19 @@
     opacity: 0.78;
   }
 
-  .typewriter-live-typebar {
-    bottom: -78px;
-    width: 3px;
-    height: 78px;
-    border-color: #4e5453;
-    background: linear-gradient(90deg, #3c4241, #d0d1cc 48%, #555b59);
-    box-shadow:
-      inset 1px 0 rgba(255, 255, 255, 0.22),
-      0 2px 3px rgba(0, 0, 0, 0.5);
-  }
-
-  .typewriter-live-typebar i {
-    border-color: #343938;
-    background: linear-gradient(180deg, #e0e0db, #858a87 48%, #373c3c);
-  }
-
-  .typewriter-live-typebar b {
-    border-top-color: rgba(20, 22, 23, 0.96);
-    border-right-color: rgba(206, 208, 203, 0.66);
-    border-left-color: rgba(206, 208, 203, 0.66);
-  }
-
-  .typewriter-strike-caret {
-    width: 1px;
-    background: #555b5a;
-    box-shadow: 0 0 0 1px rgba(232, 232, 227, 0.12);
-  }
-
   .typewriter-type-guide {
-    bottom: -24px;
-    width: 32px;
-    height: 25px;
+    bottom: -29px;
+    width: 24px;
+    height: 28px;
     clip-path: none;
     border: 0;
-    border-bottom: 3px solid #696f6d;
-    border-radius: 0 0 5px 5px;
+    border-bottom: 4px solid #696f6d;
+    border-radius: 0 0 4px 4px;
     background: transparent;
     filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
+    perspective: 90px;
+    perspective-origin: 50% 100%;
+    overflow: visible;
   }
 
   .typewriter-type-guide::before {
@@ -2991,7 +3056,7 @@
     top: 1px;
     bottom: 0;
     left: 2px;
-    width: 5px;
+    width: 4px;
     clip-path: polygon(38% 0, 100% 0, 100% 100%, 0 100%, 0 22%);
     background: linear-gradient(90deg, #777d7b, #deded9 56%, #767c7a);
     content: "";
@@ -3002,23 +3067,10 @@
     top: 1px;
     right: 2px;
     bottom: 0;
-    width: 5px;
+    width: 4px;
     clip-path: polygon(0 0, 62% 0, 100% 22%, 100% 100%, 0 100%);
     background: linear-gradient(90deg, #6b716f, #d1d1cc 48%, #686e6c);
     content: "";
-  }
-
-  .typewriter-strike-pulse {
-    top: 2px;
-    width: 7px;
-    height: 2px;
-    background: #676d6b;
-    box-shadow: none;
-  }
-
-  .typebar-striking .typewriter-strike-pulse {
-    background: #e0e0db;
-    box-shadow: 0 -1px 4px rgba(231, 232, 227, 0.3);
   }
 
   .line-feeding .typewriter-platen,
@@ -3540,10 +3592,12 @@
 
   .typewriter-return-lever {
     z-index: 4;
-    top: calc(var(--line-aperture) / 2 + 17px);
-    left: 13px;
+    top: calc(var(--line-aperture) / 2 + 5px);
+    right: calc(100% - 30px);
+    left: auto;
     width: 126px;
     height: 4px;
+    transform: rotate(8deg);
     transform-origin: right center;
     border: 0;
     background: linear-gradient(180deg, #e4e5e0, #969c99 48%, #4b5150);
@@ -3581,8 +3635,8 @@
   }
 
   .typebar-striking .typewriter-typebasket {
-    transform: translate(-50%, 1px) scale(1);
-    opacity: 0.38;
+    transform: translate(-50%, 11px) scale(0.92);
+    opacity: 0.18;
   }
 
   .typewriter-segment {
@@ -3630,19 +3684,22 @@
   .typewriter-ribbon-band::after { right: -5px; }
 
   .typewriter-type-guide {
-    bottom: -31px;
-    width: 32px;
-    height: 32px;
-    border-bottom: 5px solid #555b59;
-    border-radius: 0 0 5px 5px;
+    bottom: -29px;
+    width: 24px;
+    height: 28px;
+    border-bottom: 4px solid #555b59;
+    border-radius: 0 0 4px 4px;
     filter: drop-shadow(0 3px 2px rgba(0, 0, 0, 0.66));
+    perspective: 90px;
+    perspective-origin: 50% 100%;
+    overflow: visible;
   }
 
   .typewriter-type-guide::before,
   .typewriter-type-guide::after {
     top: 1px;
     bottom: 1px;
-    width: 5px;
+    width: 4px;
   }
 
   .typewriter-type-guide::before {
@@ -3655,12 +3712,18 @@
     background: linear-gradient(90deg, #666c6a, #d4d5d0 48%, #5e6462);
   }
 
-  .typewriter-strike-pulse {
-    top: 2px;
-    width: 8px;
-    height: 3px;
-    background: #747a77;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.42);
+  .typewriter-strike-caret {
+    position: absolute;
+    z-index: 5;
+    top: 50%;
+    left: 50%;
+    width: 1px;
+    height: var(--strike-caret-height);
+    transform: translate(-50%, -50%);
+    border-radius: 1px;
+    background: #555b5a;
+    box-shadow: 0 0 0 1px rgba(232, 232, 227, 0.12);
+    pointer-events: none;
   }
 
   .literary-caret-mark,
@@ -3752,7 +3815,7 @@
     line-height: 1.85;
   }
 
-  .typewriter-caret-visible .paper-editor-mount :global(.ProseMirror) {
+  .typewriter-strike-point-visible .paper-editor-mount :global(.ProseMirror) {
     caret-color: transparent;
   }
 
@@ -4051,7 +4114,7 @@
   .paper-editor-mount :global(.paper-page-break) {
     display: block;
     box-sizing: border-box;
-    width: 170mm;
+    width: 100%;
     height: calc(var(--page-rest) + var(--paper-gap));
     margin: 0;
     padding: 0;
@@ -4250,7 +4313,9 @@
     .typewriter-strike-rail,
     .typewriter-typebasket,
     .typewriter-type-guide,
-    .typewriter-strike-pulse,
+    .typewriter-live-typebar,
+    .typewriter-type-slug,
+    .typewriter-ribbon-vibrator,
     .typewriter-paper-wrap,
     .typewriter-platen,
     .typewriter-bail-roller,
@@ -4258,11 +4323,13 @@
     .typewriter-index-wheel,
     .typewriter-detent-pawl,
     .typewriter-return-lever,
-    .typewriter-live-typebar,
     .writing-flow .paper-editor-mount :global(.ProseMirror > *) {
       transition-duration: 0.001ms !important;
       animation-duration: 0.001ms !important;
     }
+    .typewriter-live-typebar,
+    .typewriter-ribbon-vibrator { display: none !important; }
+    .typebar-striking .typewriter-typebasket { opacity: 0; }
     .writing-literary .paper-editor-mount :global(.is-settling-ink),
     .writing-typewriter .paper-editor-mount :global(.is-typewriter-imprint),
     .literary-completion-mark {
@@ -4271,10 +4338,11 @@
   }
 
   @media (forced-colors: active) {
-    .typewriter-caret-visible .paper-editor-mount :global(.ProseMirror) {
+    .typewriter-strike-point-visible .paper-editor-mount :global(.ProseMirror) {
       caret-color: CanvasText;
     }
-    .typewriter-strike-caret { display: none; }
+    .typewriter-strike-caret,
+    .typewriter-type-guide { display: none; }
     .typewriter-frame-rear,
     .typewriter-frame-front,
     .typewriter-rail-recess,
@@ -4308,11 +4376,9 @@
     .typewriter-index-wheel,
     .typewriter-detent-pawl,
     .typewriter-return-lever,
+    .typewriter-return-lever::after,
     .typewriter-return-lever i,
-    .typewriter-type-guide,
-    .typewriter-live-typebar,
-    .typewriter-live-typebar i,
-    .typewriter-live-typebar b {
+    .typewriter-type-guide {
       border-color: CanvasText;
       background: Canvas;
       box-shadow: none;
@@ -4324,8 +4390,7 @@
     .typewriter-paper-scale,
     .typewriter-ribbon-band,
     .typewriter-ribbon-band::before,
-    .typewriter-ribbon-band::after,
-    .typewriter-strike-pulse {
+    .typewriter-ribbon-band::after {
       border-color: CanvasText;
       background: CanvasText;
       box-shadow: none;

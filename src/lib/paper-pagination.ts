@@ -15,6 +15,7 @@ interface PaginationState {
 }
 
 const paginationMeta = "research-writer:paper-pagination";
+const MAX_PAPER_PAGE_REST_PX = 297 * 96 / 25.4;
 
 export const paperPaginationKey = new PluginKey<PaginationState>(
   "research-writer-paper-pagination",
@@ -41,19 +42,41 @@ function decorationFor(pageBreak: PaperPageBreak, index: number): Decoration {
   );
 }
 
+export function normalizePaperPageBreaks(
+  breaks: PaperPageBreak[],
+  documentSize: number,
+): PaperPageBreak[] {
+  if (!Number.isInteger(documentSize) || documentSize <= 1) return [];
+  const byPosition = new Map<number, number>();
+  for (const entry of breaks) {
+    if (
+      !Number.isInteger(entry.pos) ||
+      !Number.isFinite(entry.restPx) ||
+      entry.pos <= 0 ||
+      entry.pos >= documentSize
+    ) {
+      continue;
+    }
+    const restPx = Math.max(
+      0,
+      Math.min(MAX_PAPER_PAGE_REST_PX, entry.restPx),
+    );
+    const previous = byPosition.get(entry.pos);
+    byPosition.set(
+      entry.pos,
+      previous === undefined ? restPx : Math.min(previous, restPx),
+    );
+  }
+  return Array.from(byPosition, ([pos, restPx]) => ({ pos, restPx })).sort(
+    (left, right) => left.pos - right.pos,
+  );
+}
+
 function paginationState(
   doc: Transaction["doc"],
   breaks: PaperPageBreak[],
 ): PaginationState {
-  const safeBreaks = breaks
-    .filter(
-      (entry) =>
-        Number.isFinite(entry.pos) &&
-        Number.isFinite(entry.restPx) &&
-        entry.pos > 0 &&
-        entry.pos < doc.content.size,
-    )
-    .sort((left, right) => left.pos - right.pos);
+  const safeBreaks = normalizePaperPageBreaks(breaks, doc.content.size);
   return {
     breaks: safeBreaks,
     decorations: DecorationSet.create(
