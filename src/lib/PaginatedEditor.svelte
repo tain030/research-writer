@@ -31,6 +31,11 @@
     editorGhostText,
     setEditorGhostText,
   } from "./ghost-text";
+  import {
+    AiSelection,
+    clearEditorAiSelection,
+    setEditorAiSelection,
+  } from "./ai-selection";
   import { HeadingInputGuard } from "./heading-input-guard";
   import { MarkdownHeading } from "./markdown-heading";
   import {
@@ -1499,6 +1504,7 @@
   ): void {
     if (!editor || readOnly || edits.length === 0) return;
     const source = canonicalMarkdown();
+    const before = lastValue;
     const ordered = [...edits].sort((left, right) => right.from - left.from);
     let next = source;
     let previousFrom = source.length + 1;
@@ -1513,13 +1519,21 @@
     internalUpdate = true;
     const parsed = splitFrontmatter(next);
     frontmatter = parsed.prefix;
-    lastValue = next;
-    editor.commands.setContent(parsed.body, {
-      contentType: "markdown",
-      emitUpdate: false,
-    });
-    internalUpdate = false;
-    emitChange();
+    try {
+      editor.commands.setContent(parsed.body, {
+        contentType: "markdown",
+        emitUpdate: false,
+      });
+    } finally {
+      internalUpdate = false;
+    }
+    const applied = canonicalMarkdown();
+    lastValue = applied;
+    if (applied !== before && !differsOnlyByTerminalBlankLines(applied, before)) {
+      onchange?.(applied, { composing: false });
+      emitWritingActivity(before, applied, pendingInput);
+    }
+    pendingInput = null;
     const last = ordered[ordered.length - 1];
     setSelection(last.from + last.text.length, last.from + last.text.length);
     scheduleLayout();
@@ -1586,6 +1600,17 @@
       },
       clearGhostText: () => {
         if (editor) clearEditorGhostText(editor.view);
+      },
+      setAiSelection: (from, to) => {
+        if (!editor) return;
+        setEditorAiSelection(
+          editor.view,
+          sourceToDocumentPosition(from),
+          sourceToDocumentPosition(to),
+        );
+      },
+      clearAiSelection: () => {
+        if (editor) clearEditorAiSelection(editor.view);
       },
       getPageCount: () => pageCount,
       awaitLayout,
@@ -1830,6 +1855,7 @@
         FocusSentence,
         ActiveWritingBlock,
         GhostText,
+        AiSelection,
         InkFeedback,
         PaperPagination,
       ],
@@ -4367,6 +4393,12 @@
   }
   .focus-sentence .paper-editor-mount :global(.is-active-writing-sentence) {
     color: #28231f;
+  }
+
+  .paper-editor-mount :global(.is-ai-context-selection) {
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--accent) 58%, transparent);
   }
 
   .paper-toolbar-note {

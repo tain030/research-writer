@@ -45,13 +45,13 @@ function conversation(): AiConversation {
             baseText: "기존 문장",
             targetKind: "selection",
             targetFrom: 4,
-            targetTo: 8,
+            targetTo: 9,
             revisedText: "새 문장",
             hunks: [
               {
                 id: "edit-1",
                 from: 4,
-                to: 8,
+                to: 9,
                 original: "기존 문장",
                 replacement: "새 문장",
                 status: "pending",
@@ -72,6 +72,8 @@ function callbacks() {
     onselectconversation: vi.fn(),
     ondeleteconversation: vi.fn(),
     onnewselection: vi.fn(),
+    oncleartarget: vi.fn(),
+    onopenlink: vi.fn(),
     onsend: vi.fn(async () => true),
     onapplyhunk: vi.fn(),
     onrejecthunk: vi.fn(),
@@ -85,6 +87,63 @@ function callbacks() {
 }
 
 describe("AI chat panel", () => {
+  it("renders assistant Markdown, opens safe links, and clears a pinned target", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const handlers = callbacks();
+    const current = conversation();
+    current.messages[0].content = [
+      "## 결론",
+      "",
+      "**핵심**입니다.",
+      "",
+      "- 항목",
+      "",
+      "[근거](https://example.com/source)",
+    ].join("\n");
+    const component = mount(AiChatPanel, {
+      target,
+      props: {
+        account: {
+          codexInstalled: true,
+          codexVersion: "1.0",
+          authenticated: true,
+          accountType: "chatgpt",
+          email: null,
+          planType: "plus",
+          message: "연결됨",
+        },
+        login: null,
+        conversation: current,
+        conversations: [current],
+        busy: false,
+        expanded: true,
+        readOnly: false,
+        pendingSelection: null,
+        styleReferenceName: "",
+        sourceCount: 0,
+        autoComplete: false,
+        ...handlers,
+      },
+    });
+    await tick();
+
+    expect(target.querySelector(".current-response h2")?.textContent).toBe("결론");
+    expect(target.querySelector(".current-response strong")?.textContent).toBe("핵심");
+    expect(target.querySelector(".current-response li")?.textContent).toBe("항목");
+    target.querySelector<HTMLAnchorElement>(".current-response a")!.click();
+    expect(handlers.onopenlink).toHaveBeenCalledWith(
+      "https://example.com/source",
+    );
+    target
+      .querySelector<HTMLButtonElement>(
+        'button[aria-label="선택 영역 AI 문맥 해제"]',
+      )!
+      .click();
+    expect(handlers.oncleartarget).toHaveBeenCalledOnce();
+    unmount(component);
+  });
+
   it("keeps a changed selection explicit instead of silently retargeting", async () => {
     const target = document.createElement("div");
     document.body.append(target);
@@ -162,8 +221,9 @@ describe("AI chat panel", () => {
     });
     await tick();
 
-    expect(target.querySelector(".hunk-diff del")?.textContent).toBe("기존 문장");
-    expect(target.querySelector(".hunk-diff ins")?.textContent).toBe("새 문장");
+    expect(target.querySelector(".diff-row.before code")?.textContent).toBe("기존 문장");
+    expect(target.querySelector(".diff-row.after code")?.textContent).toBe("새 문장");
+    expect(target.querySelector(".hunk-labels")?.textContent).toContain("본문 수정");
     const applyButtons = Array.from(
       target.querySelectorAll<HTMLButtonElement>(".proposal-card button.apply"),
     );

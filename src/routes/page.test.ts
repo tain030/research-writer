@@ -66,6 +66,74 @@ afterEach(() => {
 });
 
 describe("writing workspace toolbar", () => {
+  it("retargets the same AI conversation and keeps its selected passage visible", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(Page, { target });
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+
+    const aiButton = target.querySelector<HTMLButtonElement>(
+      '.topbar button[aria-controls="ai-panel"]',
+    )!;
+    aiButton.click();
+    await tick();
+    target
+      .querySelector<HTMLButtonElement>(
+        '#ai-panel button[aria-label="AI 채팅 닫기"]',
+      )!
+      .click();
+    await tick();
+
+    const editable = target.querySelector<HTMLElement>(".ProseMirror")! as
+      HTMLElement & { editor: TiptapEditor };
+    editable.editor.commands.setTextSelection({ from: 1, to: 7 });
+    await tick();
+    target
+      .querySelector<HTMLButtonElement>(".selection-ai-trigger button")!
+      .click();
+    await tick();
+
+    await vi.waitFor(() =>
+      expect(target.querySelector(".is-ai-context-selection")).not.toBeNull(),
+    );
+    target
+      .querySelector<HTMLButtonElement>(
+        '#ai-panel button[aria-label="AI 채팅 닫기"]',
+      )!
+      .click();
+    await tick();
+    expect(target.querySelector(".is-ai-context-selection")).not.toBeNull();
+
+    target
+      .querySelector<HTMLButtonElement>(".selection-ai-trigger button")!
+      .click();
+    await tick();
+    target
+      .querySelector<HTMLButtonElement>(
+        '#ai-panel button[aria-label="AI 대화 기록"]',
+      )!
+      .click();
+    await tick();
+    expect(target.querySelectorAll(".conversation-row")).toHaveLength(1);
+
+    target
+      .querySelector<HTMLButtonElement>(
+        '#ai-panel button[aria-label="새 AI 대화"]',
+      )!
+      .click();
+    await tick();
+    target
+      .querySelector<HTMLButtonElement>(
+        '#ai-panel button[aria-label="AI 대화 기록"]',
+      )!
+      .click();
+    await tick();
+    expect(target.querySelectorAll(".conversation-row")).toHaveLength(2);
+    unmount(component);
+  });
+
   it("keeps the paper mounted and gives AI a dedicated header entry", async () => {
     const target = document.createElement("div");
     document.body.append(target);

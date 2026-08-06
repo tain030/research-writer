@@ -33,6 +33,34 @@ afterEach(() => {
 });
 
 describe("Markdown source editor", () => {
+  it("applies canonical Markdown ranges and emits the complete revision", async () => {
+    let api: EditorApi | null = null;
+    const changes: string[] = [];
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(MarkdownSourceEditor, {
+      target,
+      props: {
+        value: "### 2-2.\n\n## 4. 비교 기준",
+        onready: (value) => (api = value),
+        onchange: (value) => changes.push(value),
+      },
+    });
+    await tick();
+
+    api!.replaceRanges([
+      { from: 0, to: 8, text: "### 2-2. 작동 구조" },
+      { from: 10, to: 10, text: "> 작동 흐름\n\n### 2-3. 핵심 용어\n\n" },
+    ]);
+    await tick();
+
+    expect(api!.getContent()).toBe(
+      "### 2-2. 작동 구조\n\n> 작동 흐름\n\n### 2-3. 핵심 용어\n\n## 4. 비교 기준",
+    );
+    expect(changes.at(-1)).toBe(api!.getContent());
+    unmount(component);
+  });
+
   it("exposes the shared editing and source-scroll API", async () => {
     let api: EditorApi | null = null;
     const changes: string[] = [];
@@ -59,6 +87,15 @@ describe("Markdown source editor", () => {
     expect(changes.at(-1)).toBe("# 제목\n\n새 본문");
     expect(api!.getScrollAnchor().source).toBe("source");
     expect(target.querySelector(".cm-lineNumbers")).not.toBeNull();
+
+    api!.setAiSelection(0, 4);
+    await tick();
+    expect(target.querySelector(".cm-ai-context-selection")?.textContent).toBe(
+      "# 제목",
+    );
+    api!.clearAiSelection();
+    await tick();
+    expect(target.querySelector(".cm-ai-context-selection")).toBeNull();
 
     api!.setSelection(api!.getContent().length, api!.getContent().length);
     api!.setGhostText(" 이어쓰기");

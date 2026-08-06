@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 const AI_MODEL: &str = "gpt-5.6-terra";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_TIMEOUT: Duration = Duration::from_secs(240);
+const CHAT_CHUNK_LIMIT: usize = 40_000;
+const CHAT_NOTE_LIMIT: usize = 3_000;
+const CHAT_REDUCTION_LIMIT: usize = 32_000;
 type PendingRequests = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 
 pub struct CodexBridge {
@@ -136,6 +139,20 @@ struct AiChatChunkResponse {
     kind: String,
     reply: String,
     revised_text: String,
+    citations: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AiChatNotes {
+    notes: String,
+    citations: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AiChatAnswer {
+    reply: String,
     citations: Vec<String>,
     warnings: Vec<String>,
 }
@@ -381,67 +398,104 @@ impl CodexBridge {
             .ok_or_else(|| "Codex가 대화 식별자를 반환하지 않았습니다.".to_string())?
             .to_string();
 
-        let chunks = split_markdown_chunks(&request.target_text, 40_000);
+        let intent_output = self.run_chat_turn(
+            &thread_id,
+            build_chat_intent_prompt(request),
+            chat_intent_schema(),
+        )?;
+        let kind = parse_chat_intent(&intent_output)?;
+        let chunks = split_markdown_chunks(&request.target_text, CHAT_CHUNK_LIMIT);
         let total_chunks = chunks.len();
-        let mut parsed_chunks = Vec::with_capacity(total_chunks);
-        for (index, chunk) in chunks.iter().enumerate() {
-            let marker = self.next_event_id.load(Ordering::SeqCst);
-            let turn_result = self.send_request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{
-                        "type": "text",
-                        "text": build_chat_prompt(request, chunk, index, total_chunks)
-                    }],
-                    "effort": "high",
-                    "approvalPolicy": "never",
-                    "outputSchema": chat_output_schema()
-                }),
-            )?;
-            let turn_id = turn_result
-                .pointer("/turn/id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "Codex가 작업 식별자를 반환하지 않았습니다.".to_string())?
-                .to_string();
-            let output = self.wait_for_turn(marker, &thread_id, &turn_id)?;
-            parsed_chunks.push(parse_chat_output(&output, chunk)?);
-        }
+        let mut replies = Vec::new();
+        let mut citations = Vec::new();
+        let mut warnings = Vec::new();
 
-        let kind = if parsed_chunks.iter().any(|chunk| chunk.kind == "edit") {
-            "edit"
-        } else {
-            "answer"
-        };
         let revised_text = if kind == "edit" {
+            let mut parsed_chunks = Vec::with_capacity(total_chunks);
+            for (index, chunk) in chunks.iter().enumerate() {
+                let output = self.run_chat_turn(
+                    &thread_id,
+                    build_chat_edit_prompt(request, chunk, index, total_chunks),
+                    chat_output_schema(),
+                )?;
+                let parsed = parse_chat_output(&output, chunk)?;
+                if parsed.kind != "edit" {
+                    return Err(
+                        "AI가 편집 요청을 일관되게 처리하지 못했습니다. 다시 요청해주세요."
+                            .to_string(),
+                    );
+                }
+                if !parsed.reply.trim().is_empty() && !replies.contains(&parsed.reply) {
+                    replies.push(parsed.reply.clone());
+                }
+                extend_unique(&mut citations, parsed.citations.clone());
+                extend_unique(&mut warnings, parsed.warnings.clone());
+                parsed_chunks.push(parsed);
+            }
+
+            if replies.len() > 1 {
+                let output = self.run_chat_turn(
+                    &thread_id,
+                    build_chat_edit_summary_prompt(request, &replies),
+                    chat_answer_schema(),
+                )?;
+                let summary = parse_chat_answer(&output)?;
+                replies = vec![summary.reply];
+                extend_unique(&mut citations, summary.citations);
+                extend_unique(&mut warnings, summary.warnings);
+            }
+
             parsed_chunks
                 .iter()
                 .map(|chunk| chunk.revised_text.as_str())
                 .collect::<String>()
         } else {
+            let answer = if total_chunks == 1 {
+                let output = self.run_chat_turn(
+                    &thread_id,
+                    build_chat_direct_answer_prompt(request, &chunks[0]),
+                    chat_answer_schema(),
+                )?;
+                parse_chat_answer(&output)?
+            } else {
+                let mut notes = Vec::with_capacity(total_chunks);
+                for (index, chunk) in chunks.iter().enumerate() {
+                    let output = self.run_chat_turn(
+                        &thread_id,
+                        build_chat_notes_prompt(request, chunk, index, total_chunks),
+                        chat_notes_schema(),
+                    )?;
+                    notes.push(parse_chat_notes(&output)?);
+                }
+                let reduced = self.reduce_chat_notes(&thread_id, request, notes)?;
+                let output = self.run_chat_turn(
+                    &thread_id,
+                    build_chat_synthesis_prompt(request, &reduced),
+                    chat_answer_schema(),
+                )?;
+                let mut answer = parse_chat_answer(&output)?;
+                for note in reduced {
+                    extend_unique(&mut answer.warnings, note.warnings);
+                }
+                answer
+            };
+            replies.push(answer.reply);
+            extend_unique(&mut citations, answer.citations);
+            extend_unique(&mut warnings, answer.warnings);
             request.target_text.clone()
         };
-        let mut replies = Vec::new();
-        let mut citations = Vec::new();
-        let mut warnings = Vec::new();
-        for chunk in parsed_chunks {
-            if !chunk.reply.trim().is_empty() && !replies.contains(&chunk.reply) {
-                replies.push(chunk.reply);
-            }
-            extend_unique(&mut citations, chunk.citations);
-            extend_unique(&mut warnings, chunk.warnings);
-        }
-        let reply = if replies.is_empty() {
-            if kind == "edit" {
-                "요청에 맞춰 수정안을 만들었습니다.".to_string()
-            } else {
-                "원고를 검토했지만 추가로 설명할 내용이 없습니다.".to_string()
-            }
-        } else {
-            replies.join("\n\n")
-        };
+        let reply = replies
+            .into_iter()
+            .find(|reply| !reply.trim().is_empty())
+            .unwrap_or_else(|| {
+                if kind == "edit" {
+                    "요청에 맞춰 수정안을 만들었습니다.".to_string()
+                } else {
+                    "원고를 검토했지만 추가로 설명할 내용이 없습니다.".to_string()
+                }
+            });
         Ok(AiChatResponse {
-            kind: kind.to_string(),
+            kind,
             reply,
             revised_text,
             citations,
@@ -451,6 +505,61 @@ impl CodexBridge {
             processed_chunks: total_chunks,
             total_chunks,
         })
+    }
+
+    fn run_chat_turn(
+        &self,
+        thread_id: &str,
+        prompt: String,
+        output_schema: Value,
+    ) -> Result<String, String> {
+        let marker = self.next_event_id.load(Ordering::SeqCst);
+        let turn_result = self.send_request(
+            "turn/start",
+            json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": prompt }],
+                "effort": "high",
+                "approvalPolicy": "never",
+                "outputSchema": output_schema
+            }),
+        )?;
+        let turn_id = turn_result
+            .pointer("/turn/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Codex가 작업 식별자를 반환하지 않았습니다.".to_string())?
+            .to_string();
+        self.wait_for_turn(marker, thread_id, &turn_id)
+    }
+
+    fn reduce_chat_notes(
+        &self,
+        thread_id: &str,
+        request: &AiChatRequest,
+        mut notes: Vec<AiChatNotes>,
+    ) -> Result<Vec<AiChatNotes>, String> {
+        let mut round = 1;
+        while joined_notes_length(&notes) > CHAT_REDUCTION_LIMIT {
+            let groups = group_chat_notes(notes, CHAT_REDUCTION_LIMIT);
+            let group_count = groups.len();
+            let mut reduced = Vec::with_capacity(group_count);
+            for (index, group) in groups.into_iter().enumerate() {
+                let output = self.run_chat_turn(
+                    thread_id,
+                    build_chat_reduction_prompt(request, &group, round, index, group_count),
+                    chat_notes_schema(),
+                )?;
+                let mut summary = parse_chat_notes(&output)?;
+                for note in group {
+                    extend_unique(&mut summary.citations, note.citations);
+                    extend_unique(&mut summary.warnings, note.warnings);
+                }
+                reduced.push(summary);
+            }
+            notes = reduced;
+            round += 1;
+        }
+        Ok(notes)
     }
 
     pub fn run_grammar_check(
@@ -998,13 +1107,8 @@ fn build_prompt(request: &AiWritingRequest) -> String {
     )
 }
 
-fn build_chat_prompt(
-    request: &AiChatRequest,
-    target_chunk: &str,
-    chunk_index: usize,
-    total_chunks: usize,
-) -> String {
-    let history = request
+fn chat_history(request: &AiChatRequest) -> String {
+    request
         .recent_messages
         .iter()
         .map(|message| {
@@ -1019,8 +1123,11 @@ fn build_chat_prompt(
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n");
-    let sources = request
+        .join("\n\n")
+}
+
+fn chat_sources(request: &AiChatRequest) -> String {
+    request
         .sources
         .iter()
         .take(15)
@@ -1033,15 +1140,87 @@ fn build_chat_prompt(
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n");
+        .join("\n\n")
+}
+
+fn chat_target_label(request: &AiChatRequest) -> &'static str {
+    if request.target_kind == "selection" {
+        "SELECTED PASSAGE"
+    } else {
+        "FULL MANUSCRIPT"
+    }
+}
+
+fn build_chat_intent_prompt(request: &AiChatRequest) -> String {
+    let history = chat_history(request);
     format!(
-        "CONVERSATION DIGEST\n<<<\n{}\n>>>\n\nRECENT CONVERSATION\n<<<\n{history}\n>>>\n\nUSER REQUEST\n<<<\n{}\n>>>\n\nEDIT TARGET\nkind: {}\npart: {}/{}\n<<<\n{target_chunk}\n>>>\n\nNEARBY DOCUMENT CONTEXT\n<<<\n{}\n>>>\n\nSTYLE REFERENCE\n<<<\n{}\n>>>\n\nALLOWED SOURCE CARDS\n<<<\n{sources}\n>>>\n\nDecide whether the user is asking a question/analysis or requesting an edit. \
-         For a question or analysis, set kind to answer, give the answer in reply, and copy EDIT TARGET exactly into revisedText. \
-         For an edit, set kind to edit, explain the change briefly in reply, and return the complete revised Markdown for this EDIT TARGET part in revisedText. \
-         Preserve Markdown structure, YAML, URLs, code, formulas, footnotes, and citation markers unless the user explicitly asks to change them. \
-         Never add unsupported facts or citations. Use only allowed source cards and list only source IDs actually used. \
-         This is part {}/{} of one target; do not repeat or summarize text from another part.",
+        "CONVERSATION DIGEST\n<<<\n{}\n>>>\n\nRECENT CONVERSATION\n<<<\n{history}\n>>>\n\nUSER REQUEST\n<<<\n{}\n>>>\n\nACTIVE TARGET\n{}\n\nClassify the requested operation once for the entire target. Use answer when the user asks a question, requests analysis, explanation, critique, or summary without asking to rewrite the manuscript. Use edit only when the user asks to change, rewrite, insert, remove, or otherwise produce revised manuscript text. Resolve short follow-ups from the supplied conversation. Return only the schema object.",
         truncate_chars(&request.history_summary, 10_000),
+        truncate_chars(&request.prompt, 8_000),
+        chat_target_label(request),
+    )
+}
+
+fn build_chat_direct_answer_prompt(request: &AiChatRequest, target: &str) -> String {
+    let sources = chat_sources(request);
+    format!(
+        "USER REQUEST\n<<<\n{}\n>>>\n\n{}\n<<<\n{target}\n>>>\n\nNEARBY DOCUMENT CONTEXT\n<<<\n{}\n>>>\n\nSTYLE REFERENCE\n<<<\n{}\n>>>\n\nALLOWED SOURCE CARDS\n<<<\n{sources}\n>>>\n\nAnswer the user from the supplied target as one coherent Markdown response. Treat FULL MANUSCRIPT as one document, not as an edit target. Address the request directly, preserve important qualifications and relationships across sections, and do not claim access to anything not supplied. Never invent facts or citations. Use only allowed source cards and list only source IDs actually used.",
+        truncate_chars(&request.prompt, 8_000),
+        chat_target_label(request),
+        truncate_chars(&request.document_context, 40_000),
+        truncate_chars(&request.style_reference, 12_000),
+    )
+}
+
+fn build_chat_notes_prompt(
+    request: &AiChatRequest,
+    target_chunk: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+) -> String {
+    let sources = chat_sources(request);
+    format!(
+        "USER REQUEST\n<<<\n{}\n>>>\n\nMANUSCRIPT PART {}/{}\n<<<\n{target_chunk}\n>>>\n\nALLOWED SOURCE CARDS\n<<<\n{sources}\n>>>\n\nExtract concise, query-focused evidence and observations from this manuscript part for a later document-wide answer. Record claims, qualifications, structure, and cross-references that could matter. Do not answer the user yet, do not propose edits, and do not mention chunking. Never invent facts or citations. Use only allowed source cards and list only source IDs actually used.",
+        truncate_chars(&request.prompt, 8_000),
+        chunk_index + 1,
+        total_chunks,
+    )
+}
+
+fn build_chat_reduction_prompt(
+    request: &AiChatRequest,
+    notes: &[AiChatNotes],
+    round: usize,
+    group_index: usize,
+    group_count: usize,
+) -> String {
+    format!(
+        "USER REQUEST\n<<<\n{}\n>>>\n\nDOCUMENT NOTES (reduction round {round}, group {}/{})\n<<<\n{}\n>>>\n\nCompress these notes without losing evidence, qualifications, disagreements, or section relationships needed to answer the user. Do not answer the user yet and do not mention the reduction process.",
+        truncate_chars(&request.prompt, 8_000),
+        group_index + 1,
+        group_count,
+        joined_chat_notes(notes),
+    )
+}
+
+fn build_chat_synthesis_prompt(request: &AiChatRequest, notes: &[AiChatNotes]) -> String {
+    let sources = chat_sources(request);
+    format!(
+        "USER REQUEST\n<<<\n{}\n>>>\n\nDOCUMENT-WIDE EVIDENCE\n<<<\n{}\n>>>\n\nALLOWED SOURCE CARDS\n<<<\n{sources}\n>>>\n\nWrite one coherent Markdown answer grounded in the evidence from the entire manuscript. Integrate relationships across sections, retain important qualifications, and address the request directly. Do not mention chunks, notes, reduction, or hidden processing. Never invent facts or citations. Use only allowed source cards and list only source IDs actually used.",
+        truncate_chars(&request.prompt, 8_000),
+        joined_chat_notes(notes),
+    )
+}
+
+fn build_chat_edit_prompt(
+    request: &AiChatRequest,
+    target_chunk: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+) -> String {
+    let sources = chat_sources(request);
+    format!(
+        "USER REQUEST\n<<<\n{}\n>>>\n\nEDIT TARGET\nkind: {}\npart: {}/{}\n<<<\n{target_chunk}\n>>>\n\nNEARBY DOCUMENT CONTEXT\n<<<\n{}\n>>>\n\nSTYLE REFERENCE\n<<<\n{}\n>>>\n\nALLOWED SOURCE CARDS\n<<<\n{sources}\n>>>\n\nThis request has already been classified as an edit. Set kind to edit, explain this part's change briefly in reply, and return the complete revised Markdown for this EDIT TARGET part in revisedText. Preserve Markdown structure, YAML, URLs, code, formulas, footnotes, and citation markers unless the user explicitly asks to change them. Never add unsupported facts or citations. Use only allowed source cards and list only source IDs actually used. This is part {}/{} of one target; do not repeat text from another part.",
         truncate_chars(&request.prompt, 8_000),
         request.target_kind,
         chunk_index + 1,
@@ -1053,6 +1232,19 @@ fn build_chat_prompt(
     )
 }
 
+fn build_chat_edit_summary_prompt(request: &AiChatRequest, replies: &[String]) -> String {
+    format!(
+        "USER REQUEST\n<<<\n{}\n>>>\n\nPARTIAL EDIT SUMMARIES\n<<<\n{}\n>>>\n\nReturn one concise Markdown summary of the completed document-wide edit. Do not mention chunks or repeat similar changes. Do not introduce facts that are absent from the summaries.",
+        truncate_chars(&request.prompt, 8_000),
+        replies
+            .iter()
+            .enumerate()
+            .map(|(index, reply)| format!("[{}] {}", index + 1, truncate_chars(reply, 2_000)))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
 fn output_schema() -> Value {
     json!({
         "type": "object",
@@ -1060,6 +1252,43 @@ fn output_schema() -> Value {
         "properties": {
             "replacement": { "type": "string" },
             "rationale": { "type": "string" },
+            "citations": { "type": "array", "items": { "type": "string" } },
+            "warnings": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn chat_intent_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+            "kind": { "type": "string", "enum": ["answer", "edit"] }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn chat_notes_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["notes", "citations", "warnings"],
+        "properties": {
+            "notes": { "type": "string" },
+            "citations": { "type": "array", "items": { "type": "string" } },
+            "warnings": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn chat_answer_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["reply", "citations", "warnings"],
+        "properties": {
+            "reply": { "type": "string" },
             "citations": { "type": "array", "items": { "type": "string" } },
             "warnings": { "type": "array", "items": { "type": "string" } }
         },
@@ -1139,6 +1368,43 @@ fn parse_chat_output(output: &str, original: &str) -> Result<AiChatChunkResponse
     })
 }
 
+fn parse_chat_intent(output: &str) -> Result<String, String> {
+    parse_json_output(output)?
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "answer" | "edit"))
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "AI 채팅 요청 종류를 판단하지 못했습니다.".to_string())
+}
+
+fn parse_chat_notes(output: &str) -> Result<AiChatNotes, String> {
+    let value = parse_json_output(output)?;
+    Ok(AiChatNotes {
+        notes: truncate_chars(
+            value
+                .get("notes")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            CHAT_NOTE_LIMIT,
+        ),
+        citations: string_array(value.get("citations")),
+        warnings: string_array(value.get("warnings")),
+    })
+}
+
+fn parse_chat_answer(output: &str) -> Result<AiChatAnswer, String> {
+    let value = parse_json_output(output)?;
+    Ok(AiChatAnswer {
+        reply: value
+            .get("reply")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        citations: string_array(value.get("citations")),
+        warnings: string_array(value.get("warnings")),
+    })
+}
+
 fn parse_json_output(output: &str) -> Result<Value, String> {
     let trimmed = output.trim();
     let unwrapped = trimmed
@@ -1149,6 +1415,53 @@ fn parse_json_output(output: &str) -> Result<Value, String> {
         .unwrap_or(trimmed);
     serde_json::from_str::<Value>(unwrapped)
         .map_err(|error| format!("AI 응답 형식이 올바르지 않습니다: {error}"))
+}
+
+fn joined_chat_notes(notes: &[AiChatNotes]) -> String {
+    notes
+        .iter()
+        .enumerate()
+        .map(|(index, note)| {
+            let citations = if note.citations.is_empty() {
+                String::new()
+            } else {
+                format!("\nSOURCE IDS: {}", note.citations.join(", "))
+            };
+            let warnings = if note.warnings.is_empty() {
+                String::new()
+            } else {
+                format!("\nWARNINGS: {}", note.warnings.join(" | "))
+            };
+            format!("[{}]\n{}{}{}", index + 1, note.notes, citations, warnings)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn joined_notes_length(notes: &[AiChatNotes]) -> usize {
+    notes
+        .iter()
+        .map(|note| note.notes.chars().count() + 8)
+        .sum()
+}
+
+fn group_chat_notes(notes: Vec<AiChatNotes>, limit: usize) -> Vec<Vec<AiChatNotes>> {
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    let mut current_length = 0;
+    for note in notes {
+        let note_length = note.notes.chars().count() + 8;
+        if !current.is_empty() && current_length + note_length > limit {
+            groups.push(std::mem::take(&mut current));
+            current_length = 0;
+        }
+        current_length += note_length;
+        current.push(note);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 fn split_markdown_chunks(value: &str, limit: usize) -> Vec<String> {
@@ -1318,7 +1631,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_prompt_carries_bounded_history_and_supports_answers() {
+    fn chat_intent_and_answer_prompts_preserve_history_and_document_role() {
         let request = AiChatRequest {
             prompt: "이 문단의 논리적 약점을 설명해줘".to_string(),
             target_kind: "selection".to_string(),
@@ -1332,18 +1645,40 @@ mod tests {
             style_reference: String::new(),
             sources: Vec::new(),
         };
-        let prompt = build_chat_prompt(&request, &request.target_text, 0, 1);
-        let parsed = parse_chat_output(
-            r#"{"kind":"answer","reply":"근거가 빠져 있습니다.","revisedText":"바뀌면 안 됨","citations":[],"warnings":[]}"#,
-            &request.target_text,
-        )
-        .unwrap();
+        let intent_prompt = build_chat_intent_prompt(&request);
+        let answer_prompt = build_chat_direct_answer_prompt(&request, &request.target_text);
+        let intent = parse_chat_intent(r#"{"kind":"answer"}"#).unwrap();
+        let parsed =
+            parse_chat_answer(r#"{"reply":"근거가 빠져 있습니다.","citations":[],"warnings":[]}"#)
+                .unwrap();
 
         assert!(validate_chat_request(&request).is_ok());
-        assert!(prompt.contains("이전에는 문체를 검토했다."));
-        assert!(prompt.contains("앞선 질문"));
-        assert_eq!(parsed.kind, "answer");
-        assert_eq!(parsed.revised_text, request.target_text);
+        assert!(intent_prompt.contains("이전에는 문체를 검토했다."));
+        assert!(intent_prompt.contains("앞선 질문"));
+        assert!(answer_prompt.contains("SELECTED PASSAGE"));
+        assert!(!answer_prompt.contains("EDIT TARGET"));
+        assert_eq!(intent, "answer");
+        assert_eq!(parsed.reply, "근거가 빠져 있습니다.");
+    }
+
+    #[test]
+    fn document_notes_are_bounded_and_grouped_for_final_synthesis() {
+        let notes = (0..20)
+            .map(|index| AiChatNotes {
+                notes: format!("{index}: {}", "근거".repeat(600)),
+                citations: vec![format!("S{index}")],
+                warnings: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let groups = group_chat_notes(notes, 5_000);
+
+        assert!(groups.len() > 1);
+        assert!(
+            groups
+                .iter()
+                .all(|group| joined_notes_length(group) <= 5_000)
+        );
+        assert!(joined_chat_notes(&groups[0]).contains("근거"));
     }
 
     #[test]

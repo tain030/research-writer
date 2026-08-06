@@ -180,6 +180,7 @@ export interface AiEditHunk {
 }
 
 export interface AiEditProposal {
+  reviewVersion?: 2;
   baseHash: string;
   baseText: string;
   targetKind: AiChatTargetKind;
@@ -324,6 +325,8 @@ export interface EditorApi {
   scrollToAnchor: (anchor: ScrollAnchor) => void;
   setGhostText: (text: string) => void;
   clearGhostText: () => void;
+  setAiSelection: (from: number, to: number) => void;
+  clearAiSelection: () => void;
   getPageCount?: () => number;
   awaitLayout?: () => Promise<void>;
 }

@@ -128,8 +128,36 @@ function typeCharacters(editable: HTMLElement, text: string): void {
 }
 
 describe("paginated editorial editor", () => {
+  it("keeps an AI target highlighted independently from editor focus", async () => {
+    let api: EditorApi | null = null;
+    const target = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(target, outside);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "선택 문장입니다.",
+        onready: (value) => (api = value),
+      },
+    });
+    await tick();
+
+    api!.setAiSelection(0, 2);
+    outside.focus();
+    await tick();
+    expect(
+      target.querySelector(".is-ai-context-selection")?.textContent,
+    ).toBe("선택");
+
+    api!.clearAiSelection();
+    await tick();
+    expect(target.querySelector(".is-ai-context-selection")).toBeNull();
+    unmount(component);
+  });
+
   it("applies multiple canonical edits as one undoable transaction", async () => {
     let api: EditorApi | null = null;
+    const changes: string[] = [];
     const target = document.createElement("div");
     document.body.append(target);
     const component = mount(PaginatedEditor, {
@@ -137,6 +165,7 @@ describe("paginated editorial editor", () => {
       props: {
         value: "가나다",
         onready: (value) => (api = value),
+        onchange: (value) => changes.push(value),
       },
     });
     await tick();
@@ -149,10 +178,45 @@ describe("paginated editorial editor", () => {
     ]);
     await tick();
     expect(api!.getContent().trim()).toBe("A나C");
+    expect(changes).toHaveLength(1);
+    expect(changes[0].trim()).toBe("A나C");
 
     editable.editor.commands.undo();
     await tick();
     expect(api!.getContent().trim()).toBe("가나다");
+    expect(changes.at(-1)?.trim()).toBe("가나다");
+    unmount(component);
+  });
+
+  it("reparses complete heading edits instead of inserting Markdown fragments", async () => {
+    let api: EditorApi | null = null;
+    const changes: string[] = [];
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "### 2-2.\n\n## 4. 비교 기준",
+        onready: (value) => (api = value),
+        onchange: (value) => changes.push(value),
+      },
+    });
+    await tick();
+
+    api!.replaceRanges([
+      { from: 0, to: 8, text: "### 2-2. 작동 구조" },
+      { from: 10, to: 10, text: "> 작동 흐름\n\n### 2-3. 핵심 용어\n\n" },
+    ]);
+    await tick();
+
+    expect(api!.getContent()).toContain("### 2-2. 작동 구조");
+    expect(api!.getContent()).toContain("### 2-3. 핵심 용어");
+    expect(
+      Array.from(target.querySelectorAll(".ProseMirror h3"), (heading) =>
+        heading.textContent,
+      ),
+    ).toEqual(["2-2. 작동 구조", "2-3. 핵심 용어"]);
+    expect(changes.at(-1)).toBe(api!.getContent());
     unmount(component);
   });
 

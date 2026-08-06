@@ -19,6 +19,7 @@
     conversationHistoryContext,
     createEditProposal,
     markPendingHunks,
+    normalizeEditProposal,
     pendingProposalEdits,
     proposalMatchesContent,
     updateProposalAfterHunk,
@@ -228,6 +229,8 @@
   let aiOpen = $state(false);
   let aiExpanded = $state(false);
   let aiChatBusy = $state(false);
+  let aiApplyingEdit = false;
+  let aiTargetResetPending = false;
   let completionBusy = $state(false);
   let aiConversations = $state<AiConversationSummary[]>([]);
   let aiConversation = $state<AiConversation | null>(null);
@@ -736,11 +739,54 @@
     }
   }
 
+  function pinnedAiSelection(
+    conversation = aiConversation,
+    content = editorValue,
+  ): EditorSelection | null {
+    if (
+      !conversation ||
+      conversation.targetKind !== "selection" ||
+      conversation.targetFrom === null ||
+      conversation.targetTo === null
+    ) {
+      return null;
+    }
+    const from = conversation.targetFrom;
+    const to = conversation.targetTo;
+    if (
+      from < 0 ||
+      to <= from ||
+      to > content.length ||
+      content.slice(from, to) !== conversation.targetText
+    ) {
+      return null;
+    }
+    return {
+      from,
+      to,
+      text: conversation.targetText,
+      line: content.slice(0, from).split("\n").length,
+    };
+  }
+
+  function syncAiSelectionHighlight(
+    conversation = aiConversation,
+    content = editorValue,
+  ): void {
+    const pinned = pinnedAiSelection(conversation, content);
+    for (const api of [paperApi, sourceApi]) {
+      if (!api) continue;
+      if (pinned) api.setAiSelection(pinned.from, pinned.to);
+      else api.clearAiSelection();
+    }
+  }
+
   function setActiveEditor(source: "paper" | "source"): void {
     activeEditor = source;
     editorApi = source === "source" ? sourceApi : paperApi;
     const nextSelection = editorApi?.getSelection();
     if (nextSelection) handleEditorSelection(source, nextSelection);
+    syncAiSelectionHighlight();
   }
 
   function handlePaperReady(api: EditorApi | null): void {
@@ -748,6 +794,7 @@
     paperApi = api;
     if (api && (activeEditor === "paper" || !editorApi)) editorApi = api;
     else if (!api && wasActive) editorApi = sourceApi;
+    if (api) syncAiSelectionHighlight();
   }
 
   function handleSourceReady(api: EditorApi | null): void {
@@ -758,6 +805,7 @@
       activeEditor = "paper";
       editorApi = paperApi;
     }
+    if (api) syncAiSelectionHighlight();
   }
 
   async function toggleCompanionView(mode: Exclude<CompanionView, null>): Promise<void> {
@@ -1363,6 +1411,8 @@
         path: currentDocument.path,
       }).catch(() => undefined);
     }
+    paperApi?.clearAiSelection();
+    sourceApi?.clearAiSelection();
     resetVersionPreview(false);
     currentDocument = null;
     resetChromeSuppression();
@@ -1477,6 +1527,8 @@
         path: currentDocument.path,
       }).catch(() => undefined);
     }
+    paperApi?.clearAiSelection();
+    sourceApi?.clearAiSelection();
     resetVersionPreview(false);
     currentDocument = document;
     resetChromeSuppression();
@@ -1719,6 +1771,28 @@
     context: EditorChangeContext = { composing: false },
   ): void {
     editorValue = value;
+    if (
+      !aiApplyingEdit &&
+      !aiTargetResetPending &&
+      aiConversation?.targetKind === "selection" &&
+      !pinnedAiSelection(aiConversation, value)
+    ) {
+      const conversation = aiConversation;
+      aiTargetResetPending = true;
+      syncAiSelectionHighlight(conversation, value);
+      void setAiConversationTarget(null, conversation)
+        .then((updated) => {
+          if (updated) {
+            notify(
+              "고정한 원문이 바뀌어 AI 문맥을 전체 원고로 전환했습니다.",
+              "info",
+            );
+          }
+        })
+        .finally(() => {
+          aiTargetResetPending = false;
+        });
+    }
     if (!currentDocument || currentDocument.readOnly) return;
     saveState = "dirty";
     saveError = "";
@@ -2290,17 +2364,20 @@
     return {
       ...conversation,
       messages: conversation.messages.map((message) => {
-        const proposal = message.metadata.proposal;
+        const storedProposal = message.metadata.proposal;
+        const proposal = storedProposal
+          ? normalizeEditProposal(storedProposal)
+          : undefined;
         if (!proposal) return message;
         const stale =
           proposal.hunks.some((hunk) => hunk.status === "pending") &&
           !proposalMatchesContent(proposal, content);
-        if (!stale) return message;
+        if (!stale && proposal === storedProposal) return message;
         return {
           ...message,
           metadata: {
             ...message.metadata,
-            proposal: markPendingHunks(proposal, "stale"),
+            proposal: stale ? markPendingHunks(proposal, "stale") : proposal,
           },
         };
       }),
@@ -2311,7 +2388,10 @@
     if (!currentDocument) return;
     if (!desktop) {
       const local = aiConversation?.id === id ? aiConversation : null;
-      if (local) aiConversation = reconcileAiConversation(local);
+      if (local) {
+        aiConversation = reconcileAiConversation(local);
+        await restoreAiConversationTarget(aiConversation);
+      }
       return;
     }
     const documentPath = currentDocument.path;
@@ -2321,6 +2401,7 @@
       });
       if (currentDocument?.path !== documentPath) return;
       aiConversation = reconcileAiConversation(loaded);
+      await restoreAiConversationTarget(aiConversation);
     } catch (error) {
       notify(errorMessage(error), "error");
     }
@@ -2344,21 +2425,21 @@
   }
 
   async function createAiConversation(
-    selected = editorApi?.getSelection() ?? selection,
+    selected: EditorSelection | null = editorApi?.getSelection() ?? selection,
   ): Promise<AiConversation | null> {
     if (!currentDocument) return null;
-    const hasSelection = Boolean(selected.text.trim());
+    const hasSelection = Boolean(selected?.text.trim());
     const content = editorApi?.getContent() ?? editorValue;
     const request = {
       documentPath: currentDocument.path,
       targetKind: hasSelection ? "selection" : "document",
-      targetFrom: hasSelection ? selected.from : null,
-      targetTo: hasSelection ? selected.to : null,
+      targetFrom: hasSelection ? selected!.from : null,
+      targetTo: hasSelection ? selected!.to : null,
       // Visual selections expose plain text, while these offsets address the
       // canonical Markdown. Persist the exact source slice so emphasis,
       // links, and other delimiters cannot make a fresh target look stale.
       targetText: hasSelection
-        ? content.slice(selected.from, selected.to)
+        ? content.slice(selected!.from, selected!.to)
         : "",
     };
     try {
@@ -2381,10 +2462,113 @@
         aiConversationSummary(created),
         ...aiConversations.filter((item) => item.id !== created.id),
       ];
+      syncAiSelectionHighlight(created, content);
       return created;
     } catch (error) {
       notify(errorMessage(error), "error");
       return null;
+    }
+  }
+
+  async function setAiConversationTarget(
+    selected: EditorSelection | null,
+    conversation = aiConversation,
+  ): Promise<AiConversation | null> {
+    if (!currentDocument || !conversation) return null;
+    const documentPath = currentDocument.path;
+    const content = editorApi?.getContent() ?? editorValue;
+    const hasSelection = Boolean(
+      selected &&
+        selected.to > selected.from &&
+        content.slice(selected.from, selected.to).trim(),
+    );
+    const request = {
+      conversationId: conversation.id,
+      targetKind: (hasSelection ? "selection" : "document") as
+        | "selection"
+        | "document",
+      targetFrom: hasSelection ? selected!.from : null,
+      targetTo: hasSelection ? selected!.to : null,
+      targetText: hasSelection
+        ? content.slice(selected!.from, selected!.to)
+        : "",
+    };
+    try {
+      const updatedSummary: AiConversationSummary = desktop
+        ? await invoke<AiConversationSummary>("update_ai_conversation_target", {
+            request,
+          })
+        : {
+            ...aiConversationSummary(conversation),
+            targetKind: request.targetKind,
+            targetFrom: request.targetFrom,
+            targetTo: request.targetTo,
+            targetText: request.targetText,
+            updatedAt: new Date().toISOString(),
+          };
+      if (
+        currentDocument?.path !== documentPath ||
+        aiConversation?.id !== conversation.id
+      ) {
+        return null;
+      }
+      aiConversation = {
+        ...aiConversation,
+        ...updatedSummary,
+        messages: aiConversation.messages,
+      };
+      aiConversations = [
+        aiConversationSummary(aiConversation),
+        ...aiConversations.filter((item) => item.id !== aiConversation?.id),
+      ];
+      syncAiSelectionHighlight(aiConversation, content);
+      return aiConversation;
+    } catch (error) {
+      notify(errorMessage(error), "error");
+      return null;
+    }
+  }
+
+  async function restoreAiConversationTarget(
+    conversation: AiConversation,
+  ): Promise<void> {
+    if (conversation.targetKind !== "selection") {
+      syncAiSelectionHighlight(conversation);
+      return;
+    }
+    if (pinnedAiSelection(conversation)) {
+      syncAiSelectionHighlight(conversation);
+      return;
+    }
+    syncAiSelectionHighlight(null);
+    const updated = await setAiConversationTarget(null, conversation);
+    if (updated) {
+      notify(
+        "이전에 고정한 원문이 달라져 AI 문맥을 전체 원고로 전환했습니다.",
+        "info",
+      );
+    }
+  }
+
+  async function useCurrentAiSelection(): Promise<void> {
+    const selected = selection;
+    if (!selected.text.trim()) return;
+    const conversation = await ensureAiConversation();
+    if (conversation) await setAiConversationTarget(selected, conversation);
+  }
+
+  async function clearAiConversationTarget(): Promise<void> {
+    const conversation = await ensureAiConversation();
+    if (!conversation) return;
+    const collapseAt = conversation.targetTo ?? selection.to;
+    const updated = await setAiConversationTarget(null, conversation);
+    if (updated) {
+      selection = {
+        from: collapseAt,
+        to: collapseAt,
+        text: "",
+        line: selection.line,
+      };
     }
   }
 
@@ -2429,11 +2613,14 @@
     if (typeof window !== "undefined" && window.innerWidth <= 1280) {
       leftPanel = null;
     }
-    await createAiConversation(editorApi?.getSelection() ?? selection);
+    const selected = selection;
+    await createAiConversation(
+      selected.text.trim() ? selected : pinnedAiSelection(),
+    );
   }
 
   async function openAiForSelection(): Promise<void> {
-    const selected = editorApi?.getSelection() ?? selection;
+    const selected = selection;
     if (!selected.text.trim()) return toggleAi();
     aiOpen = true;
     aiExpanded = false;
@@ -2441,7 +2628,11 @@
     if (typeof window !== "undefined" && window.innerWidth <= 1280) {
       leftPanel = null;
     }
-    await Promise.all([refreshAiAccount(), createAiConversation(selected)]);
+    const [, conversation] = await Promise.all([
+      refreshAiAccount(),
+      ensureAiConversation(),
+    ]);
+    if (conversation) await setAiConversationTarget(selected, conversation);
   }
 
   async function deleteAiConversation(id: string): Promise<void> {
@@ -2455,7 +2646,7 @@
         aiConversation = null;
         const next = aiConversations[0];
         if (next) await loadAiConversation(next.id);
-        else await createAiConversation();
+        else await createAiConversation(null);
       }
     } catch (error) {
       notify(errorMessage(error), "error");
@@ -2513,23 +2704,12 @@
       return;
     }
     const content = editorApi.getContent();
-    const request = {
-      conversationId: aiConversation.id,
-      targetKind: "selection" as const,
-      targetFrom: proposal.targetFrom,
-      targetTo: proposal.targetTo,
-      targetText: content.slice(proposal.targetFrom, proposal.targetTo),
-    };
-    if (desktop) {
-      await invoke("update_ai_conversation_target", { request });
-    }
-    aiConversation = {
-      ...aiConversation,
-      targetKind: request.targetKind,
-      targetFrom: request.targetFrom,
-      targetTo: request.targetTo,
-      targetText: request.targetText,
-    };
+    await setAiConversationTarget({
+      from: proposal.targetFrom,
+      to: proposal.targetTo,
+      text: content.slice(proposal.targetFrom, proposal.targetTo),
+      line: content.slice(0, proposal.targetFrom).split("\n").length,
+    });
   }
 
   async function sendAiChat(prompt: string): Promise<boolean> {
@@ -2537,25 +2717,30 @@
       if (!desktop) notify("AI 채팅은 데스크톱 앱에서 사용할 수 있습니다.", "info");
       return false;
     }
-    const conversation = await ensureAiConversation();
+    let conversation = await ensureAiConversation();
     if (!conversation) return false;
     const content = editorApi?.getContent() ?? editorValue;
-    const targetFrom = conversation.targetKind === "selection"
+    let targetFrom = conversation.targetKind === "selection"
       ? (conversation.targetFrom ?? 0)
       : 0;
-    const targetTo = conversation.targetKind === "selection"
+    let targetTo = conversation.targetKind === "selection"
       ? (conversation.targetTo ?? targetFrom)
       : content.length;
-    const targetText = content.slice(targetFrom, targetTo);
+    let targetText = content.slice(targetFrom, targetTo);
     if (
       conversation.targetKind === "selection" &&
       targetText !== conversation.targetText
     ) {
+      const updated = await setAiConversationTarget(null, conversation);
+      if (!updated) return false;
+      conversation = updated;
+      targetFrom = 0;
+      targetTo = content.length;
+      targetText = content;
       notify(
-        "대화가 가리키던 원문이 바뀌었습니다. 현재 범위를 다시 선택해 새 대화를 시작해주세요.",
-        "error",
+        "고정한 원문이 바뀌어 이번 요청은 전체 원고를 기준으로 진행합니다.",
+        "info",
       );
-      return false;
     }
 
     aiChatBusy = true;
@@ -2595,7 +2780,7 @@
           sources: sourceContexts,
         },
       });
-      const proposal =
+      const proposalCandidate =
         response.kind === "edit" && response.revisedText !== targetText
           ? createEditProposal(
               response,
@@ -2604,6 +2789,9 @@
               targetText,
             )
           : undefined;
+      const proposal = proposalCandidate?.hunks.length
+        ? proposalCandidate
+        : undefined;
       const assistantMessage = await appendAiMessage({
         conversationId: conversation.id,
         role: "assistant",
@@ -2660,10 +2848,17 @@
       return;
     }
     await createSnapshot("ai");
-    editorApi.replaceRange(hunk.from, hunk.to, hunk.replacement);
-    const updated = updateProposalAfterHunk(proposal, hunkId, "applied");
-    await saveAiMessageMetadata(message, { ...message.metadata, proposal: updated });
-    await updateAiConversationTarget(updated);
+    aiApplyingEdit = true;
+    try {
+      editorApi.replaceRanges([
+        { from: hunk.from, to: hunk.to, text: hunk.replacement },
+      ]);
+      const updated = updateProposalAfterHunk(proposal, hunkId, "applied");
+      await saveAiMessageMetadata(message, { ...message.metadata, proposal: updated });
+      await updateAiConversationTarget(updated);
+    } finally {
+      aiApplyingEdit = false;
+    }
     notify("AI 변경 한 건을 적용했습니다. 실행 취소할 수 있습니다.", "success");
   }
 
@@ -2689,20 +2884,25 @@
     }
     if (!edits.length) return;
     await createSnapshot("ai");
-    editorApi.replaceRanges(edits);
-    const delta = edits.reduce(
-      (total, edit) => total + edit.text.length - (edit.to - edit.from),
-      0,
-    );
-    const updated = {
-      ...markPendingHunks(proposal, "applied"),
-      targetTo: proposal.targetTo + delta,
-      baseText: editorApi
-        .getContent()
-        .slice(proposal.targetFrom, proposal.targetTo + delta),
-    };
-    await saveAiMessageMetadata(message, { ...message.metadata, proposal: updated });
-    await updateAiConversationTarget(updated);
+    aiApplyingEdit = true;
+    try {
+      editorApi.replaceRanges(edits);
+      const delta = edits.reduce(
+        (total, edit) => total + edit.text.length - (edit.to - edit.from),
+        0,
+      );
+      const updated = {
+        ...markPendingHunks(proposal, "applied"),
+        targetTo: proposal.targetTo + delta,
+        baseText: editorApi
+          .getContent()
+          .slice(proposal.targetFrom, proposal.targetTo + delta),
+      };
+      await saveAiMessageMetadata(message, { ...message.metadata, proposal: updated });
+      await updateAiConversationTarget(updated);
+    } finally {
+      aiApplyingEdit = false;
+    }
     notify(`AI 변경 ${edits.length}건을 적용했습니다. 한 번에 실행 취소할 수 있습니다.`, "success");
   }
 
@@ -4378,7 +4578,9 @@
         onnewconversation={startNewAiConversation}
         onselectconversation={loadAiConversation}
         ondeleteconversation={deleteAiConversation}
-        onnewselection={startNewAiConversation}
+        onnewselection={useCurrentAiSelection}
+        oncleartarget={clearAiConversationTarget}
+        onopenlink={(url) => void openExternalUrl(url)}
         onsend={sendAiChat}
         onapplyhunk={applyAiHunk}
         onrejecthunk={rejectAiHunk}

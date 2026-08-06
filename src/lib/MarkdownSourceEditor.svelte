@@ -79,6 +79,8 @@
   const externalUpdate = Annotation.define<boolean>();
   const setSourceGhost = StateEffect.define<{ pos: number; text: string }>();
   const clearSourceGhost = StateEffect.define<null>();
+  const setSourceAiSelection = StateEffect.define<{ from: number; to: number }>();
+  const clearSourceAiSelection = StateEffect.define<null>();
   const readOnlyCompartment = new Compartment();
   const editableCompartment = new Compartment();
 
@@ -147,6 +149,61 @@
         }
       }
       return next;
+    },
+    provide: (field) =>
+      EditorView.decorations.from(field, (value) => value.decorations),
+  });
+
+  interface SourceAiSelectionState {
+    from: number | null;
+    to: number | null;
+    decorations: DecorationSet;
+  }
+
+  function sourceAiDecorations(
+    from: number,
+    to: number,
+    length: number,
+  ): DecorationSet {
+    const safeFrom = Math.max(0, Math.min(from, length));
+    const safeTo = Math.max(safeFrom, Math.min(to, length));
+    return safeFrom === safeTo
+      ? Decoration.none
+      : Decoration.set([
+          Decoration.mark({ class: "cm-ai-context-selection" }).range(
+            safeFrom,
+            safeTo,
+          ),
+        ]);
+  }
+
+  const sourceAiSelectionField = StateField.define<SourceAiSelectionState>({
+    create: () => ({ from: null, to: null, decorations: Decoration.none }),
+    update(current, transaction) {
+      let from = current.from;
+      let to = current.to;
+      if (transaction.docChanged && from !== null && to !== null) {
+        from = transaction.changes.mapPos(from, -1);
+        to = transaction.changes.mapPos(to, 1);
+      }
+      for (const effect of transaction.effects) {
+        if (effect.is(clearSourceAiSelection)) {
+          from = null;
+          to = null;
+        }
+        if (effect.is(setSourceAiSelection)) {
+          from = effect.value.from;
+          to = effect.value.to;
+        }
+      }
+      return {
+        from,
+        to,
+        decorations:
+          from === null || to === null
+            ? Decoration.none
+            : sourceAiDecorations(from, to, transaction.newDoc.length),
+      };
     },
     provide: (field) =>
       EditorView.decorations.from(field, (value) => value.decorations),
@@ -297,6 +354,14 @@
       scrollToAnchor,
       setGhostText,
       clearGhostText,
+      setAiSelection: (from, to) => {
+        if (!view) return;
+        view.dispatch({ effects: setSourceAiSelection.of({ from, to }) });
+      },
+      clearAiSelection: () => {
+        if (!view) return;
+        view.dispatch({ effects: clearSourceAiSelection.of(null) });
+      },
     };
   }
 
@@ -327,6 +392,11 @@
     },
     ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
       backgroundColor: "color-mix(in srgb, var(--accent) 20%, transparent)",
+    },
+    ".cm-ai-context-selection": {
+      borderRadius: "2px",
+      backgroundColor: "color-mix(in srgb, var(--accent) 20%, transparent)",
+      boxShadow: "inset 0 -1px 0 color-mix(in srgb, var(--accent) 58%, transparent)",
     },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
     ".cm-ghost-text": {
@@ -388,6 +458,7 @@
         EditorView.lineWrapping,
         highlightActiveLine(),
         sourceGhostField,
+        sourceAiSelectionField,
         keymap.of([
           { key: "Tab", run: acceptGhostText },
           {

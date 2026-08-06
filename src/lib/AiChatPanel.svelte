@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { createEditHunkReview } from "./ai-chat";
+  import { renderAiMarkdown } from "./ai-markdown";
   import type {
     AiAccountStatus,
     AiChatMessage,
@@ -27,6 +29,8 @@
     onselectconversation: (id: string) => void | Promise<void>;
     ondeleteconversation: (id: string) => void | Promise<void>;
     onnewselection: () => void | Promise<void>;
+    oncleartarget: () => void | Promise<void>;
+    onopenlink: (url: string) => void | Promise<void>;
     onsend: (prompt: string) => Promise<boolean>;
     onapplyhunk: (messageId: string, hunkId: string) => void | Promise<void>;
     onrejecthunk: (messageId: string, hunkId: string) => void | Promise<void>;
@@ -56,6 +60,8 @@
     onselectconversation,
     ondeleteconversation,
     onnewselection,
+    oncleartarget,
+    onopenlink,
     onsend,
     onapplyhunk,
     onrejecthunk,
@@ -244,6 +250,21 @@
     onexpandedchange(true);
     void onlogin(deviceCode);
   }
+
+  function handleMarkdownClick(event: MouseEvent): void {
+    if (!(event.target instanceof Element)) return;
+    const link = event.target.closest<HTMLAnchorElement>("a[href]");
+    if (!link) return;
+    event.preventDefault();
+    void onopenlink(link.href);
+  }
+
+  function markdownLinks(node: HTMLElement): { destroy: () => void } {
+    node.addEventListener("click", handleMarkdownClick);
+    return {
+      destroy: () => node.removeEventListener("click", handleMarkdownClick),
+    };
+  }
 </script>
 
 <section class:expanded class="ai-chat" aria-label="AI 채팅">
@@ -256,7 +277,12 @@
           새 선택 사용
         </button>
       {:else}
-        <span class="target-chip" title={targetTitle()}>{targetLabel()}</span>
+        <span class="target-chip" title={targetTitle()}>
+          {targetLabel()}
+          {#if conversation?.targetKind === "selection"}
+            <button type="button" aria-label="선택 영역 AI 문맥 해제" title="전체 원고로 전환" onclick={() => void oncleartarget()}>×</button>
+          {/if}
+        </span>
       {/if}
     </div>
     <div class="ai-header-actions">
@@ -286,7 +312,12 @@
         새 선택 사용
       </button>
     {:else}
-      <span class="target-chip" title={targetTitle()}>{targetLabel()}</span>
+      <span class="target-chip" title={targetTitle()}>
+        {targetLabel()}
+        {#if conversation?.targetKind === "selection"}
+          <button type="button" aria-label="선택 영역 AI 문맥 해제" title="전체 원고로 전환" onclick={() => void oncleartarget()}>×</button>
+        {/if}
+      </span>
     {/if}
     {#if account?.authenticated}
       <textarea
@@ -364,7 +395,13 @@
             {#each conversation.messages as message (message.id)}
               <article class:user={message.role === "user"} class="history-message">
                 <strong>{message.role === "user" ? "나" : "AI"}</strong>
-                <p>{message.content}</p>
+                {#if message.role === "assistant"}
+                  <div class="message-markdown" use:markdownLinks>
+                    {@html renderAiMarkdown(message.content)}
+                  </div>
+                {:else}
+                  <p>{message.content}</p>
+                {/if}
                 {#if message.metadata.proposal}
                   <small>{proposalSummary(message)}</small>
                 {/if}
@@ -385,7 +422,9 @@
         {#if activeTurn.assistant}
           {@const message = activeTurn.assistant}
           <article class="current-response">
-            <p>{message.content}</p>
+            <div class="message-markdown" use:markdownLinks>
+              {@html renderAiMarkdown(message.content)}
+            </div>
             {#if message.metadata.citations?.length}
               <div class="message-chips">
                 {#each message.metadata.citations as citation}<span>출처 {citation}</span>{/each}
@@ -397,6 +436,7 @@
               </div>
             {/if}
             {#if message.metadata.proposal}
+              {@const proposal = message.metadata.proposal}
               {@const waiting = pendingHunks(message)}
               {@const stale = staleHunks(message)}
               <section class="proposal-card">
@@ -410,10 +450,24 @@
                   </header>
                   <div class="hunk-list">
                     {#each waiting as hunk (hunk.id)}
+                      {@const review = createEditHunkReview(proposal, hunk)}
                       <div class="edit-hunk">
+                        <div class="hunk-labels">
+                          {#each review.labels as label}<span>{label}</span>{/each}
+                        </div>
                         <div class="hunk-diff">
-                          {#if hunk.original}<del>{hunk.original}</del>{/if}
-                          {#if hunk.replacement}<ins>{hunk.replacement}</ins>{/if}
+                          {#if review.before}
+                            <div class="diff-row before" aria-label="변경 전 Markdown">
+                              <span class="diff-sign" aria-hidden="true">−</span>
+                              <code>{#each review.beforeSegments as segment}<span class:changed={segment.changed}>{segment.text}</span>{/each}</code>
+                            </div>
+                          {/if}
+                          {#if review.after}
+                            <div class="diff-row after" aria-label="변경 후 Markdown">
+                              <span class="diff-sign" aria-hidden="true">+</span>
+                              <code>{#each review.afterSegments as segment}<span class:changed={segment.changed}>{segment.text}</span>{/each}</code>
+                            </div>
+                          {/if}
                         </div>
                         <div class="hunk-actions">
                           <button type="button" onclick={() => void onrejecthunk(message.id, hunk.id)}>제외</button>
@@ -536,6 +590,31 @@
     line-height: 1;
   }
 
+  .target-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .target-chip button {
+    display: grid;
+    width: 16px;
+    height: 16px;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--ink-faint) 12%, transparent);
+    padding: 0;
+    color: var(--ink-faint);
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .target-chip button:hover {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+
   button.new-selection-button {
     border-color: color-mix(in srgb, var(--accent) 46%, var(--rule));
     background: color-mix(in srgb, var(--accent) 9%, var(--paper));
@@ -646,13 +725,68 @@
     white-space: pre-wrap;
   }
 
-  .current-response > p {
-    margin: 0;
+  .message-markdown {
+    overflow-wrap: anywhere;
     color: var(--ink);
     font-size: 14px;
     line-height: 1.68;
-    white-space: pre-wrap;
   }
+
+  .history-message .message-markdown { font-size: 13px; line-height: 1.62; }
+  .message-markdown > :global(:first-child) { margin-top: 0; }
+  .message-markdown > :global(:last-child) { margin-bottom: 0; }
+  .message-markdown :global(p) { margin: 0 0 .72em; }
+  .message-markdown :global(h1),
+  .message-markdown :global(h2),
+  .message-markdown :global(h3),
+  .message-markdown :global(h4) {
+    margin: 1em 0 .45em;
+    color: var(--ink-strong);
+    font-weight: 700;
+    line-height: 1.35;
+  }
+  .message-markdown :global(h1) { font-size: 1.3em; }
+  .message-markdown :global(h2) { font-size: 1.18em; }
+  .message-markdown :global(h3),
+  .message-markdown :global(h4) { font-size: 1.06em; }
+  .message-markdown :global(ul),
+  .message-markdown :global(ol) { margin: .45em 0 .8em; padding-left: 1.5em; }
+  .message-markdown :global(li + li) { margin-top: .24em; }
+  .message-markdown :global(blockquote) {
+    margin: .65em 0;
+    border-left: 3px solid color-mix(in srgb, var(--accent) 48%, var(--rule));
+    padding: .12em 0 .12em .8em;
+    color: var(--ink-muted);
+  }
+  .message-markdown :global(code) {
+    border-radius: 4px;
+    background: var(--paper-deep);
+    padding: .12em .32em;
+    font-family: "Goorm Sans Code", NanumGothicCoding, monospace;
+    font-size: .9em;
+  }
+  .message-markdown :global(pre) {
+    overflow: auto;
+    margin: .7em 0;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--paper-deep);
+    padding: .75em .85em;
+    line-height: 1.55;
+  }
+  .message-markdown :global(pre code) { background: transparent; padding: 0; }
+  .message-markdown :global(table) {
+    width: 100%;
+    margin: .7em 0;
+    border-collapse: collapse;
+    font-size: .94em;
+  }
+  .message-markdown :global(th),
+  .message-markdown :global(td) { border: 1px solid var(--rule); padding: .4em .5em; text-align: left; }
+  .message-markdown :global(th) { background: var(--paper-deep); color: var(--ink-strong); }
+  .message-markdown :global(a) { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+  .message-markdown :global(hr) { margin: .9em 0; border: 0; border-top: 1px solid var(--rule); }
+  .message-markdown :global(.katex-display) { overflow-x: auto; overflow-y: hidden; }
 
   .message-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
   .message-chips span { border-radius: 999px; background: var(--paper-deep); padding: 4px 7px; color: var(--ink-muted); font-size: 12px; }
@@ -682,9 +816,15 @@
   .proposal-card button:disabled { opacity: .45; }
   .hunk-list { display: grid; gap: 1px; background: var(--rule); }
   .edit-hunk { background: var(--paper); padding: 11px; }
-  .hunk-diff { max-height: 220px; overflow: auto; font-size: 13px; line-height: 1.62; white-space: pre-wrap; }
-  .hunk-diff del { display: block; background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); text-decoration: line-through; }
-  .hunk-diff ins { display: block; margin-top: 5px; background: color-mix(in srgb, var(--success) 10%, transparent); color: var(--success); text-decoration: none; }
+  .hunk-labels { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .hunk-labels span { border: 1px solid var(--rule); border-radius: 999px; background: var(--paper-deep); padding: 3px 7px; color: var(--ink-muted); font-size: 12px; font-weight: 650; }
+  .hunk-diff { display: grid; max-height: 300px; gap: 5px; overflow: auto; font-size: 14px; line-height: 1.62; }
+  .diff-row { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: start; border-radius: 6px; padding: 6px 7px 6px 3px; }
+  .diff-row.before { background: color-mix(in srgb, var(--danger) 9%, transparent); color: var(--danger); }
+  .diff-row.after { background: color-mix(in srgb, var(--success) 9%, transparent); color: var(--success); }
+  .diff-sign { text-align: center; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 750; user-select: none; }
+  .diff-row code { overflow-wrap: anywhere; color: inherit; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: inherit; white-space: pre-wrap; }
+  .diff-row code .changed { border-radius: 2px; background: color-mix(in srgb, currentColor 16%, transparent); font-weight: 700; }
   .hunk-actions { justify-content: flex-end; gap: 5px; margin-top: 9px; }
   .proposal-state,
   .state-note { margin: 0; padding: 12px; color: var(--ink-muted); font-size: 13px; }
