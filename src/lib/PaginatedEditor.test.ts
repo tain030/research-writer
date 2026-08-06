@@ -1499,7 +1499,11 @@ describe("paginated editorial editor", () => {
     editable.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     api!.setSelection(2, 2);
     window.dispatchEvent(new Event("pointerup"));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() =>
+      expect(
+        shell.classList.contains("typewriter-strike-point-visible"),
+      ).toBe(true),
+    );
     await tick();
     expect(shell.classList.contains("typewriter-revision")).toBe(false);
     expect(shell.classList.contains("typewriter-drafting")).toBe(false);
