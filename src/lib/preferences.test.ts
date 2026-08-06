@@ -3,20 +3,22 @@ import {
   PREFERENCES_SCHEMA_VERSION,
   defaultFontFamilyByExperience,
   defaultPreferences,
+  hasStoredWritingExperience,
   parsePreferences,
+  shouldInferLegacyWritingExperience,
 } from "./preferences";
 
 describe("writing preferences", () => {
-  it("uses Goorm Sans Code as the fresh typewriter default", () => {
+  it("uses Pretendard as the fresh typewriter default", () => {
     const fresh = parsePreferences(null);
 
     expect(defaultPreferences.schemaVersion).toBe(PREFERENCES_SCHEMA_VERSION);
     expect(defaultPreferences.fontFamilyByExperience).toEqual({
-      typewriter: "Goorm Sans Code",
+      typewriter: "Pretendard",
       literary: "MaruBuri",
       flow: "Pretendard",
     });
-    expect(fresh.fontFamilyByExperience.typewriter).toBe("Goorm Sans Code");
+    expect(fresh.fontFamilyByExperience.typewriter).toBe("Pretendard");
     expect(fresh.writingExperience).toBe("typewriter");
     expect(fresh.flowAutoHideChrome).toBe(true);
     expect(fresh.pageFitMode).toBe("width");
@@ -80,7 +82,7 @@ describe("writing preferences", () => {
       ),
     ).toMatchObject({
       fontFamilyByExperience: {
-        typewriter: "Goorm Sans Code",
+        typewriter: "Pretendard",
         literary: "Repository Serif",
         flow: "Pretendard",
       },
@@ -96,7 +98,7 @@ describe("writing preferences", () => {
       ),
     ).toMatchObject({
       fontFamilyByExperience: {
-        typewriter: "Goorm Sans Code",
+        typewriter: "Pretendard",
         literary: "MaruBuri",
         flow: "Repository Sans",
       },
@@ -104,7 +106,44 @@ describe("writing preferences", () => {
     });
   });
 
-  it("preserves every per-experience choice after schema 6", () => {
+  it("migrates only the schema 6 Goorm default to Pretendard", () => {
+    expect(
+      parsePreferences(
+        JSON.stringify({
+          schemaVersion: 6,
+          writingExperience: "typewriter",
+          fontFamilyByExperience: {
+            typewriter: "Goorm Sans Code",
+            literary: "Repository Serif",
+            flow: "Repository Sans",
+          },
+        }),
+      ),
+    ).toMatchObject({
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      fontFamilyByExperience: {
+        typewriter: "Pretendard",
+        literary: "Repository Serif",
+        flow: "Repository Sans",
+      },
+      writingExperience: "typewriter",
+    });
+    expect(
+      parsePreferences(
+        JSON.stringify({
+          schemaVersion: 6,
+          writingExperience: "typewriter",
+          fontFamilyByExperience: {
+            typewriter: "NanumGothicCoding",
+            literary: "MaruBuri",
+            flow: "Pretendard",
+          },
+        }),
+      ).fontFamilyByExperience.typewriter,
+    ).toBe("NanumGothicCoding");
+  });
+
+  it("preserves every per-experience choice after schema 7", () => {
     const stored = JSON.stringify({
       schemaVersion: PREFERENCES_SCHEMA_VERSION,
       writingExperience: "flow",
@@ -125,7 +164,51 @@ describe("writing preferences", () => {
     });
   });
 
-  it("repairs malformed schema 6 font memories independently", () => {
+  it("does not infer flow mode from a schema 7 Pretendard font map", () => {
+    const stored = JSON.stringify({
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      fontFamilyByExperience: {
+        typewriter: "Pretendard",
+        literary: "MaruBuri",
+        flow: "Pretendard",
+      },
+    });
+
+    expect(hasStoredWritingExperience(stored)).toBe(true);
+    expect(parsePreferences(stored).writingExperience).toBe("typewriter");
+    expect(
+      hasStoredWritingExperience(
+        JSON.stringify({ schemaVersion: 1, fontFamily: "Pretendard" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("infers a font mode only for an explicit legacy global-font choice", () => {
+    expect(shouldInferLegacyWritingExperience(null)).toBe(false);
+    expect(shouldInferLegacyWritingExperience("{not-json")).toBe(false);
+    expect(
+      shouldInferLegacyWritingExperience(
+        JSON.stringify({ schemaVersion: 7, fontFamilyByExperience: {} }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldInferLegacyWritingExperience(
+        JSON.stringify({ schemaVersion: 0, fontFamily: "Pretendard" }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldInferLegacyWritingExperience(
+        JSON.stringify({ schemaVersion: 1, fontFamily: "Pretendard" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldInferLegacyWritingExperience(
+        JSON.stringify({ schemaVersion: 5, fontFamily: "Custom Mono" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("repairs malformed schema 7 font memories independently", () => {
     expect(
       parsePreferences(
         JSON.stringify({
@@ -167,7 +250,7 @@ describe("writing preferences", () => {
 
     expect(parsePreferences(stored)).toMatchObject({
       fontFamilyByExperience: {
-        typewriter: "Goorm Sans Code",
+        typewriter: "Pretendard",
         literary: "MaruBuri",
         flow: "Pretendard",
       },
@@ -181,7 +264,7 @@ describe("writing preferences", () => {
       ),
     ).toMatchObject({
       fontFamilyByExperience: {
-        typewriter: "Goorm Sans Code",
+        typewriter: "Pretendard",
         literary: "Custom Mono",
         flow: "Pretendard",
       },
@@ -197,9 +280,9 @@ describe("writing preferences", () => {
     const first = parsePreferences(null);
     const second = parsePreferences(null);
     first.fontFamilyByExperience.typewriter = "Changed";
-    expect(second.fontFamilyByExperience.typewriter).toBe("Goorm Sans Code");
+    expect(second.fontFamilyByExperience.typewriter).toBe("Pretendard");
     expect(defaultPreferences.fontFamilyByExperience.typewriter).toBe(
-      "Goorm Sans Code",
+      "Pretendard",
     );
   });
 

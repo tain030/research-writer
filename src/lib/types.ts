@@ -149,6 +149,80 @@ export interface AiWritingResponse {
   model: string;
 }
 
+export type AiChatTargetKind = "selection" | "document";
+export type AiChatResponseKind = "answer" | "edit";
+export type AiEditHunkStatus = "pending" | "applied" | "rejected" | "stale";
+
+export interface AiChatHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AiChatResponse {
+  kind: AiChatResponseKind;
+  reply: string;
+  revisedText: string;
+  citations: string[];
+  warnings: string[];
+  originalHash: string;
+  model: string;
+  processedChunks: number;
+  totalChunks: number;
+}
+
+export interface AiEditHunk {
+  id: string;
+  from: number;
+  to: number;
+  original: string;
+  replacement: string;
+  status: AiEditHunkStatus;
+}
+
+export interface AiEditProposal {
+  baseHash: string;
+  baseText: string;
+  targetKind: AiChatTargetKind;
+  targetFrom: number;
+  targetTo: number;
+  revisedText: string;
+  hunks: AiEditHunk[];
+}
+
+export interface AiChatMessageMetadata {
+  citations?: string[];
+  warnings?: string[];
+  model?: string;
+  proposal?: AiEditProposal;
+  failed?: boolean;
+}
+
+export interface AiChatMessage {
+  id: string;
+  conversationId: string;
+  role: "user" | "assistant";
+  content: string;
+  responseKind: AiChatResponseKind | null;
+  metadata: AiChatMessageMetadata;
+  createdAt: string;
+}
+
+export interface AiConversationSummary {
+  id: string;
+  documentPath: string;
+  title: string;
+  targetKind: AiChatTargetKind;
+  targetFrom: number | null;
+  targetTo: number | null;
+  targetText: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiConversation extends AiConversationSummary {
+  messages: AiChatMessage[];
+}
+
 export interface AiGrammarResponse {
   correctedText: string;
   rationale: string;
@@ -241,6 +315,7 @@ export interface EditorApi {
   getContent: () => string;
   getSelection: () => EditorSelection;
   replaceRange: (from: number, to: number, text: string) => void;
+  replaceRanges: (edits: TextEdit[]) => void;
   insertAtCursor: (text: string) => void;
   setSelection: (from: number, to: number) => void;
   scrollToOffset: (offset: number) => void;
@@ -253,6 +328,12 @@ export interface EditorApi {
   awaitLayout?: () => Promise<void>;
 }
 
+export interface TextEdit {
+  from: number;
+  to: number;
+  text: string;
+}
+
 export interface ScrollAnchor {
   offset: number;
   source: "paper" | "source";
@@ -262,7 +343,6 @@ export type FocusMode = "off" | "paragraph" | "sentence";
 export type SidePanel = "repository" | "outline" | "search" | "versions" | null;
 export type AssistantPanel =
   | "proofreading"
-  | "ai"
   | "sources"
   | "settings"
   | null;

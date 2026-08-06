@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { mount, tick, unmount } from "svelte";
+import type { Editor as TiptapEditor } from "@tiptap/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Page from "./+page.svelte";
 
@@ -65,7 +66,7 @@ afterEach(() => {
 });
 
 describe("writing workspace toolbar", () => {
-  it("keeps the paginated paper mounted and opens Markdown beside it", async () => {
+  it("keeps the paper mounted and gives AI a dedicated header entry", async () => {
     const target = document.createElement("div");
     document.body.append(target);
     const component = mount(Page, { target });
@@ -75,11 +76,7 @@ describe("writing workspace toolbar", () => {
 
     const topbar = target.querySelector(".topbar")!;
     expect(topbar.querySelector('button[aria-label="링크"]')).toBeNull();
-    expect(
-      Array.from(topbar.querySelectorAll("button")).some(
-        (button) => button.textContent?.trim() === "AI",
-      ),
-    ).toBe(false);
+    expect(topbar.querySelector('button[aria-controls="ai-panel"]')).not.toBeNull();
 
     const formatting = topbar.querySelector(".formatting-toolbar")!;
     const documentTools = topbar.querySelector(".document-toolbar")!;
@@ -87,7 +84,10 @@ describe("writing workspace toolbar", () => {
     expect(formatting.querySelector(".font-select")).not.toBeNull();
     expect(formatting.querySelector(".experience-picker")).not.toBeNull();
     expect(documentTools.querySelector('[aria-label="삽입 메뉴"]')).not.toBeNull();
-    expect(documentTools.querySelector('[aria-label="보기 메뉴"]')).not.toBeNull();
+    expect(documentTools.querySelector('[aria-label="보기 메뉴"]')).toBeNull();
+    expect(
+      documentTools.querySelector('[aria-label="Markdown 원문을 옆에 열기"]'),
+    ).toBeNull();
     expect(
       Array.from(
         documentTools.querySelectorAll<HTMLButtonElement>(":scope > button, :scope > .toolbar-menu-host > button"),
@@ -95,8 +95,6 @@ describe("writing workspace toolbar", () => {
       ),
     ).toEqual([
       "삽입 메뉴",
-      "보기 메뉴",
-      "Markdown 원문을 옆에 열기",
       "인쇄 또는 PDF 저장",
     ]);
 
@@ -109,31 +107,43 @@ describe("writing workspace toolbar", () => {
       "링크",
     );
 
-    const view = topbar.querySelector<HTMLButtonElement>(
-      'button[aria-label="보기 메뉴"]',
+    expect(target.querySelector(".paper-pane .paper-editor-shell")).not.toBeNull();
+    const ai = topbar.querySelector<HTMLButtonElement>(
+      'button[aria-controls="ai-panel"]',
     )!;
-    view.click();
+    ai.click();
     await tick();
-    expect(target.querySelector('[data-menu="view"]')?.textContent).toContain(
-      "고정 타점 보기",
-    );
-    expect(
-      target.querySelectorAll<HTMLButtonElement>('[data-menu="view"] button'),
-    ).toHaveLength(0);
+    expect(target.querySelector("#ai-panel")).not.toBeNull();
+    expect(ai.getAttribute("aria-expanded")).toBe("true");
+    target
+      .querySelector<HTMLButtonElement>(
+        '#ai-panel button[aria-label="AI 채팅 닫기"]',
+      )!
+      .click();
+    await tick();
+
+    const editable = target.querySelector<HTMLElement>(".ProseMirror")! as
+      HTMLElement & { editor: TiptapEditor };
+    editable.editor.commands.setTextSelection({ from: 1, to: 3 });
+    await tick();
+    const selectionAi = target.querySelector<HTMLElement>(
+      ".selection-ai-trigger",
+    )!;
+    expect(selectionAi).not.toBeNull();
+    selectionAi.querySelector<HTMLButtonElement>("button")!.click();
+    await tick();
+    expect(target.querySelector("#ai-panel")).not.toBeNull();
+    expect(target.querySelector(".selection-ai-trigger")).toBeNull();
 
     target
       .querySelector<HTMLButtonElement>(
-        'button[aria-label="Markdown 원문을 옆에 열기"]',
+        '.topbar-actions button[aria-controls="right-panel"]',
       )!
       .click();
-
-    expect(target.querySelector(".paper-pane .paper-editor-shell")).not.toBeNull();
-    await vi.waitFor(
-      () =>
-        expect(
-          target.querySelector(".companion-pane .source-shell"),
-        ).not.toBeNull(),
-      { timeout: 2_000 },
+    await tick();
+    expect(target.querySelector("#ai-panel")).toBeNull();
+    expect(target.querySelector("#right-panel .panel-tabs")?.textContent).not.toContain(
+      "AI",
     );
     unmount(component);
   });
@@ -160,7 +170,7 @@ describe("writing workspace toolbar", () => {
     )!;
     const paper = target.querySelector<HTMLElement>(".paper-editor-shell")!;
 
-    expect(font.value).toBe("Goorm Sans Code");
+    expect(font.value).toBe("Pretendard");
     expect(typewriter.getAttribute("aria-checked")).toBe("true");
     expect(paper.classList.contains("writing-typewriter")).toBe(true);
 
@@ -179,7 +189,7 @@ describe("writing workspace toolbar", () => {
     expect(paper.classList.contains("writing-flow")).toBe(true);
 
     typewriter.click();
-    await vi.waitFor(() => expect(font.value).toBe("Goorm Sans Code"));
+    await vi.waitFor(() => expect(font.value).toBe("Pretendard"));
     expect(typewriter.getAttribute("aria-checked")).toBe("true");
     expect(paper.classList.contains("writing-typewriter")).toBe(true);
     unmount(component);
@@ -232,7 +242,7 @@ describe("writing workspace toolbar", () => {
     expect(
       JSON.parse(localStorage.getItem("research-writer.preferences")!),
     ).toMatchObject({
-      schemaVersion: 6,
+      schemaVersion: 7,
       writingExperience: "flow",
       fontFamilyByExperience: {
         typewriter: "NanumGothicCoding",

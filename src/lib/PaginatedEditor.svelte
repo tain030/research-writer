@@ -105,7 +105,7 @@
     readOnly = false,
     fallbackTitle = "제목 없는 원고",
     documentPath = "",
-    fontFamily = "Goorm Sans Code",
+    fontFamily = "Pretendard",
     experience = "typewriter",
     fitMode = "width",
     focusMode = "off",
@@ -154,6 +154,7 @@
   let platenDetentTimer: ReturnType<typeof setTimeout> | null = null;
   let activeLineFrame: number | null = null;
   let carriageFrame: number | null = null;
+  let pointerSelectionReleaseFrame: number | null = null;
   let workspaceFrame: number | null = null;
   let pageCount = $state(1);
   let viewedPageIndex = $state(0);
@@ -169,6 +170,8 @@
   let typewriterScrollbarGutter = $state(0);
   let carriageReturning = $state(false);
   let carriageStepping = $state(false);
+  let pointerSelectionActive = $state(false);
+  let pointerSelectionPointerId: number | null = null;
   let carriageAdvancePending = false;
   let typebarStriking = $state(false);
   let typebarStrikeId = $state(0);
@@ -263,7 +266,7 @@
   );
   let paperFontFallback = $derived(
     experience === "typewriter"
-      ? '"Goorm Sans Code", NanumGothicCoding, monospace'
+      ? 'Pretendard, system-ui, sans-serif'
       : experience === "flow"
         ? "Pretendard, sans-serif"
         : "MaruBuri, Pretendard, serif",
@@ -784,6 +787,7 @@
   }
 
   function updateCarriagePosition(): void {
+    if (pointerSelectionActive) return;
     if (
       !editor ||
       !editor.isFocused ||
@@ -872,6 +876,11 @@
   }
 
   function scheduleCarriagePosition(): void {
+    if (pointerSelectionActive) {
+      if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
+      carriageFrame = null;
+      return;
+    }
     if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
     carriageFrame = requestAnimationFrame(() => {
       carriageFrame = null;
@@ -880,7 +889,9 @@
   }
 
   function notifySelection(): void {
-    if (experience === "typewriter") markProgrammaticScroll();
+    if (experience === "typewriter" && !pointerSelectionActive) {
+      markProgrammaticScroll();
+    }
     const block = updateActiveBlock();
     scheduleCaretLine();
     scheduleCarriagePosition();
@@ -1483,6 +1494,37 @@
       .run();
   }
 
+  function replaceRanges(
+    edits: Array<{ from: number; to: number; text: string }>,
+  ): void {
+    if (!editor || readOnly || edits.length === 0) return;
+    const source = canonicalMarkdown();
+    const ordered = [...edits].sort((left, right) => right.from - left.from);
+    let next = source;
+    let previousFrom = source.length + 1;
+    for (const edit of ordered) {
+      const from = Math.max(0, Math.min(edit.from, source.length));
+      const to = Math.max(from, Math.min(edit.to, source.length));
+      if (to > previousFrom) return;
+      next = `${next.slice(0, from)}${edit.text}${next.slice(to)}`;
+      previousFrom = from;
+    }
+    pendingInput = { kind: "other", origin: "programmatic" };
+    internalUpdate = true;
+    const parsed = splitFrontmatter(next);
+    frontmatter = parsed.prefix;
+    lastValue = next;
+    editor.commands.setContent(parsed.body, {
+      contentType: "markdown",
+      emitUpdate: false,
+    });
+    internalUpdate = false;
+    emitChange();
+    const last = ordered[ordered.length - 1];
+    setSelection(last.from + last.text.length, last.from + last.text.length);
+    scheduleLayout();
+  }
+
   function setSelection(from: number, to: number): void {
     if (!editor) return;
     const anchor = sourceToDocumentPosition(from);
@@ -1520,6 +1562,7 @@
       getContent: canonicalMarkdown,
       getSelection: selectionInfo,
       replaceRange,
+      replaceRanges,
       insertAtCursor: (text) => {
         const selected = selectionInfo();
         replaceRange(selected.from, selected.to, text);
@@ -1628,6 +1671,7 @@
     if (experience !== "typewriter") return;
     clearProgrammaticScrollMarker();
     if (lineFeedFrame !== null || lineFeedPending) cancelLineFeed(false);
+    if (pointerSelectionActive) return;
     if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
     carriageFrame = null;
     cancelCarriageReturn();
@@ -1643,6 +1687,82 @@
 
   function handleFreeScrollIntent(): void {
     centerCarriageForFreeScroll();
+  }
+
+  function cancelPointerSelectionRelease(): void {
+    if (pointerSelectionReleaseFrame !== null) {
+      cancelAnimationFrame(pointerSelectionReleaseFrame);
+    }
+    pointerSelectionReleaseFrame = null;
+  }
+
+  function cancelTypewriterPointerSelection(): void {
+    cancelPointerSelectionRelease();
+    pointerSelectionActive = false;
+    pointerSelectionPointerId = null;
+  }
+
+  function beginTypewriterPointerSelection(event: PointerEvent): void {
+    if (
+      experience !== "typewriter" ||
+      readOnly ||
+      event.pointerType === "touch" ||
+      (typeof event.button === "number" && event.button !== 0) ||
+      event.isPrimary === false
+    ) {
+      return;
+    }
+
+    cancelPointerSelectionRelease();
+    const renderedShift = paperWindow
+      ? renderedTranslateX(getComputedStyle(paperWindow).transform)
+      : null;
+    if (renderedShift !== null) carriageShift = renderedShift;
+    pointerSelectionPointerId = Number.isFinite(event.pointerId)
+      ? event.pointerId
+      : null;
+    pointerSelectionActive = true;
+    clearProgrammaticScrollMarker();
+    if (lineFeedFrame !== null || lineFeedPending) cancelLineFeed(false);
+    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
+    carriageFrame = null;
+    cancelCarriageReturn();
+    if (carriageStepTimer) clearTimeout(carriageStepTimer);
+    carriageStepTimer = null;
+    carriageStepping = false;
+    carriageAdvancePending = false;
+    lastCarriageLineTop = null;
+    marginWarning = false;
+    caretAlignedToStrike = false;
+  }
+
+  function finishTypewriterPointerSelection(event?: PointerEvent): void {
+    if (!pointerSelectionActive) return;
+    if (
+      event &&
+      pointerSelectionPointerId !== null &&
+      Number.isFinite(event.pointerId) &&
+      event.pointerId !== pointerSelectionPointerId
+    ) {
+      return;
+    }
+    pointerSelectionActive = false;
+    pointerSelectionPointerId = null;
+    cancelPointerSelectionRelease();
+    pointerSelectionReleaseFrame = requestAnimationFrame(() => {
+      pointerSelectionReleaseFrame = null;
+      if (!mounted || pointerSelectionActive) return;
+      scheduleCaretLine();
+      scheduleCarriagePosition();
+    });
+  }
+
+  function handlePointerSelectionEnd(event: PointerEvent): void {
+    finishTypewriterPointerSelection(event);
+  }
+
+  function handlePointerSelectionBlur(): void {
+    finishTypewriterPointerSelection();
   }
 
   function handleScrollPointerDown(event: PointerEvent): void {
@@ -1721,6 +1841,10 @@
           "aria-label": "에디토리얼 A4 편집기",
         },
         handleDOMEvents: {
+          pointerdown: (_view, event) => {
+            beginTypewriterPointerSelection(event as PointerEvent);
+            return false;
+          },
           compositionstart: () => {
             composing = true;
             compositionBefore = lastValue;
@@ -1830,7 +1954,9 @@
       },
       onUpdate: ({ transaction }) => {
         if (!transaction.docChanged) return;
-        if (experience === "typewriter") markProgrammaticScroll();
+        if (experience === "typewriter" && !pointerSelectionActive) {
+          markProgrammaticScroll();
+        }
         emitChange();
         updateActiveBlock();
         scheduleLayout();
@@ -1840,6 +1966,7 @@
       onSelectionUpdate: ({ transaction }) => {
         if (
           experience === "typewriter" &&
+          !pointerSelectionActive &&
           !transaction.docChanged &&
           (lineFeedFrame !== null || lineFeedPending)
         ) {
@@ -1855,6 +1982,9 @@
     resizeObserver = new ResizeObserver(measureViewport);
     resizeObserver.observe(scroller);
     scroller.addEventListener("pointerdown", handleScrollPointerDown);
+    window.addEventListener("pointerup", handlePointerSelectionEnd);
+    window.addEventListener("pointercancel", handlePointerSelectionEnd);
+    window.addEventListener("blur", handlePointerSelectionBlur);
     measureViewport();
     resetPlatenMotion(experience === "typewriter");
     scheduleLayout();
@@ -1883,8 +2013,12 @@
     const editable = !readOnly;
     if (mounted && editor) {
       editor.setEditable(editable, false);
-      if (readOnly) caretLine = null;
-      else scheduleCaretLine();
+      if (readOnly) {
+        cancelTypewriterPointerSelection();
+        caretLine = null;
+      } else {
+        scheduleCaretLine();
+      }
     }
   });
 
@@ -1902,6 +2036,7 @@
       }
       const block = updateActiveBlock();
       if (nextExperience !== "typewriter") {
+        cancelTypewriterPointerSelection();
         resetCarriage();
         resetPlatenMotion(false);
       } else if (changed) {
@@ -1943,6 +2078,7 @@
     if (platenDetentTimer) clearTimeout(platenDetentTimer);
     if (activeLineFrame !== null) cancelAnimationFrame(activeLineFrame);
     if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
+    cancelTypewriterPointerSelection();
     if (workspaceFrame !== null) cancelAnimationFrame(workspaceFrame);
     stopTypebarStrike();
     cancelLineFeed(false);
@@ -1950,6 +2086,9 @@
     if (returnTimer) clearTimeout(returnTimer);
     if (literaryTimer) clearTimeout(literaryTimer);
     scroller?.removeEventListener("pointerdown", handleScrollPointerDown);
+    window.removeEventListener("pointerup", handlePointerSelectionEnd);
+    window.removeEventListener("pointercancel", handlePointerSelectionEnd);
+    window.removeEventListener("blur", handlePointerSelectionBlur);
     resizeObserver?.disconnect();
     resizeObserver = null;
     editor?.destroy();
@@ -1972,6 +2111,7 @@
   class:typewriter-strike-point-visible={experience === "typewriter" && caretAlignedToStrike && Boolean(caretLine)}
   class:carriage-returning={carriageReturning}
   class:carriage-stepping={carriageStepping}
+  class:pointer-selecting={pointerSelectionActive}
   class:typebar-striking={typebarStriking}
   class:line-feeding={lineFeeding}
   class:platen-rolling={platenRolling}
@@ -3186,6 +3326,11 @@
   .writing-typewriter.carriage-returning .typewriter-carriage-layer {
     transition-duration: var(--carriage-return-duration);
     transition-timing-function: cubic-bezier(0.16, 0.92, 0.26, 1.08);
+  }
+
+  .writing-typewriter.pointer-selecting .paper-window,
+  .writing-typewriter.pointer-selecting .typewriter-carriage-layer {
+    transition: none;
   }
 
   .typewriter-moving-channel {

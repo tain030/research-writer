@@ -3,10 +3,10 @@ import type { FocusMode, WritingExperience } from "./types";
 export type PageFitMode = "page" | "width";
 export type FontFamilyByExperience = Record<WritingExperience, string>;
 
-export const PREFERENCES_SCHEMA_VERSION = 6;
+export const PREFERENCES_SCHEMA_VERSION = 7;
 
 export const defaultFontFamilyByExperience: FontFamilyByExperience = {
-  typewriter: "Goorm Sans Code",
+  typewriter: "Pretendard",
   literary: "MaruBuri",
   flow: "Pretendard",
 };
@@ -131,24 +131,51 @@ function migrateFontFamilies(
     );
     return {
       fontFamilyByExperience,
+      // A per-experience font map is already authoritative. Pretendard is now
+      // shared by typewriter and flow, so the typewriter slot must not be used
+      // to infer which writing experience is active.
       writingExperience:
-        storedWritingExperience ??
-        writingExperienceForFont(fontFamilyByExperience.typewriter),
+        storedWritingExperience ?? defaultPreferences.writingExperience,
     };
   }
 
+  if (storedSchemaVersion >= 6) {
+    const fontFamilyByExperience = parseStoredFontFamilies(
+      candidate.fontFamilyByExperience,
+    );
+    // Goorm Sans Code was the schema-6 typewriter default. Migrate that
+    // default once while preserving every other remembered user font.
+    if (fontFamilyByExperience.typewriter === "Goorm Sans Code") {
+      fontFamilyByExperience.typewriter = defaultFontFamilyByExperience.typewriter;
+    }
+    return {
+      fontFamilyByExperience,
+      writingExperience:
+        storedWritingExperience ?? defaultPreferences.writingExperience,
+    };
+  }
+
+  const storedLegacyFont = validFontFamily(candidate.fontFamily);
+  const storedLegacyFontFamily =
+    storedLegacyFont ?? defaultFontFamilyByExperience.typewriter;
+  const migratedLegacyDefault =
+    storedLegacyFont === null ||
+    (storedSchemaVersion < 2 && storedLegacyFontFamily === "MaruBuri") ||
+    (storedSchemaVersion < 1 && storedLegacyFontFamily === "Pretendard");
   const legacyFontFamily = migrateLegacyFontFamily(
-    validFontFamily(candidate.fontFamily) ??
-      defaultFontFamilyByExperience.typewriter,
+    storedLegacyFontFamily,
     storedSchemaVersion,
     storedWritingExperience,
   );
   const writingExperience =
-    storedWritingExperience ?? writingExperienceForFont(legacyFontFamily);
+    storedWritingExperience ??
+    (migratedLegacyDefault
+      ? "typewriter"
+      : writingExperienceForFont(legacyFontFamily));
   const fontFamilyByExperience = { ...defaultFontFamilyByExperience };
 
-  // Schema 6 intentionally gives every existing typewriter profile the new
-  // Goorm default once. Non-typewriter choices remain attached to their mode.
+  // Older global-font profiles receive the current typewriter default once.
+  // Non-typewriter choices remain attached to their mode.
   if (writingExperience !== "typewriter") {
     fontFamilyByExperience[writingExperience] = legacyFontFamily;
   }
@@ -175,14 +202,59 @@ export function hasStoredWritingExperience(stored: string | null): boolean {
   if (!stored) return false;
   try {
     const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false;
+    }
+    const candidate = parsed as {
+      schemaVersion?: unknown;
+      fontFamilyByExperience?: unknown;
+      writingExperience?: unknown;
+    };
+    if (isWritingExperience(candidate.writingExperience)) return true;
+
+    // Schema 6 introduced independent font memories for each experience.
+    // From that point onward the typewriter and flow slots may legitimately
+    // share a font, so the page must not infer the active experience from the
+    // selected family when an older record omitted writingExperience.
     return Boolean(
-      parsed &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed) &&
-        isWritingExperience(
-          (parsed as { writingExperience?: unknown }).writingExperience,
-        ),
+      typeof candidate.schemaVersion === "number" &&
+        candidate.schemaVersion >= 6 &&
+        candidate.fontFamilyByExperience &&
+        typeof candidate.fontFamilyByExperience === "object" &&
+        !Array.isArray(candidate.fontFamilyByExperience),
     );
+  } catch {
+    return false;
+  }
+}
+
+export function shouldInferLegacyWritingExperience(
+  stored: string | null,
+): boolean {
+  if (!stored) return false;
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false;
+    }
+    const candidate = parsed as StoredPreferences;
+    if (isWritingExperience(candidate.writingExperience)) return false;
+    const fontFamily = validFontFamily(candidate.fontFamily);
+    if (!fontFamily) return false;
+    const schemaVersion =
+      typeof candidate.schemaVersion === "number" &&
+      Number.isInteger(candidate.schemaVersion) &&
+      candidate.schemaVersion >= 0
+        ? candidate.schemaVersion
+        : 0;
+    if (schemaVersion >= 6) return false;
+
+    // These values were bundled defaults rather than an explicit mode choice.
+    // Inferring them after the schema-7 migration would turn a fresh/default
+    // typewriter profile into flow merely because both now use Pretendard.
+    if (schemaVersion < 2 && fontFamily === "MaruBuri") return false;
+    if (schemaVersion < 1 && fontFamily === "Pretendard") return false;
+    return true;
   } catch {
     return false;
   }

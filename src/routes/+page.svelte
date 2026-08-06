@@ -13,7 +13,16 @@
     type UnlistenFn,
   } from "$lib/desktop";
   import { diffChars, diffWords } from "diff";
+  import AiChatPanel from "$lib/AiChatPanel.svelte";
   import PaginatedEditor from "$lib/PaginatedEditor.svelte";
+  import {
+    conversationHistoryContext,
+    createEditProposal,
+    markPendingHunks,
+    pendingProposalEdits,
+    proposalMatchesContent,
+    updateProposalAfterHunk,
+  } from "$lib/ai-chat";
   import {
     parseManuscript,
     updateManuscriptMetadata,
@@ -39,8 +48,8 @@
   } from "$lib/markdown-formatting";
   import {
     defaultFontFamilyByExperience,
-    hasStoredWritingExperience,
     parsePreferences,
+    shouldInferLegacyWritingExperience,
     writingExperienceForFont,
     type Preferences,
   } from "$lib/preferences";
@@ -52,6 +61,11 @@
   } from "$lib/version-comparison";
   import type {
     AiAccountStatus,
+    AiChatMessage,
+    AiChatMessageMetadata,
+    AiChatResponse,
+    AiConversation,
+    AiConversationSummary,
     AiGrammarResponse,
     AiLoginStart,
     AiSourceContext,
@@ -86,10 +100,9 @@
   } from "$lib/types";
 
   type SaveState = "saved" | "dirty" | "saving" | "error";
-  type ContextMode = "selection" | "section" | "document";
   type GrammarScope = "selection" | "paragraph" | "document";
   type SourceComponent = typeof import("$lib/MarkdownSourceEditor.svelte").default;
-  type ToolbarMenu = "insert" | "view" | "link" | "experience" | null;
+  type ToolbarMenu = "insert" | "link" | "experience" | null;
   type RuntimePlatform = "linux" | "windows" | "macos" | "web";
   type DocumentDialog =
     | "metadata"
@@ -103,14 +116,6 @@
     remote: DocumentPayload;
     local: string;
     base: string;
-  }
-
-  interface Suggestion {
-    response: AiWritingResponse;
-    action: string;
-    from: number;
-    to: number;
-    original: string;
   }
 
   interface ExitPrompt {
@@ -220,11 +225,12 @@
   let searchIndexed = $state(false);
 
   let aiAccount = $state<AiAccountStatus | null>(null);
-  let aiBusy = $state(false);
-  let aiAction = $state("");
-  let aiInstructions = $state("");
-  let contextMode = $state<ContextMode>("section");
-  let suggestion = $state<Suggestion | null>(null);
+  let aiOpen = $state(false);
+  let aiExpanded = $state(false);
+  let aiChatBusy = $state(false);
+  let completionBusy = $state(false);
+  let aiConversations = $state<AiConversationSummary[]>([]);
+  let aiConversation = $state<AiConversation | null>(null);
   let grammarSuggestion = $state<GrammarSuggestion | null>(null);
   let grammarBusy = $state(false);
   let grammarScope = $state<GrammarScope>("paragraph");
@@ -369,6 +375,19 @@
   let compactCompanion = $derived(
     companionView !== null && stageWidth < 840,
   );
+  let pendingAiSelection = $derived.by(() => {
+    if (!aiConversation || !selection.text.trim()) return null;
+    const selectedMarkdown = editorValue.slice(selection.from, selection.to);
+    if (
+      aiConversation.targetKind === "selection" &&
+      aiConversation.targetFrom === selection.from &&
+      aiConversation.targetTo === selection.to &&
+      aiConversation.targetText === selectedMarkdown
+    ) {
+      return null;
+    }
+    return selection;
+  });
   let sourceContexts = $derived(
     researchSources
       .filter((source) => selectedSourceIds.includes(source.id))
@@ -496,7 +515,7 @@
 
   function loadPreferences(): void {
     const stored = localStorage.getItem("research-writer.preferences");
-    inferWritingExperienceFromFont = !hasStoredWritingExperience(stored);
+    inferWritingExperienceFromFont = shouldInferLegacyWritingExperience(stored);
     preferences = parsePreferences(stored);
     const normalized = JSON.stringify(preferences);
     if (stored !== normalized) {
@@ -702,13 +721,6 @@
     } catch (error) {
       notify(errorMessage(error), "error");
     }
-  }
-
-  function setPageFitMode(
-    mode: Preferences["pageFitMode"],
-  ): void {
-    preferences.pageFitMode = mode;
-    savePreferences();
   }
 
   function handleEditorSelection(
@@ -1364,6 +1376,10 @@
     editorApi = paperApi;
     documentDialog = null;
     grammarSuggestion = null;
+    aiOpen = false;
+    aiExpanded = false;
+    aiConversations = [];
+    aiConversation = null;
     sync = null;
     selection = { from: 0, to: 0, text: "", line: 1 };
     resetWritingSession();
@@ -1474,6 +1490,9 @@
     editorApi = paperApi;
     documentDialog = null;
     grammarSuggestion = null;
+    aiExpanded = false;
+    aiConversation = null;
+    aiConversations = [];
     selection = { from: 0, to: 0, text: "", line: 1 };
     resetWritingSession();
     searchIndexed = false;
@@ -1486,7 +1505,11 @@
       if (repositoryDocuments.some((entry) => entry.path === document.path) && repository) {
         repository.lastDocumentPath = document.path;
       }
-      await Promise.all([loadRecents(), refreshSync()]);
+      await Promise.all([
+        loadRecents(),
+        refreshSync(),
+        loadAiConversations(document.path),
+      ]);
     }
     await tick();
     editorApi?.focus();
@@ -1930,6 +1953,8 @@
     const nextPanel = leftPanel === panel ? null : panel;
     if (nextPanel && typeof window !== "undefined" && window.innerWidth <= 900) {
       rightPanel = null;
+      aiOpen = false;
+      aiExpanded = false;
     }
     leftPanel = nextPanel;
     if (nextPanel) lastLeftPanel = nextPanel;
@@ -1944,9 +1969,13 @@
     if (nextPanel && typeof window !== "undefined" && window.innerWidth <= 900) {
       leftPanel = null;
     }
+    if (nextPanel) {
+      aiOpen = false;
+      aiExpanded = false;
+    }
     rightPanel = nextPanel;
     if (nextPanel) lastRightPanel = nextPanel;
-    if (rightPanel === "ai" || rightPanel === "proofreading") {
+    if (rightPanel === "proofreading") {
       await refreshAiAccount();
     }
     if (rightPanel === "sources") await refreshSources();
@@ -1983,6 +2012,8 @@
     if (preferences.focusSheetMode) {
       leftPanel = null;
       rightPanel = null;
+      aiOpen = false;
+      aiExpanded = false;
     }
     savePreferences();
   }
@@ -2239,95 +2270,498 @@
     }
   }
 
-  function aiContext(): string {
-    if (contextMode === "document") return editorValue;
-    if (contextMode === "selection" && selection.text) return selection.text;
-    return currentSection(editorValue, selection.from);
+  function aiConversationSummary(
+    conversation: AiConversation,
+  ): AiConversationSummary {
+    const { messages: _messages, ...summary } = conversation;
+    return summary;
   }
 
-  async function runAi(action: string, background = false): Promise<void> {
-    if (!desktop || !currentDocument || aiBusy) return;
-    const selected = editorApi?.getSelection() ?? selection;
-    if (action !== "complete" && !selected.text.trim()) {
-      notify("먼저 다듬을 문장을 선택해주세요.", "info");
+  function localConversationId(): string {
+    return typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function reconcileAiConversation(
+    conversation: AiConversation,
+  ): AiConversation {
+    const content = editorValue;
+    return {
+      ...conversation,
+      messages: conversation.messages.map((message) => {
+        const proposal = message.metadata.proposal;
+        if (!proposal) return message;
+        const stale =
+          proposal.hunks.some((hunk) => hunk.status === "pending") &&
+          !proposalMatchesContent(proposal, content);
+        if (!stale) return message;
+        return {
+          ...message,
+          metadata: {
+            ...message.metadata,
+            proposal: markPendingHunks(proposal, "stale"),
+          },
+        };
+      }),
+    };
+  }
+
+  async function loadAiConversation(id: string): Promise<void> {
+    if (!currentDocument) return;
+    if (!desktop) {
+      const local = aiConversation?.id === id ? aiConversation : null;
+      if (local) aiConversation = reconcileAiConversation(local);
       return;
     }
-    aiBusy = true;
-    aiAction = action;
-    const contentAtRequest = editorValue;
-    if (!background) rightPanel = "ai";
+    const documentPath = currentDocument.path;
     try {
-      await createSnapshot("ai");
-      const response = await invoke<AiWritingResponse>("run_ai_writing", {
+      const loaded = await invoke<AiConversation>("load_ai_conversation", {
+        id,
+      });
+      if (currentDocument?.path !== documentPath) return;
+      aiConversation = reconcileAiConversation(loaded);
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
+  }
+
+  async function refreshAiConversationList(documentPath: string): Promise<void> {
+    if (!desktop) return;
+    const listed = await invoke<AiConversationSummary[]>(
+      "list_ai_conversations",
+      { documentPath },
+    ).catch(() => []);
+    if (currentDocument?.path === documentPath) aiConversations = listed;
+  }
+
+  async function loadAiConversations(documentPath: string): Promise<void> {
+    if (!desktop) return;
+    await refreshAiConversationList(documentPath);
+    if (currentDocument?.path !== documentPath) return;
+    const latest = aiConversations[0];
+    if (latest) await loadAiConversation(latest.id);
+  }
+
+  async function createAiConversation(
+    selected = editorApi?.getSelection() ?? selection,
+  ): Promise<AiConversation | null> {
+    if (!currentDocument) return null;
+    const hasSelection = Boolean(selected.text.trim());
+    const content = editorApi?.getContent() ?? editorValue;
+    const request = {
+      documentPath: currentDocument.path,
+      targetKind: hasSelection ? "selection" : "document",
+      targetFrom: hasSelection ? selected.from : null,
+      targetTo: hasSelection ? selected.to : null,
+      // Visual selections expose plain text, while these offsets address the
+      // canonical Markdown. Persist the exact source slice so emphasis,
+      // links, and other delimiters cannot make a fresh target look stale.
+      targetText: hasSelection
+        ? content.slice(selected.from, selected.to)
+        : "",
+    };
+    try {
+      const created = desktop
+        ? await invoke<AiConversation>("create_ai_conversation", { request })
+        : {
+            id: localConversationId(),
+            documentPath: currentDocument.path,
+            title: "새 대화",
+            targetKind: request.targetKind as "selection" | "document",
+            targetFrom: request.targetFrom,
+            targetTo: request.targetTo,
+            targetText: request.targetText,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            messages: [],
+          };
+      aiConversation = created;
+      aiConversations = [
+        aiConversationSummary(created),
+        ...aiConversations.filter((item) => item.id !== created.id),
+      ];
+      return created;
+    } catch (error) {
+      notify(errorMessage(error), "error");
+      return null;
+    }
+  }
+
+  async function ensureAiConversation(): Promise<AiConversation | null> {
+    if (!currentDocument) return null;
+    if (aiConversation?.documentPath === currentDocument.path) {
+      return aiConversation;
+    }
+    const latest = aiConversations[0];
+    if (latest) {
+      await loadAiConversation(latest.id);
+      if (aiConversation) return aiConversation;
+    }
+    return createAiConversation();
+  }
+
+  function closeAi(): void {
+    aiOpen = false;
+    aiExpanded = false;
+  }
+
+  async function toggleAi(): Promise<void> {
+    if (aiOpen) {
+      closeAi();
+      return;
+    }
+    if (!currentDocument) return;
+    aiOpen = true;
+    aiExpanded = false;
+    rightPanel = null;
+    if (typeof window !== "undefined" && window.innerWidth <= 1280) {
+      leftPanel = null;
+    }
+    await Promise.all([refreshAiAccount(), ensureAiConversation()]);
+  }
+
+  async function startNewAiConversation(): Promise<void> {
+    if (!currentDocument) return;
+    aiOpen = true;
+    aiExpanded = false;
+    rightPanel = null;
+    if (typeof window !== "undefined" && window.innerWidth <= 1280) {
+      leftPanel = null;
+    }
+    await createAiConversation(editorApi?.getSelection() ?? selection);
+  }
+
+  async function openAiForSelection(): Promise<void> {
+    const selected = editorApi?.getSelection() ?? selection;
+    if (!selected.text.trim()) return toggleAi();
+    aiOpen = true;
+    aiExpanded = false;
+    rightPanel = null;
+    if (typeof window !== "undefined" && window.innerWidth <= 1280) {
+      leftPanel = null;
+    }
+    await Promise.all([refreshAiAccount(), createAiConversation(selected)]);
+  }
+
+  async function deleteAiConversation(id: string): Promise<void> {
+    if (!window.confirm("이 AI 대화를 삭제할까요? 이 작업은 되돌릴 수 없습니다.")) {
+      return;
+    }
+    try {
+      if (desktop) await invoke("delete_ai_conversation", { id });
+      aiConversations = aiConversations.filter((item) => item.id !== id);
+      if (aiConversation?.id === id) {
+        aiConversation = null;
+        const next = aiConversations[0];
+        if (next) await loadAiConversation(next.id);
+        else await createAiConversation();
+      }
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
+  }
+
+  async function appendAiMessage(request: {
+    conversationId: string;
+    role: "user" | "assistant";
+    content: string;
+    responseKind: "answer" | "edit" | null;
+    metadata: AiChatMessageMetadata;
+  }): Promise<AiChatMessage> {
+    if (desktop) {
+      return invoke<AiChatMessage>("append_ai_message", { request });
+    }
+    return {
+      id: localConversationId(),
+      conversationId: request.conversationId,
+      role: request.role,
+      content: request.content,
+      responseKind: request.responseKind,
+      metadata: request.metadata,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  function updateLocalAiMessage(message: AiChatMessage): void {
+    if (!aiConversation || message.conversationId !== aiConversation.id) return;
+    aiConversation = {
+      ...aiConversation,
+      messages: aiConversation.messages.map((item) =>
+        item.id === message.id ? message : item,
+      ),
+    };
+  }
+
+  async function saveAiMessageMetadata(
+    message: AiChatMessage,
+    metadata: AiChatMessageMetadata,
+  ): Promise<void> {
+    const updated = desktop
+      ? await invoke<AiChatMessage>("update_ai_message_metadata", {
+          id: message.id,
+          metadata,
+        })
+      : { ...message, metadata };
+    updateLocalAiMessage(updated);
+  }
+
+  async function updateAiConversationTarget(
+    proposal: NonNullable<AiChatMessageMetadata["proposal"]>,
+  ): Promise<void> {
+    if (!aiConversation || aiConversation.targetKind !== "selection" || !editorApi) {
+      return;
+    }
+    const content = editorApi.getContent();
+    const request = {
+      conversationId: aiConversation.id,
+      targetKind: "selection" as const,
+      targetFrom: proposal.targetFrom,
+      targetTo: proposal.targetTo,
+      targetText: content.slice(proposal.targetFrom, proposal.targetTo),
+    };
+    if (desktop) {
+      await invoke("update_ai_conversation_target", { request });
+    }
+    aiConversation = {
+      ...aiConversation,
+      targetKind: request.targetKind,
+      targetFrom: request.targetFrom,
+      targetTo: request.targetTo,
+      targetText: request.targetText,
+    };
+  }
+
+  async function sendAiChat(prompt: string): Promise<boolean> {
+    if (!desktop || !currentDocument || aiChatBusy || !aiAccount?.authenticated) {
+      if (!desktop) notify("AI 채팅은 데스크톱 앱에서 사용할 수 있습니다.", "info");
+      return false;
+    }
+    const conversation = await ensureAiConversation();
+    if (!conversation) return false;
+    const content = editorApi?.getContent() ?? editorValue;
+    const targetFrom = conversation.targetKind === "selection"
+      ? (conversation.targetFrom ?? 0)
+      : 0;
+    const targetTo = conversation.targetKind === "selection"
+      ? (conversation.targetTo ?? targetFrom)
+      : content.length;
+    const targetText = content.slice(targetFrom, targetTo);
+    if (
+      conversation.targetKind === "selection" &&
+      targetText !== conversation.targetText
+    ) {
+      notify(
+        "대화가 가리키던 원문이 바뀌었습니다. 현재 범위를 다시 선택해 새 대화를 시작해주세요.",
+        "error",
+      );
+      return false;
+    }
+
+    aiChatBusy = true;
+    const documentPath = currentDocument.path;
+    const history = conversationHistoryContext(conversation.messages);
+    let userMessage: AiChatMessage | null = null;
+    try {
+      userMessage = await appendAiMessage({
+        conversationId: conversation.id,
+        role: "user",
+        content: prompt,
+        responseKind: null,
+        metadata: {},
+      });
+      if (aiConversation?.id === conversation.id) {
+        aiConversation = {
+          ...aiConversation,
+          title:
+            aiConversation.title === "새 대화"
+              ? `${prompt.replace(/\s+/g, " ").slice(0, 44)}${prompt.length > 44 ? "…" : ""}`
+              : aiConversation.title,
+          messages: [...aiConversation.messages, userMessage],
+        };
+      }
+      const response = await invoke<AiChatResponse>("run_ai_chat", {
         request: {
-          action,
-          selection: action === "complete" ? "" : selected.text,
+          prompt,
+          targetKind: conversation.targetKind,
+          targetText,
           documentContext:
-            action === "complete"
-              ? editorValue.slice(
-                  Math.max(0, selected.from - 5500),
-                  Math.min(editorValue.length, selected.from + 1000),
-                )
-              : aiContext(),
+            conversation.targetKind === "selection"
+              ? currentSection(content, targetFrom)
+              : "",
+          historySummary: history.historySummary,
+          recentMessages: history.recentMessages,
           styleReference,
-          instructions: aiInstructions,
           sources: sourceContexts,
         },
       });
-      if (action === "complete") {
-        const latest = editorApi?.getSelection();
-        if (
-          latest &&
-          latest.from === selected.from &&
-          latest.to === selected.to &&
-          editorValue === contentAtRequest
-        ) {
-          editorApi?.setGhostText(response.replacement);
-        }
-      } else {
-        suggestion = {
-          response,
-          action,
-          from: selected.from,
-          to: selected.to,
-          original: selected.text,
+      const proposal =
+        response.kind === "edit" && response.revisedText !== targetText
+          ? createEditProposal(
+              response,
+              conversation.targetKind,
+              targetFrom,
+              targetText,
+            )
+          : undefined;
+      const assistantMessage = await appendAiMessage({
+        conversationId: conversation.id,
+        role: "assistant",
+        content: response.reply,
+        responseKind: response.kind,
+        metadata: {
+          citations: response.citations,
+          warnings: response.warnings,
+          model: response.model,
+          proposal,
+        },
+      });
+      if (currentDocument?.path === documentPath && aiConversation?.id === conversation.id) {
+        aiConversation = {
+          ...aiConversation,
+          messages: [...aiConversation.messages, assistantMessage],
         };
       }
+      await refreshAiConversationList(documentPath);
+      return true;
     } catch (error) {
-      if (!background) notify(errorMessage(error), "error");
+      if (userMessage) {
+        await saveAiMessageMetadata(userMessage, {
+          ...userMessage.metadata,
+          failed: true,
+        }).catch(() => undefined);
+      }
+      notify(errorMessage(error), "error");
+      return false;
     } finally {
-      aiBusy = false;
-      aiAction = "";
+      aiChatBusy = false;
     }
   }
 
-  function applySuggestion(): void {
-    if (!suggestion || !editorApi) return;
-    const content = editorApi.getContent();
-    if (
-      content.slice(suggestion.from, suggestion.to) !== suggestion.original
-    ) {
-      notify(
-        "제안 생성 뒤 원문이 바뀌었습니다. 현재 문장을 다시 선택해주세요.",
-        "error",
-      );
-      suggestion = null;
+  function aiMessage(messageId: string): AiChatMessage | null {
+    return aiConversation?.messages.find((message) => message.id === messageId) ?? null;
+  }
+
+  async function applyAiHunk(messageId: string, hunkId: string): Promise<void> {
+    const message = aiMessage(messageId);
+    const proposal = message?.metadata.proposal;
+    const hunk = proposal?.hunks.find((item) => item.id === hunkId);
+    if (!message || !proposal || !hunk || hunk.status !== "pending" || !editorApi) {
       return;
     }
-    editorApi.replaceRange(
-      suggestion.from,
-      suggestion.to,
-      suggestion.response.replacement,
+    const content = editorApi.getContent();
+    if (
+      !proposalMatchesContent(proposal, content) ||
+      content.slice(hunk.from, hunk.to) !== hunk.original
+    ) {
+      const stale = markPendingHunks(proposal, "stale");
+      await saveAiMessageMetadata(message, { ...message.metadata, proposal: stale });
+      notify("제안 생성 뒤 해당 원문이 바뀌어 적용하지 않았습니다.", "error");
+      return;
+    }
+    await createSnapshot("ai");
+    editorApi.replaceRange(hunk.from, hunk.to, hunk.replacement);
+    const updated = updateProposalAfterHunk(proposal, hunkId, "applied");
+    await saveAiMessageMetadata(message, { ...message.metadata, proposal: updated });
+    await updateAiConversationTarget(updated);
+    notify("AI 변경 한 건을 적용했습니다. 실행 취소할 수 있습니다.", "success");
+  }
+
+  async function rejectAiHunk(messageId: string, hunkId: string): Promise<void> {
+    const message = aiMessage(messageId);
+    const proposal = message?.metadata.proposal;
+    if (!message || !proposal) return;
+    const updated = updateProposalAfterHunk(proposal, hunkId, "rejected");
+    await saveAiMessageMetadata(message, { ...message.metadata, proposal: updated });
+  }
+
+  async function applyAllAiHunks(messageId: string): Promise<void> {
+    const message = aiMessage(messageId);
+    const proposal = message?.metadata.proposal;
+    if (!message || !proposal || !editorApi) return;
+    const content = editorApi.getContent();
+    const edits = pendingProposalEdits(proposal, content);
+    if (!edits) {
+      const stale = markPendingHunks(proposal, "stale");
+      await saveAiMessageMetadata(message, { ...message.metadata, proposal: stale });
+      notify("제안 생성 뒤 원문이 바뀌어 변경을 적용하지 않았습니다.", "error");
+      return;
+    }
+    if (!edits.length) return;
+    await createSnapshot("ai");
+    editorApi.replaceRanges(edits);
+    const delta = edits.reduce(
+      (total, edit) => total + edit.text.length - (edit.to - edit.from),
+      0,
     );
-    suggestion = null;
-    notify("AI 제안을 원고에 반영했습니다. 실행 취소할 수 있습니다.", "success");
+    const updated = {
+      ...markPendingHunks(proposal, "applied"),
+      targetTo: proposal.targetTo + delta,
+      baseText: editorApi
+        .getContent()
+        .slice(proposal.targetFrom, proposal.targetTo + delta),
+    };
+    await saveAiMessageMetadata(message, { ...message.metadata, proposal: updated });
+    await updateAiConversationTarget(updated);
+    notify(`AI 변경 ${edits.length}건을 적용했습니다. 한 번에 실행 취소할 수 있습니다.`, "success");
+  }
+
+  async function rejectAllAiHunks(messageId: string): Promise<void> {
+    const message = aiMessage(messageId);
+    const proposal = message?.metadata.proposal;
+    if (!message || !proposal) return;
+    await saveAiMessageMetadata(message, {
+      ...message.metadata,
+      proposal: markPendingHunks(proposal, "rejected"),
+    });
+  }
+
+  function setAutoComplete(enabled: boolean): void {
+    preferences.autoComplete = enabled;
+    savePreferences();
+    if (!enabled) editorApi?.clearGhostText();
+  }
+
+  async function runCompletion(): Promise<void> {
+    if (!desktop || !currentDocument || completionBusy || aiChatBusy) return;
+    const selected = editorApi?.getSelection() ?? selection;
+    completionBusy = true;
+    const contentAtRequest = editorValue;
+    try {
+      const response = await invoke<AiWritingResponse>("run_ai_writing", {
+        request: {
+          action: "complete",
+          selection: "",
+          documentContext: editorValue.slice(
+            Math.max(0, selected.from - 5500),
+            Math.min(editorValue.length, selected.from + 1000),
+          ),
+          styleReference,
+          instructions: "",
+          sources: sourceContexts,
+        },
+      });
+      const latest = editorApi?.getSelection();
+      if (
+        latest &&
+        latest.from === selected.from &&
+        latest.to === selected.to &&
+        editorValue === contentAtRequest
+      ) {
+        editorApi?.setGhostText(response.replacement);
+      }
+    } catch {
+      // Background completion stays silent; explicit chat errors remain visible.
+    } finally {
+      completionBusy = false;
+    }
   }
 
   function scheduleCompletion(): void {
     editorApi?.clearGhostText();
     if (completionTimer) clearTimeout(completionTimer);
     if (!preferences.autoComplete || selection.text || !currentDocument) return;
-    completionTimer = setTimeout(() => void runAi("complete", true), 700);
+    completionTimer = setTimeout(() => void runCompletion(), 700);
   }
 
   function noteWritingActivity(): void {
@@ -2718,7 +3152,18 @@
           renamingPath = "";
           return;
         }
-        suggestion = null;
+        if (aiOpen) {
+          if (
+            aiExpanded &&
+            typeof window !== "undefined" &&
+            window.innerWidth <= 1280
+          ) {
+            aiExpanded = false;
+          } else {
+            closeAi();
+          }
+          return;
+        }
         if (!conflict) {
           leftPanel = null;
           rightPanel = null;
@@ -2903,6 +3348,7 @@
 <main
   class:panel-left={leftPanel !== null}
   class:panel-right={rightPanel !== null}
+  class:ai-open={aiOpen}
   class:platform-macos={runtimePlatform === "macos"}
   class:split-dragging={splitDragging}
   class:flow-chrome-hidden={flowChromeHidden}
@@ -3130,63 +3576,7 @@
           </form>
         {/if}
       </div>
-      <div class="toolbar-menu-host compact-menu">
-        <button
-          class:active={toolbarMenu === "view"}
-          class="toolbar-text-button toolbar-menu-button"
-          aria-label="보기 메뉴"
-          title="보기 설정"
-          aria-haspopup="menu"
-          aria-expanded={toolbarMenu === "view"}
-          disabled={!currentDocument}
-          onclick={(event) => void toggleToolbarMenu("view", event.currentTarget)}
-        >
-          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 12s3.1-5 8.5-5 8.5 5 8.5 5-3.1 5-8.5 5-8.5-5-8.5-5Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
-          <span class="toolbar-menu-label">보기</span>
-          <svg class="toolbar-chevron" aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
-        </button>
-        {#if toolbarMenu === "view"}
-          <div
-            class="toolbar-popover toolbar-menu view-menu"
-            role="menu"
-            tabindex="-1"
-            data-menu="view"
-            onkeydown={handleToolbarMenuKeydown}
-          >
-            {#if preferences.writingExperience === "literary"}
-              <button
-                class:active={preferences.pageFitMode === "page"}
-                role="menuitemradio"
-                aria-checked={preferences.pageFitMode === "page"}
-                onclick={() => { closeToolbarMenu(false); setPageFitMode("page"); }}
-              >페이지에 맞추기</button>
-              <button
-                class:active={preferences.pageFitMode === "width"}
-                role="menuitemradio"
-                aria-checked={preferences.pageFitMode === "width"}
-                onclick={() => { closeToolbarMenu(false); setPageFitMode("width"); }}
-              >페이지 너비에 맞추기</button>
-            {:else}
-              <div class="view-mode-note">
-                <strong>{preferences.writingExperience === "typewriter" ? "고정 타점 보기" : "연속 캔버스"}</strong>
-                <small>{preferences.writingExperience === "typewriter" ? "종이가 타점 아래에서 이동합니다." : "페이지 경계 없이 문단에 집중합니다."}</small>
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
       <span class="toolbar-divider document-divider"></span>
-      <button
-        class:active={companionView === "source"}
-        class="toolbar-icon-button"
-        title="Markdown 원문을 옆에 열기"
-        aria-label="Markdown 원문을 옆에 열기"
-        aria-pressed={companionView === "source"}
-        disabled={!currentDocument}
-        onclick={() => void toggleCompanionView("source")}
-      >
-        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M14 5l-4 14"></path></svg>
-      </button>
       <button
         class="toolbar-icon-button"
         title="인쇄/PDF 저장 (Ctrl+P)"
@@ -3199,6 +3589,18 @@
     </div>
 
     <div class="topbar-actions">
+      <button
+        class:active={aiOpen}
+        class="ai-header-button"
+        title={aiOpen ? "AI 채팅 닫기" : "AI 채팅 열기"}
+        aria-label={aiOpen ? "AI 채팅 닫기" : "AI 채팅 열기"}
+        aria-expanded={aiOpen}
+        aria-controls="ai-panel"
+        disabled={!currentDocument}
+        onclick={() => void toggleAi()}
+      >
+        <span aria-hidden="true">✦</span><strong>AI</strong>
+      </button>
       <button
         class="panel-toggle theme-toggle"
         title={darkThemeActive ? "밝은 모드로 전환" : "어두운 모드로 전환"}
@@ -3534,13 +3936,9 @@
         {/if}
       </div>
 
-      {#if selection.text && !suggestion && !conflict}
-        <div class="selection-tools">
-          <button onclick={() => void runAi("rewrite")}>다듬기</button>
-          <button onclick={() => void runAi("shorten")}>줄이기</button>
-          <button onclick={() => void runAi("expand")}>늘리기</button>
-          <button onclick={() => void runAi("logic")}>논리</button>
-          <button onclick={() => void toggleRight("ai")}>더보기</button>
+      {#if selection.text && !conflict && !aiOpen}
+        <div class="selection-ai-trigger">
+          <button onclick={() => void openAiForSelection()}><span aria-hidden="true">✦</span> AI로 수정</button>
         </div>
       {/if}
 
@@ -3671,10 +4069,6 @@
             onclick={() => void selectRightPanel("proofreading")}>교정</button
           >
           <button
-            class:active={rightPanel === "ai"}
-            onclick={() => void selectRightPanel("ai")}>AI</button
-          >
-          <button
             class:active={rightPanel === "sources"}
             onclick={() => void selectRightPanel("sources")}>출처</button
           >
@@ -3747,123 +4141,6 @@
                 >ChatGPT로 연결</button
               >
             {/if}
-          </section>
-        {:else if rightPanel === "ai"}
-          <section class="panel-section">
-            <p class="eyebrow">작문 보조</p>
-            {#if aiAccount?.authenticated}
-              <div class="connection-line success">
-                <span></span>
-                <div>
-                  <strong>Codex 연결됨</strong>
-                  <small>{aiAccount.email ?? aiAccount.planType ?? "ChatGPT OAuth"}</small>
-                </div>
-              </div>
-            {:else}
-              <div class="connection-card">
-                <strong>ChatGPT로 연결</strong>
-                <p>{aiAccount?.message ?? "연결 상태를 확인하고 있습니다."}</p>
-                <div class="button-row">
-                  <button onclick={() => void startAiLogin(false)}
-                    >브라우저 로그인</button
-                  >
-                  <button onclick={() => void startAiLogin(true)}
-                    >기기 코드</button
-                  >
-                </div>
-                {#if login?.userCode}
-                  <code class="device-code">{login.userCode}</code>
-                  <button class="link-button" onclick={() => void refreshAiAccount()}
-                    >로그인 완료 확인</button
-                  >
-                {/if}
-              </div>
-            {/if}
-          </section>
-
-          <section class="panel-section">
-            <p class="eyebrow">보낼 문맥</p>
-            <div class="segmented">
-              <button
-                class:active={contextMode === "selection"}
-                onclick={() => (contextMode = "selection")}>선택</button
-              >
-              <button
-                class:active={contextMode === "section"}
-                onclick={() => (contextMode = "section")}>현재 절</button
-              >
-              <button
-                class:active={contextMode === "document"}
-                onclick={() => (contextMode = "document")}>전체</button
-              >
-            </div>
-            <div class="context-chips">
-              {#if selection.text}<span>선택 {countWords(selection.text)}단어</span>{/if}
-              {#if styleReferenceName}<span>문체 · {styleReferenceName}</span>{/if}
-              {#if sourceContexts.length}<span>출처 {sourceContexts.length}개</span>{/if}
-            </div>
-            <button class="path-button" onclick={() => void chooseStyleReference()}>
-              <span>{styleReferenceName || "문체 참고 원고 선택"}</span>
-              <small>{styleReferenceName ? "교체" : "선택"}</small>
-            </button>
-          </section>
-
-          <section class="panel-section">
-            <p class="eyebrow">선택 문장</p>
-            <div class="action-grid">
-              <button disabled={!selection.text || aiBusy} onclick={() => void runAi("rewrite")}>
-                <strong>다듬기</strong><small>뜻은 그대로</small>
-              </button>
-              <button disabled={!selection.text || aiBusy} onclick={() => void runAi("shorten")}>
-                <strong>짧게</strong><small>군더더기 제거</small>
-              </button>
-              <button disabled={!selection.text || aiBusy} onclick={() => void runAi("expand")}>
-                <strong>확장</strong><small>논증 풀어쓰기</small>
-              </button>
-              <button disabled={!selection.text || aiBusy} onclick={() => void runAi("style")}>
-                <strong>문체 맞춤</strong><small>참고 원고 기준</small>
-              </button>
-              <button disabled={!selection.text || aiBusy} onclick={() => void runAi("logic")}>
-                <strong>논리 점검</strong><small>흐름과 비약</small>
-              </button>
-              <button
-                disabled={!selection.text || aiBusy}
-                onclick={() => void runAi("counterargument")}
-              >
-                <strong>반론</strong><small>한계 보강</small>
-              </button>
-              <button
-                disabled={!selection.text || aiBusy || !sourceContexts.length}
-                onclick={() => void runAi("evidence")}
-              >
-                <strong>근거 강화</strong><small>선택 출처만</small>
-              </button>
-            </div>
-            <textarea
-              rows="3"
-              placeholder="이번 제안에만 적용할 지시"
-              bind:value={aiInstructions}
-            ></textarea>
-            {#if aiBusy}
-              <p class="working-line">
-                <span></span>{aiAction === "complete" ? "다음 문장" : "제안"}을
-                만들고 있습니다…
-              </p>
-            {/if}
-          </section>
-
-          <section class="panel-section">
-            <label class="switch-row">
-              <div>
-                <strong>자동 이어쓰기</strong>
-                <small>700ms 멈추면 흐린 제안, Tab으로 수락</small>
-              </div>
-              <input
-                type="checkbox"
-                bind:checked={preferences.autoComplete}
-                onchange={savePreferences}
-              />
-            </label>
           </section>
         {:else if rightPanel === "sources"}
           <section class="panel-section">
@@ -4079,6 +4356,39 @@
           {/if}
         {/if}
       </div>
+    </aside>
+  {/if}
+
+  {#if aiOpen && currentDocument}
+    <aside id="ai-panel" class:expanded={aiExpanded} class="ai-panel">
+      <AiChatPanel
+        account={aiAccount}
+        {login}
+        conversation={aiConversation}
+        conversations={aiConversations}
+        busy={aiChatBusy}
+        expanded={aiExpanded}
+        readOnly={currentDocument.readOnly}
+        pendingSelection={pendingAiSelection}
+        {styleReferenceName}
+        sourceCount={sourceContexts.length}
+        autoComplete={preferences.autoComplete}
+        onclose={closeAi}
+        onexpandedchange={(expanded) => (aiExpanded = expanded)}
+        onnewconversation={startNewAiConversation}
+        onselectconversation={loadAiConversation}
+        ondeleteconversation={deleteAiConversation}
+        onnewselection={startNewAiConversation}
+        onsend={sendAiChat}
+        onapplyhunk={applyAiHunk}
+        onrejecthunk={rejectAiHunk}
+        onapplyall={applyAllAiHunks}
+        onrejectall={rejectAllAiHunks}
+        onlogin={startAiLogin}
+        onrefreshlogin={refreshAiAccount}
+        onchoosestyle={chooseStyleReference}
+        onautocompletechange={setAutoComplete}
+      />
     </aside>
   {/if}
 </main>
@@ -4403,53 +4713,6 @@
   </div>
 {/if}
 
-{#if suggestion}
-  <div class="modal-backdrop" role="presentation">
-    <div
-      class="modal suggestion-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label="AI 작문 제안"
-      use:modalFocus
-    >
-      <header>
-        <div>
-          <p class="eyebrow">AI 제안 · {suggestion.response.model}</p>
-          <h2>원문은 그대로 두었습니다</h2>
-        </div>
-        <button
-          class="close-button"
-          aria-label="AI 제안 닫기"
-          onclick={() => (suggestion = null)}
-        >×</button>
-      </header>
-      <div class="diff-view">
-        {#each diffWords(suggestion.original, suggestion.response.replacement) as part}
-          <span class:added={part.added} class:removed={part.removed}>
-            {part.value}
-          </span>
-        {/each}
-      </div>
-      {#if suggestion.response.rationale}
-        <p class="rationale">{suggestion.response.rationale}</p>
-      {/if}
-      {#if suggestion.response.citations.length}
-        <div class="context-chips">
-          {#each suggestion.response.citations as citation}
-            <span>출처 {citation}</span>
-          {/each}
-        </div>
-      {/if}
-      <footer>
-        <button class="secondary-button" onclick={() => (suggestion = null)}
-          >거절</button
-        >
-        <button class="primary-button" onclick={applySuggestion}>반영</button>
-      </footer>
-    </div>
-  </div>
-{/if}
-
 {#if versionPreview}
   <div class="modal-backdrop" role="presentation">
     <div
@@ -4618,8 +4881,16 @@
     grid-template-columns: 0 minmax(0, 1fr) 342px;
   }
 
+  .app-shell.ai-open {
+    grid-template-columns: 0 minmax(0, 1fr) 380px;
+  }
+
   .app-shell.panel-left.panel-right {
     grid-template-columns: 278px minmax(0, 1fr) 334px;
+  }
+
+  .app-shell.panel-left.ai-open {
+    grid-template-columns: 278px minmax(0, 1fr) 372px;
   }
 
   .topbar {
@@ -4672,6 +4943,7 @@
   }
 
   .flow-chrome-hidden .panel,
+  .flow-chrome-hidden .ai-panel,
   .flow-chrome-hidden .statusbar {
     opacity: 0.035;
     pointer-events: none;
@@ -4766,6 +5038,34 @@
     align-self: stretch;
     gap: 4px;
   }
+
+  .ai-header-button {
+    display: flex;
+    height: 32px;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--rule));
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    padding: 0 10px;
+    color: var(--accent);
+    font-size: var(--type-control);
+  }
+
+  .ai-header-button > span {
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .ai-header-button > strong { font-size: 11px; }
+
+  .ai-header-button:hover:not(:disabled),
+  .ai-header-button.active {
+    border-color: color-mix(in srgb, var(--accent) 64%, var(--rule));
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+  }
+
+  .ai-header-button:disabled { opacity: 0.45; }
 
   .window-controls {
     display: flex;
@@ -5000,24 +5300,6 @@
   .experience-menu button small {
     color: var(--ink-faint);
     font-size: var(--type-micro);
-  }
-
-  .view-mode-note {
-    display: grid;
-    gap: 3px;
-    max-width: 220px;
-    padding: 9px 11px;
-  }
-
-  .view-mode-note strong {
-    color: var(--ink-strong);
-    font-size: var(--type-control);
-  }
-
-  .view-mode-note small {
-    color: var(--ink-faint);
-    font-size: var(--type-micro);
-    line-height: 1.45;
   }
 
   .document-toolbar {
@@ -5337,6 +5619,19 @@
   .right-panel {
     grid-area: right;
     border-left: 1px solid var(--rule);
+  }
+
+  .ai-panel {
+    grid-area: right;
+    position: relative;
+    z-index: 18;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border-left: 1px solid var(--rule);
+    background: var(--panel);
+    box-shadow: -8px 0 24px color-mix(in srgb, var(--ink-strong) 5%, transparent);
+    transition: opacity 220ms ease, transform 220ms ease;
   }
 
   .panel-heading {
@@ -5715,8 +6010,7 @@
     color: var(--accent);
   }
 
-  .quiet-line,
-  .working-line {
+  .quiet-line {
     color: var(--ink-muted);
     font-size: var(--type-caption);
   }
@@ -5844,33 +6138,38 @@
     font-size: var(--type-control);
   }
 
-  .selection-tools {
+  .selection-ai-trigger {
     position: absolute;
     z-index: 9;
-    bottom: 40px;
+    top: 12px;
     left: 50%;
-    display: flex;
-    gap: 2px;
     transform: translateX(-50%);
-    border: 1px solid var(--rule);
-    border-radius: 9px;
+  }
+
+  .writing-stage:has(.encoding-banner) .selection-ai-trigger {
+    top: 54px;
+  }
+
+  .selection-ai-trigger button {
+    height: 36px;
+    border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--rule));
+    border-radius: 10px;
     background: var(--paper-raised);
-    padding: 4px;
+    padding: 0 12px;
     box-shadow: var(--shadow);
-  }
-
-  .selection-tools button {
-    border: 0;
-    border-radius: 5px;
-    background: transparent;
-    padding: 6px 9px;
-    color: var(--ink-muted);
-    font-size: var(--type-control);
-  }
-
-  .selection-tools button:hover {
-    background: var(--paper-deep);
     color: var(--ink-strong);
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .selection-ai-trigger button span {
+    margin-right: 5px;
+    color: var(--accent);
+  }
+
+  .selection-ai-trigger button:hover {
+    border-color: color-mix(in srgb, var(--accent) 68%, var(--rule));
+    background: color-mix(in srgb, var(--accent) 8%, var(--paper-raised));
   }
 
   .statusbar {
@@ -6036,7 +6335,6 @@
   }
 
   .welcome-actions,
-  .button-row,
   .modal footer {
     display: flex;
     justify-content: center;
@@ -6067,7 +6365,6 @@
   .wide-button:not(.accent):hover:not(:disabled),
   .named-version button:hover:not(:disabled),
   .source-search button:hover:not(:disabled),
-  .button-row button:hover:not(:disabled),
   .article-actions button:hover:not(:disabled),
   .source-list article > button:hover:not(:disabled),
   .table-size-controls button:hover:not(:disabled),
@@ -6210,24 +6507,6 @@
     line-height: 1.45;
   }
 
-  .connection-card {
-    border: 1px solid var(--rule);
-    border-radius: 9px;
-    background: var(--paper-raised);
-    padding: 13px;
-  }
-
-  .connection-card strong {
-    font-size: var(--type-control);
-  }
-
-  .connection-card p {
-    color: var(--ink-muted);
-    font-size: var(--type-caption);
-    line-height: 1.55;
-  }
-
-  .button-row button,
   .article-actions button,
   .source-list article > button {
     border: 1px solid var(--control-border);
@@ -6236,14 +6515,6 @@
     padding: 6px 9px;
     color: var(--control-fg);
     font-size: var(--type-control);
-  }
-
-  .device-code {
-    display: block;
-    margin: 12px 0 5px;
-    padding: 8px;
-    text-align: center;
-    letter-spacing: 0.12em;
   }
 
   .link-button {
@@ -6276,76 +6547,11 @@
     color: var(--accent);
   }
 
-  .context-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-    margin: 9px 0;
-  }
-
-  .context-chips span {
-    border: 1px solid var(--rule);
-    border-radius: 12px;
-    background: var(--paper-raised);
-    padding: 3px 7px;
-    color: var(--ink-muted);
-    font-size: var(--type-micro);
-  }
-
-  .action-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 6px;
-    margin-bottom: 9px;
-  }
-
-  .action-grid button {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    border: 1px solid var(--rule);
-    border-radius: 7px;
-    background: color-mix(in srgb, var(--surface-raised) 42%, transparent);
-    padding: 9px;
-    text-align: left;
-  }
-
-  .action-grid button:hover:not(:disabled) {
-    border-color: color-mix(in srgb, var(--accent) 42%, var(--rule));
-    background: color-mix(in srgb, var(--surface-raised) 78%, transparent);
-  }
-
-  .action-grid strong {
-    font-size: var(--type-control);
-  }
-
-  .action-grid small {
-    margin-top: 2px;
-    color: var(--ink-faint);
-    font-size: var(--type-micro);
-    line-height: 1.35;
-  }
-
   .panel-section textarea {
     width: 100%;
     resize: vertical;
     font-size: var(--type-control);
     line-height: 1.55;
-  }
-
-  .working-line {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-  }
-
-  .working-line span {
-    width: 7px;
-    height: 7px;
-    border: 1px solid var(--accent);
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
   }
 
   .switch-row {
@@ -6987,6 +7193,8 @@
   @media (max-width: 1280px) {
     .app-shell.panel-left,
     .app-shell.panel-right,
+    .app-shell.ai-open,
+    .app-shell.panel-left.ai-open,
     .app-shell.panel-left.panel-right {
       grid-template-columns: 0 minmax(0, 1fr) 0;
     }
@@ -7005,6 +7213,30 @@
 
     .right-panel {
       right: 0;
+    }
+
+    .ai-panel {
+      position: fixed;
+      z-index: 26;
+      top: 58px;
+      left: 50%;
+      width: min(680px, calc(100vw - 24px));
+      height: auto;
+      min-height: 0;
+      max-height: 52px;
+      transform: translateX(-50%);
+      border: 1px solid var(--rule-strong);
+      border-radius: 12px;
+      box-shadow: 0 20px 52px color-mix(in srgb, var(--ink-strong) 24%, transparent);
+      transition: max-height 180ms ease, opacity 180ms ease, transform 180ms ease;
+    }
+
+    .ai-panel.expanded {
+      max-height: min(60vh, 560px);
+    }
+
+    .app-shell:has(.encoding-banner) .ai-panel {
+      top: 104px;
     }
   }
 
@@ -7068,6 +7300,14 @@
     .document-toolbar {
       padding-left: 5px;
     }
+
+    .ai-header-button {
+      width: 32px;
+      justify-content: center;
+      padding: 0;
+    }
+
+    .ai-header-button > strong { display: none; }
   }
 
   @media (max-width: 760px) {
@@ -7132,8 +7372,9 @@
 
     .topbar,
     .panel,
+    .ai-panel,
     .encoding-banner,
-    .selection-tools,
+    .selection-ai-trigger,
     .statusbar {
       display: none !important;
     }

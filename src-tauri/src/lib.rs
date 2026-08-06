@@ -6,8 +6,11 @@ mod integrations;
 mod manuscript;
 mod platform;
 
-use codex::{AiGrammarRequest, AiWritingRequest, CodexBridge};
-use database::MetadataDb;
+use codex::{AiChatRequest, AiGrammarRequest, AiWritingRequest, CodexBridge};
+use database::{
+    AppendAiChatMessageRequest, CreateAiConversationRequest, MetadataDb,
+    UpdateAiConversationTargetRequest,
+};
 use document::SaveDocumentRequest;
 use integrations::ZoteroItem;
 use platform::{BackendEvent, FontService, PlatformServices, SystemIntegration};
@@ -164,6 +167,48 @@ pub async fn dispatch(state: Arc<AppState>, command: &str, args: Value) -> Resul
                 .load_version(&required::<String>(&args, "id")?)?,
         ),
         "recent_documents" => output(state.database.recent_documents()?),
+        "create_ai_conversation" => {
+            output(state.database.create_ai_conversation(&required::<
+                CreateAiConversationRequest,
+            >(&args, "request")?)?)
+        }
+        "list_ai_conversations" => output(state.database.list_ai_conversations(&required::<
+            String,
+        >(
+            &args,
+            "documentPath",
+        )?)?),
+        "load_ai_conversation" => output(state.database.load_ai_conversation(&required::<
+            String,
+        >(
+            &args, "id"
+        )?)?),
+        "append_ai_message" => output(state.database.append_ai_message(&required::<
+            AppendAiChatMessageRequest,
+        >(
+            &args, "request"
+        )?)?),
+        "update_ai_message_metadata" => {
+            let metadata = required::<Value>(&args, "metadata")?;
+            output(
+                state
+                    .database
+                    .update_ai_message_metadata(&required::<String>(&args, "id")?, &metadata)?,
+            )
+        }
+        "update_ai_conversation_target" => {
+            output(state.database.update_ai_conversation_target(&required::<
+                UpdateAiConversationTargetRequest,
+            >(
+                &args, "request"
+            )?)?)
+        }
+        "delete_ai_conversation" => {
+            state
+                .database
+                .delete_ai_conversation(&required::<String>(&args, "id")?)?;
+            Ok(Value::Null)
+        }
         "repository_status" => output(manuscript::repository_status(&state.database)?),
         "open_repository" => output(manuscript::open_repository(
             &state.database,
@@ -219,6 +264,15 @@ pub async fn dispatch(state: Arc<AppState>, command: &str, args: Value) -> Resul
                 tokio::task::spawn_blocking(move || codex.run_writing_assistant(&request))
                     .await
                     .map_err(|error| format!("AI 작문 작업이 중단되었습니다: {error}"))??,
+            )
+        }
+        "run_ai_chat" => {
+            let codex = state.codex.clone();
+            let request = required::<AiChatRequest>(&args, "request")?;
+            output(
+                tokio::task::spawn_blocking(move || codex.run_chat(&request))
+                    .await
+                    .map_err(|error| format!("AI 채팅 작업이 중단되었습니다: {error}"))??,
             )
         }
         "run_ai_grammar_check" => {

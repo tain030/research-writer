@@ -93,6 +93,55 @@ pub struct AiWritingResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiChatHistoryMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatRequest {
+    pub prompt: String,
+    pub target_kind: String,
+    #[serde(default)]
+    pub target_text: String,
+    #[serde(default)]
+    pub document_context: String,
+    #[serde(default)]
+    pub history_summary: String,
+    #[serde(default)]
+    pub recent_messages: Vec<AiChatHistoryMessage>,
+    #[serde(default)]
+    pub style_reference: String,
+    #[serde(default)]
+    pub sources: Vec<AiSourceContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatResponse {
+    pub kind: String,
+    pub reply: String,
+    pub revised_text: String,
+    pub citations: Vec<String>,
+    pub warnings: Vec<String>,
+    pub original_hash: String,
+    pub model: String,
+    pub processed_chunks: usize,
+    pub total_chunks: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AiChatChunkResponse {
+    kind: String,
+    reply: String,
+    revised_text: String,
+    citations: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiGrammarRequest {
     pub text: String,
     #[serde(default)]
@@ -287,6 +336,121 @@ impl CodexBridge {
         parsed.original_hash = hash_text(&request.selection);
         parsed.model = AI_MODEL.to_string();
         Ok(parsed)
+    }
+
+    pub fn run_chat(&self, request: &AiChatRequest) -> Result<AiChatResponse, String> {
+        let _run_guard = self
+            .run_lock
+            .lock()
+            .map_err(|_| "AI 실행 잠금에 실패했습니다.".to_string())?;
+        validate_chat_request(request)?;
+        let account = self.send_request("account/read", json!({ "refreshToken": false }))?;
+        if account.get("account").is_none_or(Value::is_null) {
+            return Err("AI 채팅을 사용하려면 먼저 ChatGPT로 로그인해주세요.".to_string());
+        }
+        std::fs::create_dir_all(&self.session_directory)
+            .map_err(|error| format!("AI 임시 작업 폴더를 만들 수 없습니다: {error}"))?;
+        let thread_result = self.send_request(
+            "thread/start",
+            json!({
+                "serviceName": "research_writer_chat",
+                "model": AI_MODEL,
+                "cwd": self.session_directory.to_string_lossy(),
+                "approvalPolicy": "never",
+                "ephemeral": true,
+                "baseInstructions": base_instructions(),
+                "developerInstructions": "Use no tools. Work only with text explicitly supplied by the client. Never read files, run commands, or access the network.",
+                "config": {
+                    "default_permissions": "research-writer-text-only",
+                    "permissions": {
+                        "research-writer-text-only": {
+                            "description": "Minimal runtime and empty workspace access for text-only writing assistance.",
+                            "filesystem": {
+                                ":minimal": "read",
+                                ":workspace_roots": { ".": "read" }
+                            },
+                            "network": { "enabled": false }
+                        }
+                    }
+                }
+            }),
+        )?;
+        let thread_id = thread_result
+            .pointer("/thread/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Codex가 대화 식별자를 반환하지 않았습니다.".to_string())?
+            .to_string();
+
+        let chunks = split_markdown_chunks(&request.target_text, 40_000);
+        let total_chunks = chunks.len();
+        let mut parsed_chunks = Vec::with_capacity(total_chunks);
+        for (index, chunk) in chunks.iter().enumerate() {
+            let marker = self.next_event_id.load(Ordering::SeqCst);
+            let turn_result = self.send_request(
+                "turn/start",
+                json!({
+                    "threadId": thread_id,
+                    "input": [{
+                        "type": "text",
+                        "text": build_chat_prompt(request, chunk, index, total_chunks)
+                    }],
+                    "effort": "high",
+                    "approvalPolicy": "never",
+                    "outputSchema": chat_output_schema()
+                }),
+            )?;
+            let turn_id = turn_result
+                .pointer("/turn/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Codex가 작업 식별자를 반환하지 않았습니다.".to_string())?
+                .to_string();
+            let output = self.wait_for_turn(marker, &thread_id, &turn_id)?;
+            parsed_chunks.push(parse_chat_output(&output, chunk)?);
+        }
+
+        let kind = if parsed_chunks.iter().any(|chunk| chunk.kind == "edit") {
+            "edit"
+        } else {
+            "answer"
+        };
+        let revised_text = if kind == "edit" {
+            parsed_chunks
+                .iter()
+                .map(|chunk| chunk.revised_text.as_str())
+                .collect::<String>()
+        } else {
+            request.target_text.clone()
+        };
+        let mut replies = Vec::new();
+        let mut citations = Vec::new();
+        let mut warnings = Vec::new();
+        for chunk in parsed_chunks {
+            if !chunk.reply.trim().is_empty() && !replies.contains(&chunk.reply) {
+                replies.push(chunk.reply);
+            }
+            extend_unique(&mut citations, chunk.citations);
+            extend_unique(&mut warnings, chunk.warnings);
+        }
+        let reply = if replies.is_empty() {
+            if kind == "edit" {
+                "요청에 맞춰 수정안을 만들었습니다.".to_string()
+            } else {
+                "원고를 검토했지만 추가로 설명할 내용이 없습니다.".to_string()
+            }
+        } else {
+            replies.join("\n\n")
+        };
+        Ok(AiChatResponse {
+            kind: kind.to_string(),
+            reply,
+            revised_text,
+            citations,
+            warnings,
+            original_hash: hash_text(&request.target_text),
+            model: AI_MODEL.to_string(),
+            processed_chunks: total_chunks,
+            total_chunks,
+        })
     }
 
     pub fn run_grammar_check(
@@ -713,10 +877,40 @@ fn codex_version(binary: &Path) -> Option<String> {
 
 fn base_instructions() -> &'static str {
     "You are a precise research-writing assistant embedded in a local Markdown editor. \
-     You edit or continue only the text supplied in the user message. Never use tools, \
+     You answer questions about or edit only the text supplied in the user message. Never use tools, \
      never inspect the filesystem, never browse, and never invent sources. Preserve the \
      author's language, Markdown structure, factual scope, and citation markers. Return \
      only the JSON object required by the output schema."
+}
+
+fn validate_chat_request(request: &AiChatRequest) -> Result<(), String> {
+    if request.prompt.trim().is_empty() {
+        return Err("AI에게 보낼 요청을 입력해주세요.".to_string());
+    }
+    if request.prompt.chars().count() > 8_000 {
+        return Err("AI 요청은 8,000자보다 짧아야 합니다.".to_string());
+    }
+    if !matches!(request.target_kind.as_str(), "selection" | "document") {
+        return Err("지원하지 않는 AI 대화 대상입니다.".to_string());
+    }
+    if request.target_text.chars().count() > 2_000_000 {
+        return Err("전체 원고가 너무 깁니다. 범위를 선택해 나누어 요청해주세요.".to_string());
+    }
+    if request.document_context.chars().count() > 60_000 {
+        return Err("선택 영역에 함께 보낼 문맥이 너무 깁니다.".to_string());
+    }
+    if request.history_summary.chars().count() > 10_000 {
+        return Err("AI 대화 요약이 너무 깁니다.".to_string());
+    }
+    if request.recent_messages.len() > 12
+        || request.recent_messages.iter().any(|message| {
+            !matches!(message.role.as_str(), "user" | "assistant")
+                || message.content.chars().count() > 6_000
+        })
+    {
+        return Err("AI 대화 문맥이 올바르지 않습니다.".to_string());
+    }
+    Ok(())
 }
 
 fn validate_ai_request(request: &AiWritingRequest) -> Result<(), String> {
@@ -804,6 +998,61 @@ fn build_prompt(request: &AiWritingRequest) -> String {
     )
 }
 
+fn build_chat_prompt(
+    request: &AiChatRequest,
+    target_chunk: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+) -> String {
+    let history = request
+        .recent_messages
+        .iter()
+        .map(|message| {
+            format!(
+                "{}: {}",
+                if message.role == "user" {
+                    "USER"
+                } else {
+                    "ASSISTANT"
+                },
+                truncate_chars(&message.content, 6_000)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let sources = request
+        .sources
+        .iter()
+        .take(15)
+        .map(|source| {
+            format!(
+                "[SOURCE {}] {}\n{}",
+                source.id,
+                source.title,
+                truncate_chars(&source.content, 4_000)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        "CONVERSATION DIGEST\n<<<\n{}\n>>>\n\nRECENT CONVERSATION\n<<<\n{history}\n>>>\n\nUSER REQUEST\n<<<\n{}\n>>>\n\nEDIT TARGET\nkind: {}\npart: {}/{}\n<<<\n{target_chunk}\n>>>\n\nNEARBY DOCUMENT CONTEXT\n<<<\n{}\n>>>\n\nSTYLE REFERENCE\n<<<\n{}\n>>>\n\nALLOWED SOURCE CARDS\n<<<\n{sources}\n>>>\n\nDecide whether the user is asking a question/analysis or requesting an edit. \
+         For a question or analysis, set kind to answer, give the answer in reply, and copy EDIT TARGET exactly into revisedText. \
+         For an edit, set kind to edit, explain the change briefly in reply, and return the complete revised Markdown for this EDIT TARGET part in revisedText. \
+         Preserve Markdown structure, YAML, URLs, code, formulas, footnotes, and citation markers unless the user explicitly asks to change them. \
+         Never add unsupported facts or citations. Use only allowed source cards and list only source IDs actually used. \
+         This is part {}/{} of one target; do not repeat or summarize text from another part.",
+        truncate_chars(&request.history_summary, 10_000),
+        truncate_chars(&request.prompt, 8_000),
+        request.target_kind,
+        chunk_index + 1,
+        total_chunks,
+        truncate_chars(&request.document_context, 40_000),
+        truncate_chars(&request.style_reference, 12_000),
+        chunk_index + 1,
+        total_chunks,
+    )
+}
+
 fn output_schema() -> Value {
     json!({
         "type": "object",
@@ -811,6 +1060,21 @@ fn output_schema() -> Value {
         "properties": {
             "replacement": { "type": "string" },
             "rationale": { "type": "string" },
+            "citations": { "type": "array", "items": { "type": "string" } },
+            "warnings": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn chat_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["kind", "reply", "revisedText", "citations", "warnings"],
+        "properties": {
+            "kind": { "type": "string", "enum": ["answer", "edit"] },
+            "reply": { "type": "string" },
+            "revisedText": { "type": "string" },
             "citations": { "type": "array", "items": { "type": "string" } },
             "warnings": { "type": "array", "items": { "type": "string" } }
         },
@@ -844,6 +1108,118 @@ fn parse_ai_output(output: &str) -> Result<AiWritingResponse, String> {
         original_hash: String::new(),
         model: String::new(),
     })
+}
+
+fn parse_chat_output(output: &str, original: &str) -> Result<AiChatChunkResponse, String> {
+    let value = parse_json_output(output)?;
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "answer" | "edit"))
+        .ok_or_else(|| "AI 채팅 응답 종류가 올바르지 않습니다.".to_string())?
+        .to_string();
+    let mut revised_text = value
+        .get("revisedText")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if kind == "answer" {
+        revised_text = original.to_string();
+    }
+    Ok(AiChatChunkResponse {
+        kind,
+        reply: value
+            .get("reply")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        revised_text,
+        citations: string_array(value.get("citations")),
+        warnings: string_array(value.get("warnings")),
+    })
+}
+
+fn parse_json_output(output: &str) -> Result<Value, String> {
+    let trimmed = output.trim();
+    let unwrapped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|value| value.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    serde_json::from_str::<Value>(unwrapped)
+        .map_err(|error| format!("AI 응답 형식이 올바르지 않습니다: {error}"))
+}
+
+fn split_markdown_chunks(value: &str, limit: usize) -> Vec<String> {
+    if value.is_empty() {
+        return vec![String::new()];
+    }
+    if value.chars().count() <= limit {
+        return vec![value.to_string()];
+    }
+
+    let mut blocks = Vec::new();
+    let mut block = String::new();
+    let mut in_fence = false;
+    let mut fence_marker = "";
+    for line in value.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            "```"
+        } else if trimmed.starts_with("~~~") {
+            "~~~"
+        } else {
+            ""
+        };
+        let heading = !in_fence && trimmed.starts_with('#') && trimmed.contains(' ');
+        if heading && !block.is_empty() {
+            blocks.push(std::mem::take(&mut block));
+        }
+        block.push_str(line);
+        if !marker.is_empty() {
+            if in_fence && marker == fence_marker {
+                in_fence = false;
+                fence_marker = "";
+            } else if !in_fence {
+                in_fence = true;
+                fence_marker = marker;
+            }
+        }
+        if !in_fence && line.trim().is_empty() {
+            blocks.push(std::mem::take(&mut block));
+        }
+    }
+    if !block.is_empty() {
+        blocks.push(block);
+    }
+
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    let mut chunk_chars = 0;
+    for block in blocks {
+        let block_chars = block.chars().count();
+        if !chunk.is_empty() && chunk_chars + block_chars > limit {
+            chunks.push(std::mem::take(&mut chunk));
+            chunk_chars = 0;
+        }
+        // A single fenced code block or uninterrupted paragraph is kept whole
+        // even when it exceeds the preferred limit so Markdown is never torn.
+        chunk.push_str(&block);
+        chunk_chars += block_chars;
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 fn string_array(value: Option<&Value>) -> Vec<String> {
@@ -939,6 +1315,54 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.replacement, "새 문장");
         assert_eq!(parsed.citations, vec!["S1"]);
+    }
+
+    #[test]
+    fn chat_prompt_carries_bounded_history_and_supports_answers() {
+        let request = AiChatRequest {
+            prompt: "이 문단의 논리적 약점을 설명해줘".to_string(),
+            target_kind: "selection".to_string(),
+            target_text: "주장과 결론".to_string(),
+            document_context: "앞 문단".to_string(),
+            history_summary: "이전에는 문체를 검토했다.".to_string(),
+            recent_messages: vec![AiChatHistoryMessage {
+                role: "user".to_string(),
+                content: "앞선 질문".to_string(),
+            }],
+            style_reference: String::new(),
+            sources: Vec::new(),
+        };
+        let prompt = build_chat_prompt(&request, &request.target_text, 0, 1);
+        let parsed = parse_chat_output(
+            r#"{"kind":"answer","reply":"근거가 빠져 있습니다.","revisedText":"바뀌면 안 됨","citations":[],"warnings":[]}"#,
+            &request.target_text,
+        )
+        .unwrap();
+
+        assert!(validate_chat_request(&request).is_ok());
+        assert!(prompt.contains("이전에는 문체를 검토했다."));
+        assert!(prompt.contains("앞선 질문"));
+        assert_eq!(parsed.kind, "answer");
+        assert_eq!(parsed.revised_text, request.target_text);
+    }
+
+    #[test]
+    fn markdown_chunking_preserves_every_byte_and_fenced_blocks() {
+        let long = "가".repeat(21_000);
+        let document = format!(
+            "# 첫 절\n\n{long}\n\n# 둘째 절\n\n```text\n{}\n```\n\n끝\n",
+            "코드".repeat(8_000)
+        );
+        let chunks = split_markdown_chunks(&document, 25_000);
+
+        assert!(chunks.len() >= 2);
+        assert_eq!(chunks.concat(), document);
+        assert!(chunks.iter().any(|chunk| chunk.contains("```text")));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.matches("```").count() % 2 == 0)
+        );
     }
 
     #[test]

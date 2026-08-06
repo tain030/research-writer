@@ -202,6 +202,30 @@
     view.focus();
   }
 
+  function replaceRanges(
+    edits: Array<{ from: number; to: number; text: string }>,
+  ): void {
+    if (!view || readOnly || edits.length === 0) return;
+    const length = view.state.doc.length;
+    const ordered = [...edits].sort((left, right) => left.from - right.from);
+    let previousTo = -1;
+    const changes = ordered.map((edit) => {
+      const from = Math.max(0, Math.min(edit.from, length));
+      const to = Math.max(from, Math.min(edit.to, length));
+      if (from < previousTo) throw new Error("겹치는 편집 범위는 적용할 수 없습니다.");
+      previousTo = to;
+      return { from, to, insert: edit.text };
+    });
+    const final = ordered[ordered.length - 1];
+    pendingInput = { kind: "other", origin: "programmatic" };
+    view.dispatch({
+      changes,
+      selection: { anchor: final.from + final.text.length },
+      scrollIntoView: true,
+    });
+    view.focus();
+  }
+
   function setSelection(from: number, to: number): void {
     if (!view) return;
     const safeFrom = Math.max(0, Math.min(from, view.state.doc.length));
@@ -261,6 +285,7 @@
       getContent: () => view?.state.doc.toString() ?? "",
       getSelection: () => selectionInfo(),
       replaceRange,
+      replaceRanges,
       insertAtCursor: (text) => {
         const selected = selectionInfo();
         replaceRange(selected.from, selected.to, text);

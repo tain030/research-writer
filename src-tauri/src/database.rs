@@ -4,7 +4,8 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -54,6 +55,73 @@ pub struct RecentDocument {
     pub opened_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConversationSummary {
+    pub id: String,
+    pub document_path: String,
+    pub title: String,
+    pub target_kind: String,
+    pub target_from: Option<usize>,
+    pub target_to: Option<usize>,
+    pub target_text: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatMessage {
+    pub id: String,
+    pub conversation_id: String,
+    pub role: String,
+    pub content: String,
+    pub response_kind: Option<String>,
+    pub metadata: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConversation {
+    #[serde(flatten)]
+    pub summary: AiConversationSummary,
+    pub messages: Vec<AiChatMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAiConversationRequest {
+    pub document_path: String,
+    pub target_kind: String,
+    pub target_from: Option<usize>,
+    pub target_to: Option<usize>,
+    #[serde(default)]
+    pub target_text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendAiChatMessageRequest {
+    pub conversation_id: String,
+    pub role: String,
+    pub content: String,
+    pub response_kind: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAiConversationTargetRequest {
+    pub conversation_id: String,
+    pub target_kind: String,
+    pub target_from: Option<usize>,
+    pub target_to: Option<usize>,
+    #[serde(default)]
+    pub target_text: String,
+}
+
 impl MetadataDb {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -92,6 +160,32 @@ impl MetadataDb {
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS ai_conversations (
+                    id TEXT PRIMARY KEY,
+                    document_path TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    target_kind TEXT NOT NULL,
+                    target_from INTEGER,
+                    target_to INTEGER,
+                    target_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ai_conversations_document_updated
+                    ON ai_conversations(document_path, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS ai_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    response_kind TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ai_messages_conversation_created
+                    ON ai_messages(conversation_id, created_at ASC);
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
                     workspace UNINDEXED,
@@ -286,6 +380,279 @@ impl MetadataDb {
             .map_err(|error| format!("최근 문서 목록을 변환할 수 없습니다: {error}"))
     }
 
+    pub fn create_ai_conversation(
+        &self,
+        request: &CreateAiConversationRequest,
+    ) -> Result<AiConversation, String> {
+        validate_ai_target(&request.target_kind, request.target_from, request.target_to)?;
+        if request.document_path.trim().is_empty() {
+            return Err("AI 대화를 연결할 원고 경로가 필요합니다.".to_string());
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let summary = AiConversationSummary {
+            id: id.clone(),
+            document_path: request.document_path.clone(),
+            title: "새 대화".to_string(),
+            target_kind: request.target_kind.clone(),
+            target_from: request.target_from,
+            target_to: request.target_to,
+            target_text: request.target_text.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        connection
+            .execute(
+                "INSERT INTO ai_conversations
+                 (id, document_path, title, target_kind, target_from, target_to, target_text, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    summary.id,
+                    summary.document_path,
+                    summary.title,
+                    summary.target_kind,
+                    summary.target_from.map(|value| value as i64),
+                    summary.target_to.map(|value| value as i64),
+                    summary.target_text,
+                    summary.created_at,
+                    summary.updated_at,
+                ],
+            )
+            .map_err(|error| format!("AI 대화를 만들 수 없습니다: {error}"))?;
+        Ok(AiConversation {
+            summary,
+            messages: Vec::new(),
+        })
+    }
+
+    pub fn list_ai_conversations(
+        &self,
+        document_path: &str,
+    ) -> Result<Vec<AiConversationSummary>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, document_path, title, target_kind, target_from, target_to,
+                        target_text, created_at, updated_at
+                 FROM ai_conversations WHERE document_path = ?1
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|error| format!("AI 대화 목록을 준비할 수 없습니다: {error}"))?;
+        let rows = statement
+            .query_map(params![document_path], ai_conversation_from_row)
+            .map_err(|error| format!("AI 대화 목록을 읽을 수 없습니다: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("AI 대화 목록을 변환할 수 없습니다: {error}"))
+    }
+
+    pub fn load_ai_conversation(&self, id: &str) -> Result<AiConversation, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        let summary = connection
+            .query_row(
+                "SELECT id, document_path, title, target_kind, target_from, target_to,
+                        target_text, created_at, updated_at
+                 FROM ai_conversations WHERE id = ?1",
+                params![id],
+                ai_conversation_from_row,
+            )
+            .optional()
+            .map_err(|error| format!("AI 대화를 읽을 수 없습니다: {error}"))?
+            .ok_or_else(|| "요청한 AI 대화를 찾을 수 없습니다.".to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, conversation_id, role, content, response_kind, metadata_json, created_at
+                 FROM ai_messages WHERE conversation_id = ?1 ORDER BY created_at ASC, rowid ASC",
+            )
+            .map_err(|error| format!("AI 메시지 목록을 준비할 수 없습니다: {error}"))?;
+        let rows = statement
+            .query_map(params![id], ai_message_from_row)
+            .map_err(|error| format!("AI 메시지를 읽을 수 없습니다: {error}"))?;
+        let messages = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("AI 메시지를 변환할 수 없습니다: {error}"))?;
+        Ok(AiConversation { summary, messages })
+    }
+
+    pub fn append_ai_message(
+        &self,
+        request: &AppendAiChatMessageRequest,
+    ) -> Result<AiChatMessage, String> {
+        if !matches!(request.role.as_str(), "user" | "assistant") {
+            return Err("AI 메시지 역할이 올바르지 않습니다.".to_string());
+        }
+        if request.content.trim().is_empty() {
+            return Err("빈 AI 메시지는 저장할 수 없습니다.".to_string());
+        }
+        if request.content.chars().count() > 250_000 {
+            return Err("AI 메시지가 너무 깁니다.".to_string());
+        }
+        if request
+            .response_kind
+            .as_deref()
+            .is_some_and(|kind| !matches!(kind, "answer" | "edit"))
+        {
+            return Err("AI 응답 종류가 올바르지 않습니다.".to_string());
+        }
+        if !request.metadata.is_object() {
+            return Err("AI 메시지 메타데이터가 올바르지 않습니다.".to_string());
+        }
+        let metadata_json = serde_json::to_string(&request.metadata)
+            .map_err(|error| format!("AI 메시지 메타데이터를 만들 수 없습니다: {error}"))?;
+        if metadata_json.len() > 8 * 1024 * 1024 {
+            return Err("AI 수정 제안이 너무 큽니다.".to_string());
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("AI 메시지 저장을 시작할 수 없습니다: {error}"))?;
+        let exists = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ai_conversations WHERE id = ?1)",
+                params![request.conversation_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("AI 대화를 확인할 수 없습니다: {error}"))?;
+        if !exists {
+            return Err("AI 메시지를 저장할 대화를 찾을 수 없습니다.".to_string());
+        }
+        transaction
+            .execute(
+                "INSERT INTO ai_messages
+                 (id, conversation_id, role, content, response_kind, metadata_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    id,
+                    request.conversation_id,
+                    request.role,
+                    request.content,
+                    request.response_kind,
+                    metadata_json,
+                    now,
+                ],
+            )
+            .map_err(|error| format!("AI 메시지를 저장할 수 없습니다: {error}"))?;
+        let title = conversation_title(&request.content);
+        transaction
+            .execute(
+                "UPDATE ai_conversations
+                 SET updated_at = ?1,
+                     title = CASE WHEN title = '새 대화' AND ?2 = 'user' THEN ?3 ELSE title END
+                 WHERE id = ?4",
+                params![now, request.role, title, request.conversation_id],
+            )
+            .map_err(|error| format!("AI 대화 시간을 갱신할 수 없습니다: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("AI 메시지 저장을 확정할 수 없습니다: {error}"))?;
+        Ok(AiChatMessage {
+            id,
+            conversation_id: request.conversation_id.clone(),
+            role: request.role.clone(),
+            content: request.content.clone(),
+            response_kind: request.response_kind.clone(),
+            metadata: request.metadata.clone(),
+            created_at: now,
+        })
+    }
+
+    pub fn update_ai_message_metadata(
+        &self,
+        id: &str,
+        metadata: &Value,
+    ) -> Result<AiChatMessage, String> {
+        if !metadata.is_object() {
+            return Err("AI 메시지 메타데이터가 올바르지 않습니다.".to_string());
+        }
+        let metadata_json = serde_json::to_string(metadata)
+            .map_err(|error| format!("AI 메시지 메타데이터를 만들 수 없습니다: {error}"))?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        let changed = connection
+            .execute(
+                "UPDATE ai_messages SET metadata_json = ?1 WHERE id = ?2",
+                params![metadata_json, id],
+            )
+            .map_err(|error| format!("AI 수정 상태를 저장할 수 없습니다: {error}"))?;
+        if changed == 0 {
+            return Err("수정할 AI 메시지를 찾을 수 없습니다.".to_string());
+        }
+        connection
+            .query_row(
+                "SELECT id, conversation_id, role, content, response_kind, metadata_json, created_at
+                 FROM ai_messages WHERE id = ?1",
+                params![id],
+                ai_message_from_row,
+            )
+            .map_err(|error| format!("갱신한 AI 메시지를 읽을 수 없습니다: {error}"))
+    }
+
+    pub fn update_ai_conversation_target(
+        &self,
+        request: &UpdateAiConversationTargetRequest,
+    ) -> Result<AiConversationSummary, String> {
+        validate_ai_target(&request.target_kind, request.target_from, request.target_to)?;
+        let now = Utc::now().to_rfc3339();
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        let changed = connection
+            .execute(
+                "UPDATE ai_conversations
+                 SET target_kind = ?1, target_from = ?2, target_to = ?3,
+                     target_text = ?4, updated_at = ?5 WHERE id = ?6",
+                params![
+                    request.target_kind,
+                    request.target_from.map(|value| value as i64),
+                    request.target_to.map(|value| value as i64),
+                    request.target_text,
+                    now,
+                    request.conversation_id,
+                ],
+            )
+            .map_err(|error| format!("AI 대화 대상을 갱신할 수 없습니다: {error}"))?;
+        if changed == 0 {
+            return Err("대상을 바꿀 AI 대화를 찾을 수 없습니다.".to_string());
+        }
+        connection
+            .query_row(
+                "SELECT id, document_path, title, target_kind, target_from, target_to,
+                        target_text, created_at, updated_at
+                 FROM ai_conversations WHERE id = ?1",
+                params![request.conversation_id],
+                ai_conversation_from_row,
+            )
+            .map_err(|error| format!("갱신한 AI 대화를 읽을 수 없습니다: {error}"))
+    }
+
+    pub fn delete_ai_conversation(&self, id: &str) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "메타데이터 DB 잠금에 실패했습니다.")?;
+        connection
+            .execute("DELETE FROM ai_conversations WHERE id = ?1", params![id])
+            .map_err(|error| format!("AI 대화를 삭제할 수 없습니다: {error}"))?;
+        Ok(())
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
         let connection = self
             .connection
@@ -384,6 +751,12 @@ impl MetadataDb {
             .map_err(|error| format!("버전 기록 경로를 바꿀 수 없습니다: {error}"))?;
         transaction
             .execute(
+                "UPDATE ai_conversations SET document_path = ?1 WHERE document_path = ?2",
+                params![to, from],
+            )
+            .map_err(|error| format!("AI 대화 원고 경로를 바꿀 수 없습니다: {error}"))?;
+        transaction
+            .execute(
                 "UPDATE documents_fts SET path = ?1 WHERE path = ?2",
                 params![to, from],
             )
@@ -413,6 +786,12 @@ impl MetadataDb {
                 params![path],
             )
             .map_err(|error| format!("원고 버전 기록을 지울 수 없습니다: {error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM ai_conversations WHERE document_path = ?1",
+                params![path],
+            )
+            .map_err(|error| format!("원고의 AI 대화를 지울 수 없습니다: {error}"))?;
         transaction
             .execute("DELETE FROM documents_fts WHERE path = ?1", params![path])
             .map_err(|error| format!("원고 검색 색인을 지울 수 없습니다: {error}"))?;
@@ -548,6 +927,59 @@ fn version_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VersionSummary>
     })
 }
 
+fn ai_conversation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiConversationSummary> {
+    Ok(AiConversationSummary {
+        id: row.get(0)?,
+        document_path: row.get(1)?,
+        title: row.get(2)?,
+        target_kind: row.get(3)?,
+        target_from: row.get::<_, Option<i64>>(4)?.map(|value| value as usize),
+        target_to: row.get::<_, Option<i64>>(5)?.map(|value| value as usize),
+        target_text: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn ai_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiChatMessage> {
+    let metadata_json: String = row.get(5)?;
+    let metadata = serde_json::from_str(&metadata_json)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    Ok(AiChatMessage {
+        id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        response_kind: row.get(4)?,
+        metadata,
+        created_at: row.get(6)?,
+    })
+}
+
+fn validate_ai_target(kind: &str, from: Option<usize>, to: Option<usize>) -> Result<(), String> {
+    match kind {
+        "document" if from.is_none() && to.is_none() => Ok(()),
+        "selection" if from.is_some() && to.is_some() && from <= to => Ok(()),
+        "document" => Err("전체 원고 대화에는 선택 범위를 지정할 수 없습니다.".to_string()),
+        "selection" => Err("선택 대화에는 올바른 시작과 끝 범위가 필요합니다.".to_string()),
+        _ => Err("지원하지 않는 AI 대화 대상입니다.".to_string()),
+    }
+}
+
+fn conversation_title(content: &str) -> String {
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = compact.chars().take(44).collect::<String>();
+    if compact.chars().count() > 44 {
+        format!("{title}…")
+    } else if title.is_empty() {
+        "새 대화".to_string()
+    } else {
+        title
+    }
+}
+
 fn cleanup_versions(connection: &Connection, document_path: &str) -> Result<(), String> {
     let cutoff = (Utc::now() - Duration::days(90)).to_rfc3339();
     connection
@@ -674,5 +1106,64 @@ mod tests {
         let results = database.search(&workspace, "자동 저장").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "동기화 연구");
+    }
+
+    #[test]
+    fn ai_conversations_round_trip_and_follow_document_metadata() {
+        let directory = tempdir().unwrap();
+        let database = MetadataDb::open(&directory.path().join("meta.sqlite3")).unwrap();
+        let conversation = database
+            .create_ai_conversation(&CreateAiConversationRequest {
+                document_path: "/tmp/draft.md".to_string(),
+                target_kind: "selection".to_string(),
+                target_from: Some(2),
+                target_to: Some(5),
+                target_text: "원문".to_string(),
+            })
+            .unwrap();
+        database
+            .append_ai_message(&AppendAiChatMessageRequest {
+                conversation_id: conversation.summary.id.clone(),
+                role: "user".to_string(),
+                content: "더 명확하게 고쳐줘".to_string(),
+                response_kind: None,
+                metadata: json!({}),
+            })
+            .unwrap();
+        database
+            .append_ai_message(&AppendAiChatMessageRequest {
+                conversation_id: conversation.summary.id.clone(),
+                role: "assistant".to_string(),
+                content: "수정안을 만들었습니다.".to_string(),
+                response_kind: Some("edit".to_string()),
+                metadata: json!({"proposal": {"baseHash": "hash"}}),
+            })
+            .unwrap();
+
+        let loaded = database
+            .load_ai_conversation(&conversation.summary.id)
+            .unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.summary.title, "더 명확하게 고쳐줘");
+
+        database
+            .rename_document_metadata("/tmp/draft.md", "/tmp/renamed.md")
+            .unwrap();
+        assert_eq!(
+            database
+                .list_ai_conversations("/tmp/renamed.md")
+                .unwrap()
+                .len(),
+            1
+        );
+        database
+            .delete_document_metadata("/tmp/renamed.md")
+            .unwrap();
+        assert!(
+            database
+                .list_ai_conversations("/tmp/renamed.md")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

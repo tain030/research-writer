@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type { Editor as TiptapEditor } from "@tiptap/core";
+import { TextSelection } from "@tiptap/pm/state";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PaginatedEditor from "./PaginatedEditor.svelte";
@@ -127,6 +128,34 @@ function typeCharacters(editable: HTMLElement, text: string): void {
 }
 
 describe("paginated editorial editor", () => {
+  it("applies multiple canonical edits as one undoable transaction", async () => {
+    let api: EditorApi | null = null;
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "가나다",
+        onready: (value) => (api = value),
+      },
+    });
+    await tick();
+    const editable = target.querySelector<HTMLElement>(".ProseMirror")! as
+      HTMLElement & { editor: TiptapEditor };
+
+    api!.replaceRanges([
+      { from: 0, to: 1, text: "A" },
+      { from: 2, to: 3, text: "C" },
+    ]);
+    await tick();
+    expect(api!.getContent().trim()).toBe("A나C");
+
+    editable.editor.commands.undo();
+    await tick();
+    expect(api!.getContent().trim()).toBe("가나다");
+    unmount(component);
+  });
+
   it("removes stale page gaps when visual-line measurement fails", async () => {
     let api: EditorApi | null = null;
     const target = document.createElement("div");
@@ -434,7 +463,7 @@ describe("paginated editorial editor", () => {
     const shell = target.querySelector<HTMLElement>(".paper-editor-shell")!;
     const editable = target.querySelector<HTMLElement>(".ProseMirror")!;
     expect(shell.style.getPropertyValue("--paper-font")).toContain(
-      '"Goorm Sans Code"',
+      '"Pretendard"',
     );
     expect(shell.style.getPropertyValue("--typewriter-strike-y")).toBe(
       "calc(100% - var(--typewriter-strike-bottom))",
@@ -726,6 +755,184 @@ describe("paginated editorial editor", () => {
     unmount(component);
   });
 
+  it("holds the paper still while dragging a selection and aligns a click only after release", async () => {
+    let api: EditorApi | null = null;
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "첫 문장을 고르고 다음 문장까지 드래그합니다.",
+        experience: "typewriter",
+        onready: (value) => (api = value),
+      },
+    });
+    await tick();
+
+    const shell = target.querySelector<HTMLElement>(".paper-editor-shell")!;
+    const machine = target.querySelector<HTMLElement>(".typewriter-machine")!;
+    const editable = target.querySelector<HTMLElement>(".ProseMirror")! as
+      HTMLElement & { editor: TiptapEditor };
+    const scroller = target.querySelector<HTMLElement>(".paper-scroller")!;
+    const paperWindow = target.querySelector<HTMLElement>(".paper-window")!;
+    const stack = target.querySelector<HTMLElement>(".paper-stack")!;
+    let clickedDocumentCenter = 640;
+    vi.spyOn(editable.editor.view, "coordsAtPos").mockImplementation(() => {
+      const nearStart = editable.editor.state.selection.head <= 3;
+      const center = nearStart ? clickedDocumentCenter : 560;
+      const left = nearStart ? 520 : 280;
+      return {
+        left,
+        right: left,
+        top: center - scroller.scrollTop - 12,
+        bottom: center - scroller.scrollTop + 12,
+      };
+    });
+    scroller.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    machine.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    paperWindow.getBoundingClientRect = () =>
+      new DOMRect(100, 80 - scroller.scrollTop, 794, 1123);
+    stack.getBoundingClientRect = () =>
+      new DOMRect(100, 80 - scroller.scrollTop, 794, 1123);
+    paperWindow.style.transform = "matrix(1, 0, 0, 1, 0, 0)";
+
+    api!.focus();
+    api!.setSelection(api!.getContent().length, api!.getContent().length);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await tick();
+
+    scroller.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: 82, bubbles: true }),
+    );
+    scroller.scrollTop += 82;
+    scroller.dispatchEvent(new Event("scroll"));
+    await tick();
+    const frozenScrollTop = scroller.scrollTop;
+    expect(shell.style.getPropertyValue("--carriage-shift")).toBe("0px");
+
+    editable.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, bubbles: true }),
+    );
+    const reverseAnchor = 9;
+    const reverseHead = 2;
+    editable.editor.view.dispatch(
+      editable.editor.state.tr.setSelection(
+        TextSelection.create(
+          editable.editor.state.doc,
+          reverseAnchor,
+          reverseHead,
+        ),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+
+    expect(shell.classList.contains("pointer-selecting")).toBe(true);
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(
+      false,
+    );
+    expect(scroller.scrollTop).toBe(frozenScrollTop);
+    expect(shell.style.getPropertyValue("--carriage-shift")).toBe("0px");
+    expect(editable.editor.state.selection.anchor).toBe(reverseAnchor);
+    expect(editable.editor.state.selection.head).toBe(reverseHead);
+
+    window.dispatchEvent(new MouseEvent("pointerup", { button: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await tick();
+
+    expect(shell.classList.contains("pointer-selecting")).toBe(false);
+    expect(scroller.scrollTop).toBe(frozenScrollTop);
+    expect(shell.style.getPropertyValue("--carriage-shift")).toBe("0px");
+    expect(editable.editor.state.selection.anchor).toBe(reverseAnchor);
+    expect(editable.editor.state.selection.head).toBe(reverseHead);
+
+    const strikeBottom = Number.parseFloat(
+      shell.style.getPropertyValue("--typewriter-strike-bottom"),
+    );
+    clickedDocumentCenter =
+      scroller.getBoundingClientRect().bottom -
+      strikeBottom +
+      frozenScrollTop +
+      48;
+    editable.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, bubbles: true }),
+    );
+    editable.editor.view.dispatch(
+      editable.editor.state.tr.setSelection(
+        TextSelection.create(editable.editor.state.doc, reverseHead),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await tick();
+
+    expect(shell.classList.contains("pointer-selecting")).toBe(true);
+    expect(scroller.scrollTop).toBe(frozenScrollTop);
+    expect(shell.style.getPropertyValue("--carriage-shift")).toBe("0px");
+
+    window.dispatchEvent(new MouseEvent("pointerup", { button: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await tick();
+
+    expect(shell.classList.contains("pointer-selecting")).toBe(false);
+    expect(scroller.scrollTop).toBeGreaterThan(frozenScrollTop + 40);
+    expect(scroller.scrollTop).toBeLessThanOrEqual(frozenScrollTop + 50);
+    expect(shell.style.getPropertyValue("--carriage-shift")).toBe("-120px");
+    expect(shell.classList.contains("typewriter-strike-point-visible")).toBe(
+      true,
+    );
+    unmount(component);
+  });
+
+  it("ignores non-selection pointers and clears a cancelled mouse selection", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const component = mount(PaginatedEditor, {
+      target,
+      props: {
+        value: "포인터 취소 뒤에도 선택할 수 있습니다.",
+        experience: "typewriter",
+      },
+    });
+    await tick();
+
+    const shell = target.querySelector<HTMLElement>(".paper-editor-shell")!;
+    const editable = target.querySelector<HTMLElement>(".ProseMirror")!;
+    const touch = new MouseEvent("pointerdown", {
+      button: 0,
+      bubbles: true,
+    });
+    Object.defineProperty(touch, "pointerType", { value: "touch" });
+    editable.dispatchEvent(touch);
+    expect(shell.classList.contains("pointer-selecting")).toBe(false);
+
+    editable.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 2, bubbles: true }),
+    );
+    expect(shell.classList.contains("pointer-selecting")).toBe(false);
+
+    editable.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, bubbles: true }),
+    );
+    await tick();
+    expect(shell.classList.contains("pointer-selecting")).toBe(true);
+
+    window.dispatchEvent(new Event("pointercancel"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await tick();
+    expect(shell.classList.contains("pointer-selecting")).toBe(false);
+
+    editable.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, bubbles: true }),
+    );
+    await tick();
+    expect(shell.classList.contains("pointer-selecting")).toBe(true);
+    window.dispatchEvent(new MouseEvent("pointerup", { button: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await tick();
+    expect(shell.classList.contains("pointer-selecting")).toBe(false);
+    unmount(component);
+  });
+
   it("restarts one Olympia typebar for every rapid physical or IME character", async () => {
     let api: EditorApi | null = null;
     const target = document.createElement("div");
@@ -828,6 +1035,7 @@ describe("paginated editorial editor", () => {
 
     editable.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     api!.setSelection(2, 2);
+    window.dispatchEvent(new Event("pointerup"));
     await new Promise((resolve) => setTimeout(resolve, 20));
     editable.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -900,6 +1108,7 @@ describe("paginated editorial editor", () => {
 
     editable.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     api!.setSelection(6, 6);
+    window.dispatchEvent(new Event("pointerup"));
     await new Promise((resolve) => setTimeout(resolve, 20));
     await tick();
     expect(shell.classList.contains("typewriter-revision")).toBe(false);
@@ -1225,6 +1434,7 @@ describe("paginated editorial editor", () => {
     api!.focus();
     editable.dispatchEvent(new Event("pointerdown", { bubbles: true }));
     api!.setSelection(2, 2);
+    window.dispatchEvent(new Event("pointerup"));
     await new Promise((resolve) => setTimeout(resolve, 20));
     await tick();
     expect(shell.classList.contains("typewriter-revision")).toBe(false);
