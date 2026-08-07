@@ -20,6 +20,7 @@ export interface CaretLineGeometry {
   pageIndex: number;
   top: number;
   height: number;
+  fontSize: number;
   caretLeft: number;
   lineLeft: number;
   lineWidth: number;
@@ -39,6 +40,7 @@ interface ResolveCaretLineGeometryOptions {
   pageTopInset: number;
   pageBottomInset: number;
   pageHorizontalInset: number;
+  fontSize: number;
   blockKind: WritingBlockKind;
 }
 
@@ -91,6 +93,7 @@ export function resolveCaretLineGeometry(
     pageTopInset,
     pageBottomInset,
     pageHorizontalInset,
+    fontSize,
     blockKind,
   } = options;
   const scale = options.scale;
@@ -129,6 +132,7 @@ export function resolveCaretLineGeometry(
     pageIndex,
     top,
     height: bottom - top,
+    fontSize: Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 14,
     caretLeft: (caret.left - stack.left) / scale,
     lineLeft,
     lineWidth: Math.max(1, lineRight - lineLeft),

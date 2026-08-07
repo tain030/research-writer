@@ -203,11 +203,96 @@ describe("editorial theme accessibility", () => {
       ),
       (match) => match[1],
     );
-    expect(wraps).toHaveLength(3);
+    expect(wraps).toHaveLength(1);
     for (const wrap of wraps) {
       expect(wrap).toContain("var(--typewriter-sheet)");
       expect(wrap).not.toContain("var(--sheet)");
     }
+  });
+
+  it("uses a low horizontal strike face and recessed theme graphite element as the typewriter caret", () => {
+    const yoke = editorCssBlock(".typewriter-element-yoke {");
+    expect(yoke).toContain("var(--type-strike-top-offset)");
+    expect(yoke).toContain("var(--type-strike-height)");
+
+    const strikeFace = editorCssBlock(".typewriter-strike-face {");
+    expect(strikeFace).toContain(
+      "top: calc((var(--type-strike-height) + 0.5px) * -1)",
+    );
+    expect(strikeFace).toContain("left: 50%");
+    expect(strikeFace).toContain("width: var(--type-strike-width)");
+    expect(strikeFace).toContain("height: var(--type-strike-height)");
+    expect(strikeFace).toContain("transform: translateX(-50%)");
+    expect(strikeFace).toContain("border-radius: 999px");
+
+    const inkLayer = editorCssBlock(
+      ".writing-typewriter .paper-stack > .paper-editor-mount {",
+    );
+    expect(inkLayer).toContain("z-index: 7");
+
+    const shell = editorCssBlock(".typewriter-element-shell {");
+    expect(shell).toContain("var(--printing-element-rotate)");
+    expect(shell).toContain("var(--printing-element-tilt)");
+    expect(shell).toContain("var(--typewriter-element-top)");
+    expect(shell).toContain("var(--typewriter-element-mid)");
+    expect(shell).toContain("var(--typewriter-element-deep)");
+    expect(shell).toContain("var(--typewriter-element-highlight)");
+    expect(shell).toContain("ellipse at 50% 20%");
+    expect(shell).toContain("linear-gradient(\n        180deg");
+    expect(shell).toContain(
+      "transform var(--print-carrier-step-duration) cubic-bezier(0.18, 0.78, 0.24, 1)",
+    );
+    expect(shell).not.toContain("steps(2, end)");
+    expect(shell).not.toContain("ellipse at 35% 20%");
+    expect(shell).not.toContain("repeating-linear-gradient");
+
+    const ribbonGate = editorCssBlock(".typewriter-ribbon-gate {");
+    expect(ribbonGate).toContain(
+      "var(--type-strike-top-offset) + var(--type-strike-height) + 3.5px",
+    );
+    expect(ribbonGate).toContain("width: calc(var(--type-strike-width) + 8px)");
+    expect(ribbonGate).not.toContain("border-top");
+    expect(ribbonGate).not.toContain("background:");
+    const ribbonSides = editorCssBlock(
+      ".typewriter-ribbon-gate::before,",
+    );
+    expect(ribbonSides).toContain("width: 1px");
+    expect(ribbonSides).toContain("height: 6px");
+
+    const recessedCradle = editorCssBlock(
+      ".typewriter-print-element::after {",
+    );
+    expect(recessedCradle).toContain("height: 46%");
+    expect(recessedCradle).toContain("z-index: 3");
+
+    const strikeMotion = editorCssBlock(
+      "@keyframes selectric-element-strike {",
+    );
+    const ribbonMotion = editorCssBlock(
+      "@keyframes selectric-ribbon-lift {",
+    );
+    const contactMotion = editorCssBlock(
+      "@keyframes typewriter-strike-face-press {",
+    );
+    expect(strikeMotion).toContain("translateY(1.5px)");
+    expect(strikeMotion).toContain("translateY(-6px)");
+    expect(ribbonMotion).toContain("translateY(-4px)");
+    expect(contactMotion).toContain("scaleX(1.08) scaleY(0.72)");
+    expect(paginatedEditor).toContain("const TYPEBAR_STRIKE_MS = 210");
+
+    const typewriterCaret = editorCssBlock(
+      ".writing-typewriter .paper-editor-mount :global(.ProseMirror) {",
+    );
+    expect(typewriterCaret).toContain("caret-color: transparent");
+    expect(paginatedEditor).not.toContain("mechanical-caret-active");
+    const forcedColors = editorCssBlock("@media (forced-colors: active) {");
+    expect(forcedColors).toContain("caret-color: CanvasText !important");
+    expect(forcedColors).toContain(
+      ".typewriter-print-carrier { display: none; }",
+    );
+    expect(paginatedEditor).not.toContain("typewriter-active-slug");
+    expect(paginatedEditor).not.toContain("typewriter-element-glyph-belt");
+    expect(paginatedEditor).not.toContain("typewriter-triangle-index");
   });
 
   it("balances blockquote rails around their first and last content", () => {
@@ -315,6 +400,10 @@ describe("editorial theme accessibility", () => {
     expect(customProperty(dark, "typewriter-body-cast-shadow")).toBe(
       "rgba(3, 6, 8, 0.58)",
     );
+    expect(customProperty(light, "typewriter-element-top")).toBe("#45433d");
+    expect(customProperty(light, "typewriter-element-deep")).toBe("#111412");
+    expect(customProperty(dark, "typewriter-element-top")).toBe("#3a3b37");
+    expect(customProperty(dark, "typewriter-element-deep")).toBe("#0b0e0d");
     expect(desk).not.toBe(customProperty(light, "typewriter-desk-surface"));
   });
 
@@ -385,6 +474,11 @@ describe("editorial theme accessibility", () => {
       "typewriter-body-inset-highlight",
       "typewriter-body-inset-shadow",
       "typewriter-body-cast-shadow",
+      "typewriter-element-top",
+      "typewriter-element-mid",
+      "typewriter-element-deep",
+      "typewriter-element-border",
+      "typewriter-element-highlight",
       "typewriter-endcap-inset-highlight",
       "typewriter-endcap-inset-shadow",
       "typewriter-endcap-cast-shadow",
@@ -414,6 +508,11 @@ describe("editorial theme accessibility", () => {
       "typewriter-body-inset-highlight",
       "typewriter-body-inset-shadow",
       "typewriter-body-cast-shadow",
+      "typewriter-element-top",
+      "typewriter-element-mid",
+      "typewriter-element-deep",
+      "typewriter-element-border",
+      "typewriter-element-highlight",
       "typewriter-endcap-inset-highlight",
       "typewriter-endcap-inset-shadow",
       "typewriter-endcap-cast-shadow",

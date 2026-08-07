@@ -10,6 +10,7 @@ const page = {
   pageTopInset: 84,
   pageBottomInset: 68,
   pageHorizontalInset: 76,
+  fontSize: 14.33,
 } as const;
 
 describe("caret line geometry", () => {
@@ -28,6 +29,7 @@ describe("caret line geometry", () => {
       pageIndex: 0,
       top: 210,
       height: 28,
+      fontSize: 14.33,
       lineLeft: 80,
       lineWidth: 400,
       blockKind: "heading",

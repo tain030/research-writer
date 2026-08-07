@@ -186,6 +186,11 @@
   --typewriter-body-inset-highlight: rgba(255, 236, 212, 0.22);
   --typewriter-body-inset-shadow: rgba(36, 19, 13, 0.58);
   --typewriter-body-cast-shadow: rgba(23, 12, 8, 0.24);
+  --typewriter-element-top: #45433d;
+  --typewriter-element-mid: #2c2d2a;
+  --typewriter-element-deep: #111412;
+  --typewriter-element-border: #090b0a;
+  --typewriter-element-highlight: rgba(241, 234, 220, 0.16);
   --typewriter-endcap-inset-highlight: rgba(255, 236, 212, 0.24);
   --typewriter-endcap-inset-shadow: rgba(34, 18, 12, 0.65);
   --typewriter-endcap-cast-shadow: rgba(24, 12, 8, 0.36);
@@ -296,6 +301,11 @@
     --typewriter-body-inset-highlight: rgba(244, 234, 219, 0.14);
     --typewriter-body-inset-shadow: rgba(0, 0, 0, 0.78);
     --typewriter-body-cast-shadow: rgba(3, 6, 8, 0.58);
+    --typewriter-element-top: #3a3b37;
+    --typewriter-element-mid: #222521;
+    --typewriter-element-deep: #0b0e0d;
+    --typewriter-element-border: #050706;
+    --typewriter-element-highlight: rgba(244, 238, 226, 0.14);
     --typewriter-endcap-inset-highlight: rgba(244, 234, 219, 0.15);
     --typewriter-endcap-inset-shadow: rgba(0, 0, 0, 0.82);
     --typewriter-endcap-cast-shadow: rgba(3, 6, 8, 0.55);
@@ -406,6 +416,11 @@
   --typewriter-body-inset-highlight: rgba(244, 234, 219, 0.14);
   --typewriter-body-inset-shadow: rgba(0, 0, 0, 0.78);
   --typewriter-body-cast-shadow: rgba(3, 6, 8, 0.58);
+  --typewriter-element-top: #3a3b37;
+  --typewriter-element-mid: #222521;
+  --typewriter-element-deep: #0b0e0d;
+  --typewriter-element-border: #050706;
+  --typewriter-element-highlight: rgba(244, 238, 226, 0.14);
   --typewriter-endcap-inset-highlight: rgba(244, 234, 219, 0.15);
   --typewriter-endcap-inset-shadow: rgba(0, 0, 0, 0.82);
   --typewriter-endcap-cast-shadow: rgba(3, 6, 8, 0.55);

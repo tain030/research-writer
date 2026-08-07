@@ -57,11 +57,15 @@
     type PendingWritingInput,
   } from "./writing-activity";
   import {
-    carriageReturnDuration as resolveCarriageReturnDuration,
-    isTypebarKey,
-    renderedTranslateX,
-    resolveCarriageOrigin,
-    resolveCarriageTarget,
+    approximatePrintingGraphemeAdvance,
+    isPrintingKey,
+    printCarrierReturnDuration,
+    printingCursorMetrics,
+    printingElementPoseForCode,
+    representativePrintingGrapheme,
+    resolvePaperMachineOrigin,
+    resolvePrintCarrierOffset,
+    resolvePrintingCellCenter,
     resolveScrollbarGutter,
     typewriterStrikeBottomClearance,
   } from "./typewriter-carriage";
@@ -135,7 +139,16 @@
   const PAGE_BODY = (297 - 22 - 18) * MM_TO_PX;
   const PAGE_GAP = 28;
   const PAGE_EPSILON = 0.75;
-  const TYPEBAR_STRIKE_MS = 140;
+  const TYPEBAR_STRIKE_MS = 210;
+  const TYPEWRITER_IMPACT_RELEASE_MS = 115;
+  const TYPEWRITER_CARRIER_STEP_MS = 35;
+  const TYPEWRITER_BODY_FONT_SIZE = 10.75 * 96 / 72;
+  const PRINTING_CONTEXT_LOOKBACK = 128;
+  const graphemeSegmenter =
+    typeof Intl.Segmenter === "function"
+      ? new Intl.Segmenter("ko", { granularity: "grapheme" })
+      : null;
+  const printingAdvanceCache = new Map<string, number>();
   let scroller: HTMLDivElement;
   let viewport: HTMLDivElement;
   let paperWindow: HTMLDivElement;
@@ -158,7 +171,7 @@
   let platenIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let platenDetentTimer: ReturnType<typeof setTimeout> | null = null;
   let activeLineFrame: number | null = null;
-  let carriageFrame: number | null = null;
+  let printCarrierFrame: number | null = null;
   let pointerSelectionReleaseFrame: number | null = null;
   let workspaceFrame: number | null = null;
   let pageCount = $state(1);
@@ -169,17 +182,21 @@
   let layoutBusy = $state(false);
   let activeFormatLabel = $state("");
   let caretLine = $state<CaretLineGeometry | null>(null);
-  let caretAlignedToStrike = $state(false);
-  let carriageShift = $state(0);
-  let carriageOrigin = $state(0);
+  let caretAlignedToPrintingLine = $state(false);
+  let printCarrierVisible = $state(false);
+  let printCarrierOffset = $state(0);
+  let paperMachineOrigin = $state(0);
   let typewriterScrollbarGutter = $state(0);
-  let carriageReturning = $state(false);
-  let carriageStepping = $state(false);
+  let printCarrierReturning = $state(false);
+  let printCarrierStepping = $state(false);
+  let impactPrintPointLeft = $state<number | null>(null);
   let pointerSelectionActive = $state(false);
   let pointerSelectionPointerId: number | null = null;
-  let carriageAdvancePending = false;
-  let typebarStriking = $state(false);
-  let typebarStrikeId = $state(0);
+  let printAdvancePending = false;
+  let printingElementStriking = $state(false);
+  let printingElementStrikeId = $state(0);
+  let printingElementRotate = $state(0);
+  let printingElementTilt = $state(0);
   let lineFeeding = $state(false);
   let platenRolling = $state(false);
   let platenDetenting = $state(false);
@@ -188,13 +205,14 @@
   let platenDirection = $state<PlatenDirection>(0);
   let platenIntensity = $state(0);
   let platenDetentSequence = $state(0);
-  let carriageReturnMs = $state(180);
+  let printCarrierReturnMs = $state(180);
   let marginWarning = $state(false);
   let literaryCompletion = $state<"sentence" | "paragraph" | null>(null);
-  let nextTypebarStrikeId = 0;
-  let lastPhysicalTypebarAt = Number.NEGATIVE_INFINITY;
-  let typebarStrikeTimer: ReturnType<typeof setTimeout> | null = null;
-  let carriageStepTimer: ReturnType<typeof setTimeout> | null = null;
+  let nextPrintingElementStrikeId = 0;
+  let lastPhysicalPrintingKeyAt = Number.NEGATIVE_INFINITY;
+  let printingElementStrikeTimer: ReturnType<typeof setTimeout> | null = null;
+  let printingElementImpactTimer: ReturnType<typeof setTimeout> | null = null;
+  let printCarrierStepTimer: ReturnType<typeof setTimeout> | null = null;
   let returnTimer: ReturnType<typeof setTimeout> | null = null;
   let lineFeedFrame: number | null = null;
   let lineFeedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -203,7 +221,7 @@
   let programmaticScrollGuard = false;
   let programmaticScrollTarget: number | null = null;
   let literaryTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastCarriageLineTop: number | null = null;
+  let lastPrintCarrierLineTop: number | null = null;
   let lastPlatenScrollTop = 0;
   let lastPlatenScrollAt = 0;
   let lastFlowBlock: HTMLElement | null = null;
@@ -239,6 +257,12 @@
     Math.max(
       22,
       Math.min(58, (caretLine?.height ?? 22) * pageScale + 8),
+    ),
+  );
+  let typewriterCursorMetrics = $derived(
+    printingCursorMetrics(
+      caretLine?.fontSize ?? TYPEWRITER_BODY_FONT_SIZE,
+      pageScale,
     ),
   );
   let typewriterStrikeBottom = $derived(
@@ -423,6 +447,246 @@
     return "other";
   }
 
+  function caretStyleElement(
+    position: number,
+    fallbackBlock: HTMLElement | null,
+  ): HTMLElement | null {
+    if (!editor) return fallbackBlock;
+    let inlineElement: HTMLElement | null = null;
+    try {
+      const domPosition = editor.view.domAtPos(position);
+      if (domPosition.node instanceof Text) {
+        inlineElement = domPosition.node.parentElement;
+      } else if (domPosition.node instanceof HTMLElement) {
+        const adjacent =
+          domPosition.node.childNodes[domPosition.offset] ??
+          domPosition.node.childNodes[domPosition.offset - 1];
+        inlineElement =
+          adjacent instanceof HTMLElement
+            ? adjacent
+            : adjacent?.parentElement ?? domPosition.node;
+      }
+    } catch {
+      inlineElement = null;
+    }
+    const candidate =
+      inlineElement && editor.view.dom.contains(inlineElement)
+        ? inlineElement
+        : fallbackBlock;
+    return candidate;
+  }
+
+  function caretFontSize(
+    position: number,
+    fallbackBlock: HTMLElement | null,
+  ): number {
+    const candidate = caretStyleElement(position, fallbackBlock);
+    if (!candidate) return TYPEWRITER_BODY_FONT_SIZE;
+    const measured = Number.parseFloat(getComputedStyle(candidate).fontSize);
+    return Number.isFinite(measured) && measured > 0
+      ? measured
+      : TYPEWRITER_BODY_FONT_SIZE;
+  }
+
+  function graphemes(text: string): string[] {
+    if (!text) return [];
+    if (!graphemeSegmenter) return Array.from(text);
+    return Array.from(graphemeSegmenter.segment(text), ({ segment }) => segment);
+  }
+
+  function firstGrapheme(text: string): string {
+    return graphemes(text)[0] ?? "";
+  }
+
+  function lastGrapheme(text: string): string {
+    return graphemes(text).at(-1) ?? "";
+  }
+
+  function modelTextRangeRect(from: number, to: number): DOMRect | null {
+    if (!editor || from < 0 || to <= from || to > editor.state.doc.content.size) {
+      return null;
+    }
+    try {
+      const start = editor.view.domAtPos(from);
+      const end = editor.view.domAtPos(to);
+      const range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      const rects = Array.from(range.getClientRects()).filter(
+        (rect) => rect.width > 0 && rect.height > 0,
+      );
+      if (!rects.length) return null;
+      const caret = editor.view.coordsAtPos(from);
+      const caretCenter = (caret.top + caret.bottom) / 2;
+      return rects.reduce((nearest, rect) => {
+        const nearestDistance = Math.abs(
+          (nearest.top + nearest.bottom) / 2 - caretCenter,
+        );
+        const distance = Math.abs((rect.top + rect.bottom) / 2 - caretCenter);
+        return distance < nearestDistance ? rect : nearest;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  function printingAdvance(
+    position: number,
+    text: string,
+  ): { advance: number; direction: "ltr" | "rtl" } {
+    const candidate = caretStyleElement(position, activeBlockElement());
+    const style = candidate ? getComputedStyle(candidate) : null;
+    const sample = firstGrapheme(text) || "가";
+    const fontSize = style
+      ? Number.parseFloat(style.fontSize)
+      : TYPEWRITER_BODY_FONT_SIZE;
+    const safeFontSize =
+      Number.isFinite(fontSize) && fontSize > 0
+        ? fontSize
+        : TYPEWRITER_BODY_FONT_SIZE;
+    const direction = style?.direction === "rtl" ? "rtl" : "ltr";
+    const cacheKey = [
+      sample,
+      style?.fontFamily ?? fontFamily,
+      style?.fontSize ?? safeFontSize,
+      style?.fontWeight ?? "400",
+      style?.fontStyle ?? "normal",
+      style?.letterSpacing ?? "normal",
+      pageScale,
+    ].join("|");
+    const cached = printingAdvanceCache.get(cacheKey);
+    if (cached !== undefined) return { advance: cached, direction };
+
+    const measure = document.createElement("span");
+    measure.textContent = sample;
+    Object.assign(measure.style, {
+      position: "fixed",
+      visibility: "hidden",
+      pointerEvents: "none",
+      whiteSpace: "pre",
+      fontFamily: style?.fontFamily ?? fontFamily,
+      fontSize: style?.fontSize ?? `${safeFontSize}px`,
+      fontWeight: style?.fontWeight ?? "400",
+      fontStyle: style?.fontStyle ?? "normal",
+      fontVariant: style?.fontVariant ?? "normal",
+      fontStretch: style?.fontStretch ?? "normal",
+      letterSpacing: style?.letterSpacing ?? "normal",
+    });
+    document.body.append(measure);
+    const measuredWidth = measure.getBoundingClientRect().width;
+    measure.remove();
+    const parsedLetterSpacing = Number.parseFloat(style?.letterSpacing ?? "");
+    const letterSpacing = Number.isFinite(parsedLetterSpacing)
+      ? parsedLetterSpacing
+      : 0;
+    const estimatedWidth = Math.max(
+      0.1,
+      approximatePrintingGraphemeAdvance(sample, safeFontSize) + letterSpacing,
+    );
+    const advance =
+      (Number.isFinite(measuredWidth) && measuredWidth > 0
+        ? measuredWidth
+        : estimatedWidth) * pageScale;
+    printingAdvanceCache.set(cacheKey, advance);
+    return { advance, direction };
+  }
+
+  function contextualPrintingSample(position: number): string {
+    if (!editor) return "가";
+    try {
+      const resolved = editor.state.doc.resolve(position);
+      const blockContext = resolved.parent.isTextblock
+        ? resolved.parent.textBetween(0, resolved.parentOffset, "\n", "\n")
+        : "";
+      const blockSample = representativePrintingGrapheme(blockContext);
+      if (blockSample) return blockSample;
+
+      const contextStart = Math.max(0, position - PRINTING_CONTEXT_LOOKBACK);
+      const documentContext = editor.state.doc.textBetween(
+        contextStart,
+        position,
+        "\n",
+        "\n",
+      );
+      return representativePrintingGrapheme(documentContext) ?? "가";
+    } catch {
+      return "가";
+    }
+  }
+
+  function previousGraphemeRect(position: number): DOMRect | null {
+    if (!editor) return null;
+    const previous = editor.state.doc.resolve(position).nodeBefore;
+    if (!previous?.isText || !previous.text) return null;
+    const grapheme = lastGrapheme(previous.text);
+    return grapheme
+      ? modelTextRangeRect(position - grapheme.length, position)
+      : null;
+  }
+
+  function sharesCaretLine(
+    rect: DOMRect,
+    caret: { top: number; bottom: number },
+  ): boolean {
+    const rectCenter = (rect.top + rect.bottom) / 2;
+    const caretCenter = (caret.top + caret.bottom) / 2;
+    const tolerance = Math.max(
+      1,
+      rect.bottom - rect.top,
+      caret.bottom - caret.top,
+    ) * 0.6;
+    return Math.abs(rectCenter - caretCenter) <= tolerance;
+  }
+
+  // A trailing mechanical caret rests under the last entered glyph. At a
+  // visual line start, the measured cell immediately before the caret stands
+  // in for that glyph so the next character still appears to its right.
+  function idlePrintPointLeft(position: number): number | null {
+    if (!editor) return null;
+    const caret = editor.view.coordsAtPos(position);
+    const previous = previousGraphemeRect(position);
+    const glyph =
+      previous && sharesCaretLine(previous, caret) ? previous : null;
+    const fallback = printingAdvance(
+      position,
+      contextualPrintingSample(position),
+    );
+    return resolvePrintingCellCenter({
+      caretLeft: caret.left,
+      glyphLeft: glyph?.left,
+      glyphRight: glyph?.right,
+      fallbackAdvance: fallback.advance,
+      direction: fallback.direction,
+      fallbackSide: "before",
+    });
+  }
+
+  function anticipatedPrintPointLeft(
+    position: number,
+    text: string,
+  ): number | null {
+    if (!editor) return null;
+    const grapheme = firstGrapheme(text);
+    if (!grapheme) return idlePrintPointLeft(position);
+    const caret = editor.view.coordsAtPos(position);
+    const measured = printingAdvance(position, grapheme);
+    return resolvePrintingCellCenter({
+      caretLeft: caret.left,
+      fallbackAdvance: measured.advance,
+      direction: measured.direction,
+    });
+  }
+
+  function insertedGraphemePrintPointLeft(insertedText: string): number | null {
+    if (!editor) return null;
+    const grapheme = lastGrapheme(insertedText);
+    if (!grapheme) return null;
+    const end = editor.state.selection.head;
+    const rect = modelTextRangeRect(end - grapheme.length, end);
+    if (!rect) return null;
+    return (rect.left + rect.right) / 2;
+  }
+
   function caretClientRects(position: number): RectLike[] {
     if (!editor) return [];
     const result: DOMRect[] = [];
@@ -497,6 +761,7 @@
         pageTopInset: PAGE_TOP,
         pageBottomInset: PAGE_BOTTOM,
         pageHorizontalInset: 20 * MM_TO_PX,
+        fontSize: caretFontSize(editor.state.selection.head, block),
         blockKind: writingBlockKind(block),
       });
     } catch {
@@ -553,24 +818,27 @@
     return matches;
   }
 
-  function resetCarriage(): void {
+  function resetPrintCarrier(): void {
     cancelLineFeed(false);
     clearProgrammaticScrollMarker();
-    carriageShift = 0;
-    caretAlignedToStrike = false;
+    clearPrintingElementImpact();
+    printCarrierOffset = 0;
+    caretAlignedToPrintingLine = false;
+    printCarrierVisible = false;
     marginWarning = false;
-    lastCarriageLineTop = null;
-    carriageAdvancePending = false;
+    lastPrintCarrierLineTop = null;
+    printAdvancePending = false;
   }
 
-  function triggerCarriageReturn(feedLine = false): void {
+  function triggerPrintCarrierReturn(feedLine = false): void {
+    clearPrintingElementImpact();
     if (returnTimer) clearTimeout(returnTimer);
-    carriageReturnMs = resolveCarriageReturnDuration(carriageShift);
-    carriageReturning = true;
+    printCarrierReturnMs = printCarrierReturnDuration(printCarrierOffset);
+    printCarrierReturning = true;
     returnTimer = setTimeout(() => {
-      carriageReturning = false;
+      printCarrierReturning = false;
       returnTimer = null;
-    }, carriageReturnMs);
+    }, printCarrierReturnMs);
     if (!feedLine) return;
     lineFeedPending = true;
     lineFeeding = true;
@@ -582,16 +850,17 @@
     }, 240);
   }
 
-  function cancelCarriageReturn(): void {
+  function cancelPrintCarrierReturn(): void {
     if (returnTimer) clearTimeout(returnTimer);
     returnTimer = null;
-    carriageReturning = false;
+    printCarrierReturning = false;
   }
 
-  function stopTypebarStrike(): void {
-    if (typebarStrikeTimer) clearTimeout(typebarStrikeTimer);
-    typebarStrikeTimer = null;
-    typebarStriking = false;
+  function stopPrintingElementStrike(): void {
+    if (printingElementStrikeTimer) clearTimeout(printingElementStrikeTimer);
+    printingElementStrikeTimer = null;
+    printingElementStriking = false;
+    clearPrintingElementImpact();
   }
 
   function cancelLineFeed(snapToTarget: boolean): void {
@@ -640,7 +909,7 @@
       if (lineFeedTimer) clearTimeout(lineFeedTimer);
       lineFeedTimer = null;
       scheduleCaretLine();
-      scheduleCarriagePosition();
+      schedulePrintCarrierPosition();
     };
     lineFeedFrame = requestAnimationFrame(animate);
     lineFeedTimer = setTimeout(() => {
@@ -653,30 +922,91 @@
       lineFeeding = false;
       lineFeedTimer = null;
       scheduleCaretLine();
-      scheduleCarriagePosition();
+      schedulePrintCarrierPosition();
     }, 220);
   }
 
-  function triggerTypebarStrike(): void {
+  function reducedTypewriterMotion(): boolean {
+    return (
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+    );
+  }
+
+  function settlePrintingElementPose(): void {
+    printingElementRotate = 0;
+    printingElementTilt = 0;
+  }
+
+  function clearPrintingElementImpact(): void {
+    if (printingElementImpactTimer) clearTimeout(printingElementImpactTimer);
+    printingElementImpactTimer = null;
+    impactPrintPointLeft = null;
+    settlePrintingElementPose();
+  }
+
+  function releasePrintingElementImpact(): void {
+    printingElementImpactTimer = null;
+    impactPrintPointLeft = null;
+    settlePrintingElementPose();
+    schedulePrintCarrierPosition();
+  }
+
+  function schedulePrintingElementImpactRelease(): void {
+    if (printingElementImpactTimer) clearTimeout(printingElementImpactTimer);
+    printingElementImpactTimer = setTimeout(
+      releasePrintingElementImpact,
+      reducedTypewriterMotion() ? 0 : TYPEWRITER_IMPACT_RELEASE_MS,
+    );
+  }
+
+  function retargetPrintingElementImpact(text: string): void {
+    if (
+      !editor ||
+      !(editor.state.selection instanceof TextSelection) ||
+      !editor.state.selection.empty
+    ) {
+      return;
+    }
+    const point = anticipatedPrintPointLeft(editor.state.selection.head, text);
+    if (point === null) return;
+    impactPrintPointLeft = point;
+    schedulePrintCarrierPosition();
+  }
+
+  function lockPrintingElementToInsertedText(text: string): void {
+    const point = insertedGraphemePrintPointLeft(text);
+    if (point === null) return;
+    impactPrintPointLeft = point;
+    if (!printingElementImpactTimer) schedulePrintingElementImpactRelease();
+    schedulePrintCarrierPosition();
+  }
+
+  function triggerPrintingElementStrike(code = "", text = ""): void {
     if (experience !== "typewriter" || !mounted) {
       return;
     }
-    if (typebarStrikeTimer) clearTimeout(typebarStrikeTimer);
-    typebarStrikeId = ++nextTypebarStrikeId;
-    typebarStriking = true;
-    typebarStrikeTimer = setTimeout(() => {
-      typebarStriking = false;
-      typebarStrikeTimer = null;
-    }, TYPEBAR_STRIKE_MS);
+    if (printingElementStrikeTimer) clearTimeout(printingElementStrikeTimer);
+    retargetPrintingElementImpact(text);
+    schedulePrintingElementImpactRelease();
+    printingElementStrikeId = ++nextPrintingElementStrikeId;
+    const pose = printingElementPoseForCode(code, printingElementStrikeId);
+    printingElementRotate = pose.rotate;
+    printingElementTilt = pose.tilt;
+    printingElementStriking = true;
+    printingElementStrikeTimer = setTimeout(() => {
+      printingElementStriking = false;
+      printingElementStrikeTimer = null;
+    }, reducedTypewriterMotion() ? 1 : TYPEBAR_STRIKE_MS);
   }
 
-  function triggerCarriageStep(): void {
-    if (carriageStepTimer) clearTimeout(carriageStepTimer);
-    carriageStepping = true;
-    carriageStepTimer = setTimeout(() => {
-      carriageStepping = false;
-      carriageStepTimer = null;
-    }, 60);
+  function triggerPrintCarrierStep(): void {
+    if (printCarrierStepTimer) clearTimeout(printCarrierStepTimer);
+    printCarrierStepping = true;
+    printCarrierStepTimer = setTimeout(() => {
+      printCarrierStepping = false;
+      printCarrierStepTimer = null;
+    }, TYPEWRITER_CARRIER_STEP_MS + 5);
   }
 
   function triggerLiteraryCompletion(
@@ -744,12 +1074,12 @@
       !editor ||
       !(editor.state.selection instanceof TextSelection) ||
       !editor.state.selection.empty ||
-      caretAlignedToStrike
+      caretAlignedToPrintingLine
     ) {
       return;
     }
     if (lineFeedFrame !== null) cancelLineFeed(true);
-    updateCarriagePosition();
+    updatePrintCarrierPosition();
   }
 
   function handleTypewriterTitleBoundaryKey(
@@ -787,11 +1117,11 @@
       view.dispatch(view.state.tr.setSelection(nextSelection));
     }
     scheduleCaretLine();
-    scheduleCarriagePosition();
+    schedulePrintCarrierPosition();
     return true;
   }
 
-  function updateCarriagePosition(): void {
+  function updatePrintCarrierPosition(): void {
     if (pointerSelectionActive) return;
     if (
       !editor ||
@@ -799,21 +1129,23 @@
       readOnly ||
       experience !== "typewriter"
     ) {
-      resetCarriage();
+      resetPrintCarrier();
       return;
     }
     if (
       !(editor.state.selection instanceof TextSelection) ||
       !editor.state.selection.empty
     ) {
-      caretAlignedToStrike = false;
+      caretAlignedToPrintingLine = false;
+      printCarrierVisible = false;
       marginWarning = false;
-      lastCarriageLineTop = null;
-      carriageAdvancePending = false;
+      lastPrintCarrierLineTop = null;
+      printAdvancePending = false;
       return;
     }
     if (!scroller || !paperWindow) {
-      caretAlignedToStrike = false;
+      caretAlignedToPrintingLine = false;
+      printCarrierVisible = false;
       marginWarning = false;
       return;
     }
@@ -821,75 +1153,67 @@
     const aligned = alignTypewriterLine();
     try {
       const caret = editor.view.coordsAtPos(editor.state.selection.head);
-      const scrollerBounds = scroller.getBoundingClientRect();
       const machineBounds = typewriterMachine?.getBoundingClientRect();
-      const strikeBounds =
-        machineBounds && machineBounds.width > 0
-          ? machineBounds
-          : scrollerBounds;
       const paperRect = paperWindow.getBoundingClientRect();
       const stack = editorMount.closest<HTMLElement>(".paper-stack");
       const stackRect = stack?.getBoundingClientRect();
       if (!stackRect || pageScale <= 0) return;
-      const strikePoint = strikeBounds.left + strikeBounds.width * 0.5;
-      const renderedShift = renderedTranslateX(
-        getComputedStyle(paperWindow).transform,
-      );
-      if (renderedShift === null) {
-        carriageAdvancePending = false;
-        return;
-      }
       if (machineBounds) {
-        const nextOrigin = resolveCarriageOrigin({
+        const nextOrigin = resolvePaperMachineOrigin({
           paperLeft: paperRect.left,
           paperWidth: paperRect.width,
-          renderedShift,
           machineLeft: machineBounds.left,
           machineWidth: machineBounds.width,
         });
-        if (nextOrigin !== null) carriageOrigin = nextOrigin;
+        if (nextOrigin !== null) paperMachineOrigin = nextOrigin;
       }
-      const nextShift = resolveCarriageTarget({
-        renderedShift,
-        caretLeft: caret.left,
-        strikePoint,
+      const printPointLeft =
+        impactPrintPointLeft ??
+        idlePrintPointLeft(editor.state.selection.head) ??
+        caret.left;
+      const nextOffset = resolvePrintCarrierOffset({
+        printPointLeft,
+        paperLeft: paperRect.left,
+        paperWidth: paperRect.width,
       });
-      if (nextShift === null) {
-        carriageAdvancePending = false;
+      if (nextOffset === null) {
+        printAdvancePending = false;
         return;
       }
       const lineTop = (caret.top - stackRect.top) / pageScale;
       const lineHeight = Math.max(1, (caret.bottom - caret.top) / pageScale);
       if (
-        carriageAdvancePending &&
-        lastCarriageLineTop !== null &&
-        !carriageReturning &&
-        lineTop > lastCarriageLineTop + lineHeight * 0.55
+        printAdvancePending &&
+        lastPrintCarrierLineTop !== null &&
+        !printCarrierReturning &&
+        lineTop > lastPrintCarrierLineTop + lineHeight * 0.55
       ) {
-        triggerCarriageReturn(true);
+        triggerPrintCarrierReturn(true);
       }
-      lastCarriageLineTop = lineTop;
-      carriageShift = nextShift;
-      caretAlignedToStrike = aligned;
-      carriageAdvancePending = false;
-      const caretOnPaper = (caret.left - paperRect.left) / pageScale;
+      lastPrintCarrierLineTop = lineTop;
+      printCarrierOffset = nextOffset;
+      caretAlignedToPrintingLine = aligned;
+      printCarrierVisible = aligned || printCarrierReturning || lineFeeding;
+      printAdvancePending = false;
+      const caretOnPaper = (printPointLeft - paperRect.left) / pageScale;
       marginWarning = caretOnPaper >= PAGE_WIDTH - 28 * MM_TO_PX;
     } catch {
-      caretAlignedToStrike = false;
-      carriageAdvancePending = false;
+      caretAlignedToPrintingLine = false;
+      printCarrierVisible = false;
+      printAdvancePending = false;
     }
   }
 
-  function scheduleCarriagePosition(): void {
+  function schedulePrintCarrierPosition(): void {
     if (pointerSelectionActive) {
-      if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
-      carriageFrame = null;
+      if (printCarrierFrame !== null) cancelAnimationFrame(printCarrierFrame);
+      printCarrierFrame = null;
       return;
     }
-    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
-    carriageFrame = requestAnimationFrame(() => {
-      carriageFrame = null;
-      updateCarriagePosition();
+    if (printCarrierFrame !== null) cancelAnimationFrame(printCarrierFrame);
+    printCarrierFrame = requestAnimationFrame(() => {
+      printCarrierFrame = null;
+      updatePrintCarrierPosition();
     });
   }
 
@@ -899,7 +1223,7 @@
     }
     const block = updateActiveBlock();
     scheduleCaretLine();
-    scheduleCarriagePosition();
+    schedulePrintCarrierPosition();
     const selected = selectionInfo();
     viewedPageIndex = Math.max(0, (selected.page ?? 1) - 1);
     onselection?.(selected);
@@ -920,7 +1244,7 @@
         lastFlowBlock = null;
         centerFlowBlock(block);
       } else {
-        scheduleCarriagePosition();
+        schedulePrintCarrierPosition();
       }
     });
   }
@@ -948,15 +1272,20 @@
           "typewriter",
         );
       }
-      carriageAdvancePending = true;
+      printAdvancePending = true;
       if (activity.kind === "enter") {
-        if (!carriageReturning) triggerCarriageReturn(true);
+        if (!printCarrierReturning) triggerPrintCarrierReturn(true);
       } else {
-        cancelCarriageReturn();
+        cancelPrintCarrierReturn();
         cancelLineFeed(true);
-        triggerCarriageStep();
+        if (activity.kind === "character" && activity.insertedText) {
+          lockPrintingElementToInsertedText(activity.insertedText);
+        } else {
+          clearPrintingElementImpact();
+          triggerPrintCarrierStep();
+        }
       }
-      scheduleCarriagePosition();
+      schedulePrintCarrierPosition();
       return;
     }
     if (experience === "literary" && editor) {
@@ -1627,7 +1956,7 @@
     );
     void tick().then(() => {
       scheduleCaretLine();
-      scheduleCarriagePosition();
+      schedulePrintCarrierPosition();
       updateContinuousHeight();
     });
   }
@@ -1692,26 +2021,27 @@
     }, 88);
   }
 
-  function centerCarriageForFreeScroll(): void {
+  function hidePrintCarrierForFreeScroll(): void {
     if (experience !== "typewriter") return;
     clearProgrammaticScrollMarker();
     if (lineFeedFrame !== null || lineFeedPending) cancelLineFeed(false);
     if (pointerSelectionActive) return;
-    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
-    carriageFrame = null;
-    cancelCarriageReturn();
-    if (carriageStepTimer) clearTimeout(carriageStepTimer);
-    carriageStepTimer = null;
-    carriageStepping = false;
-    carriageAdvancePending = false;
-    lastCarriageLineTop = null;
+    if (printCarrierFrame !== null) cancelAnimationFrame(printCarrierFrame);
+    printCarrierFrame = null;
+    cancelPrintCarrierReturn();
+    if (printCarrierStepTimer) clearTimeout(printCarrierStepTimer);
+    printCarrierStepTimer = null;
+    printCarrierStepping = false;
+    clearPrintingElementImpact();
+    printAdvancePending = false;
+    lastPrintCarrierLineTop = null;
     marginWarning = false;
-    caretAlignedToStrike = false;
-    carriageShift = 0;
+    caretAlignedToPrintingLine = false;
+    printCarrierVisible = false;
   }
 
   function handleFreeScrollIntent(): void {
-    centerCarriageForFreeScroll();
+    hidePrintCarrierForFreeScroll();
   }
 
   function cancelPointerSelectionRelease(): void {
@@ -1739,26 +2069,24 @@
     }
 
     cancelPointerSelectionRelease();
-    const renderedShift = paperWindow
-      ? renderedTranslateX(getComputedStyle(paperWindow).transform)
-      : null;
-    if (renderedShift !== null) carriageShift = renderedShift;
     pointerSelectionPointerId = Number.isFinite(event.pointerId)
       ? event.pointerId
       : null;
     pointerSelectionActive = true;
     clearProgrammaticScrollMarker();
     if (lineFeedFrame !== null || lineFeedPending) cancelLineFeed(false);
-    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
-    carriageFrame = null;
-    cancelCarriageReturn();
-    if (carriageStepTimer) clearTimeout(carriageStepTimer);
-    carriageStepTimer = null;
-    carriageStepping = false;
-    carriageAdvancePending = false;
-    lastCarriageLineTop = null;
+    if (printCarrierFrame !== null) cancelAnimationFrame(printCarrierFrame);
+    printCarrierFrame = null;
+    cancelPrintCarrierReturn();
+    if (printCarrierStepTimer) clearTimeout(printCarrierStepTimer);
+    printCarrierStepTimer = null;
+    printCarrierStepping = false;
+    clearPrintingElementImpact();
+    printAdvancePending = false;
+    lastPrintCarrierLineTop = null;
     marginWarning = false;
-    caretAlignedToStrike = false;
+    caretAlignedToPrintingLine = false;
+    printCarrierVisible = false;
   }
 
   function finishTypewriterPointerSelection(event?: PointerEvent): void {
@@ -1778,7 +2106,7 @@
       pointerSelectionReleaseFrame = null;
       if (!mounted || pointerSelectionActive) return;
       scheduleCaretLine();
-      scheduleCarriagePosition();
+      schedulePrintCarrierPosition();
     });
   }
 
@@ -1799,7 +2127,7 @@
       (event.target === scroller &&
         event.clientX >= bounds.right - scrollbarHitWidth)
     ) {
-      centerCarriageForFreeScroll();
+      hidePrintCarrierForFreeScroll();
     }
   }
 
@@ -1808,7 +2136,9 @@
       experience === "typewriter" && consumeProgrammaticScroll();
     updatePlatenFromScroll();
     if (experience === "typewriter" && programmatic) {
-      caretAlignedToStrike = caretMatchesTypewriterStrike();
+      caretAlignedToPrintingLine = caretMatchesTypewriterStrike();
+      printCarrierVisible =
+        caretAlignedToPrintingLine || printCarrierReturning || lineFeeding;
     }
     if (effectiveFitMode === "page" || scrollFrame !== null) return;
     scrollFrame = requestAnimationFrame(() => {
@@ -1912,10 +2242,14 @@
             }
             if (
               experience === "typewriter" &&
-              pendingInput?.kind === "character" &&
-              performance.now() - lastPhysicalTypebarAt > 80
+              pendingInput?.kind === "character"
             ) {
-              triggerTypebarStrike();
+              const inputText = pendingInput.text ?? "";
+              if (performance.now() - lastPhysicalPrintingKeyAt > 80) {
+                triggerPrintingElementStrike("", inputText);
+              } else if (inputText) {
+                retargetPrintingElementImpact(inputText);
+              }
             }
             if (pendingInput?.kind === "enter" && editor) {
               pendingInput.paragraphHadContent = Boolean(
@@ -1932,7 +2266,7 @@
             queueMicrotask(() => {
               if (!mounted || editor?.isFocused) return;
               caretLine = null;
-              resetCarriage();
+              resetPrintCarrier();
               lastFlowBlock = null;
               pendingInput = null;
               onfocuschange?.(false);
@@ -1947,7 +2281,7 @@
             pendingInput = keyboardInput;
             prepareTypewriterInput();
             if (keyboardInput.kind === "enter") {
-              if (experience === "typewriter") triggerCarriageReturn(true);
+              if (experience === "typewriter") triggerPrintCarrierReturn(true);
               pendingInput.paragraphHadContent = Boolean(
                 view.state.selection.$from.parent.textContent.trim(),
               );
@@ -1955,10 +2289,13 @@
           }
           if (
             experience === "typewriter" &&
-            isTypebarKey(event)
+            isPrintingKey(event)
           ) {
-            lastPhysicalTypebarAt = performance.now();
-            triggerTypebarStrike();
+            lastPhysicalPrintingKeyAt = performance.now();
+            triggerPrintingElementStrike(
+              event.code,
+              event.key === "Process" ? "" : event.key,
+            );
           }
           const ghost = editorGhostText(view);
           if (event.key === "Escape" && ghost) {
@@ -1987,7 +2324,7 @@
         updateActiveBlock();
         scheduleLayout();
         scheduleCaretLine();
-        scheduleCarriagePosition();
+        schedulePrintCarrierPosition();
       },
       onSelectionUpdate: ({ transaction }) => {
         if (
@@ -2016,6 +2353,11 @@
     scheduleLayout();
     notifySelection();
     onready?.(api());
+    void document.fonts?.ready.then(() => {
+      if (!mounted) return;
+      printingAdvanceCache.clear();
+      schedulePrintCarrierPosition();
+    });
   });
 
   $effect(() => {
@@ -2063,7 +2405,7 @@
       const block = updateActiveBlock();
       if (nextExperience !== "typewriter") {
         cancelTypewriterPointerSelection();
-        resetCarriage();
+        resetPrintCarrier();
         resetPlatenMotion(false);
       } else if (changed) {
         resetPlatenMotion(true);
@@ -2071,7 +2413,7 @@
       if (nextExperience !== "flow") lastFlowBlock = null;
       scheduleLayout();
       scheduleCaretLine();
-      scheduleCarriagePosition();
+      schedulePrintCarrierPosition();
       updateContinuousHeight();
       if (changed && nextExperience === "literary" && scroller) {
         scroller.scrollTop = Math.max(0, (currentPage() - 1) * pagePeriod * pageScale);
@@ -2103,12 +2445,12 @@
     if (platenIdleTimer) clearTimeout(platenIdleTimer);
     if (platenDetentTimer) clearTimeout(platenDetentTimer);
     if (activeLineFrame !== null) cancelAnimationFrame(activeLineFrame);
-    if (carriageFrame !== null) cancelAnimationFrame(carriageFrame);
+    if (printCarrierFrame !== null) cancelAnimationFrame(printCarrierFrame);
     cancelTypewriterPointerSelection();
     if (workspaceFrame !== null) cancelAnimationFrame(workspaceFrame);
-    stopTypebarStrike();
+    stopPrintingElementStrike();
     cancelLineFeed(false);
-    if (carriageStepTimer) clearTimeout(carriageStepTimer);
+    if (printCarrierStepTimer) clearTimeout(printCarrierStepTimer);
     if (returnTimer) clearTimeout(returnTimer);
     if (literaryTimer) clearTimeout(literaryTimer);
     scroller?.removeEventListener("pointerdown", handleScrollPointerDown);
@@ -2134,17 +2476,17 @@
   class:writing-literary={experience === "literary"}
   class:writing-typewriter={experience === "typewriter"}
   class:writing-flow={experience === "flow"}
-  class:typewriter-strike-point-visible={experience === "typewriter" && caretAlignedToStrike && Boolean(caretLine)}
-  class:carriage-returning={carriageReturning}
-  class:carriage-stepping={carriageStepping}
+  class:print-carrier-visible={experience === "typewriter" && printCarrierVisible && Boolean(caretLine)}
+  class:print-carrier-returning={printCarrierReturning}
+  class:print-carrier-stepping={printCarrierStepping}
   class:pointer-selecting={pointerSelectionActive}
-  class:typebar-striking={typebarStriking}
+  class:printing-element-striking={printingElementStriking}
   class:line-feeding={lineFeeding}
   class:platen-rolling={platenRolling}
   class:platen-detenting={platenDetenting}
   class:margin-warning={marginWarning}
   class="paper-editor-shell"
-  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", ${paperFontFallback};--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px;--carriage-origin:${carriageOrigin}px;--carriage-shift:${carriageShift}px;--carriage-track-duration:90ms;--carriage-step-duration:48ms;--carriage-return-duration:${carriageReturnMs}ms;--typewriter-strike-duration:${TYPEBAR_STRIKE_MS}ms;--typewriter-scrollbar-gutter:${typewriterScrollbarGutter}px;--typewriter-paper-width:${PAGE_WIDTH * pageScale}px;--typewriter-strike-bottom:${typewriterStrikeBottom}px;--typewriter-strike-y:calc(100% - var(--typewriter-strike-bottom));--typewriter-line-aperture:${typewriterLineAperture}px;--typewriter-platen-angle:${platenAngle}deg;--typewriter-platen-surface:${platenSurfaceOffset}px;--typewriter-platen-intensity:${platenIntensity};--typewriter-paper-tension:${typewriterPaperTension}px;--typewriter-platen-pitch:${typewriterPlatenPitch}px;--flow-width:${flowWidth}px;--typewriter-top-runway:${typewriterTopRunway}px;--typewriter-bottom-runway:${typewriterBottomRunway}px;--flow-top-runway:${flowTopRunway}px;--flow-bottom-runway:${flowBottomRunway}px`}
+  style={`--paper-font:"${fontFamily.replaceAll('"', '\\"')}", ${paperFontFallback};--paper-scale:${pageScale};--paper-gap:${PAGE_GAP}px;--paper-machine-origin:${paperMachineOrigin}px;--print-carrier-offset:${printCarrierOffset}px;--print-carrier-track-duration:90ms;--print-carrier-step-duration:${TYPEWRITER_CARRIER_STEP_MS}ms;--print-carrier-return-duration:${printCarrierReturnMs}ms;--printing-element-rotate:${printingElementRotate}deg;--printing-element-tilt:${printingElementTilt}deg;--type-strike-width:${typewriterCursorMetrics.strikeWidth}px;--type-strike-height:${typewriterCursorMetrics.strikeHeight}px;--type-strike-top-offset:${typewriterCursorMetrics.strikeTopOffset}px;--type-element-width:${typewriterCursorMetrics.elementWidth}px;--type-element-height:${typewriterCursorMetrics.elementHeight}px;--typewriter-strike-duration:${TYPEBAR_STRIKE_MS}ms;--typewriter-scrollbar-gutter:${typewriterScrollbarGutter}px;--typewriter-paper-width:${PAGE_WIDTH * pageScale}px;--typewriter-strike-bottom:${typewriterStrikeBottom}px;--typewriter-strike-y:calc(100% - var(--typewriter-strike-bottom));--typewriter-line-aperture:${typewriterLineAperture}px;--typewriter-platen-angle:${platenAngle}deg;--typewriter-platen-surface:${platenSurfaceOffset}px;--typewriter-platen-intensity:${platenIntensity};--typewriter-paper-tension:${typewriterPaperTension}px;--typewriter-platen-pitch:${typewriterPlatenPitch}px;--flow-width:${flowWidth}px;--typewriter-top-runway:${typewriterTopRunway}px;--typewriter-bottom-runway:${typewriterBottomRunway}px;--flow-top-runway:${flowTopRunway}px;--flow-bottom-runway:${flowBottomRunway}px`}
 >
   <div class="paper-toolbar-note" aria-live="polite">
     <span>
@@ -2161,10 +2503,10 @@
 
   {#if experience === "typewriter"}
     <div
-      class:active={caretAlignedToStrike && Boolean(caretLine)}
+      class:active={printCarrierVisible && Boolean(caretLine)}
       class="typewriter-machine"
       bind:this={typewriterMachine}
-      style={`--line-aperture:var(--typewriter-line-aperture);--strike-caret-height:${Math.max(16, Math.min(50, (caretLine?.height ?? 22) * pageScale - 2))}px`}
+      style="--line-aperture:var(--typewriter-line-aperture)"
       data-platen-detent={platenDetentSequence}
       aria-hidden="true"
     >
@@ -2172,22 +2514,16 @@
         <span class="typewriter-rail-recess"></span>
         <span class="typewriter-fixed-guide-rail"></span>
       </div>
-      <div class="typewriter-typebasket"></div>
-      <div class="typewriter-carriage-layer typewriter-carriage-underlay">
-        <span class="typewriter-moving-channel"></span>
-        <span class="typewriter-bearing-shoe is-left"><i></i></span>
-        <span class="typewriter-bearing-shoe is-right"><i></i></span>
-      </div>
       <div class="typewriter-frame-front">
         <span class="typewriter-front-bevel"></span>
         <span class="typewriter-typing-well"></span>
       </div>
-      <div class="typewriter-carriage-layer typewriter-carriage-upper">
-        <span class="typewriter-carriage-side-plate is-left">
+      <div class="typewriter-platen-assembly">
+        <span class="typewriter-platen-endcap is-left">
           <i class="typewriter-platen-bearing"></i>
           <i class="typewriter-bail-pivot"></i>
         </span>
-        <span class="typewriter-carriage-side-plate is-right">
+        <span class="typewriter-platen-endcap is-right">
           <i class="typewriter-platen-bearing"></i>
           <i class="typewriter-bail-pivot"></i>
         </span>
@@ -2202,35 +2538,41 @@
           <i class="typewriter-bail-roller is-third"></i>
           <i class="typewriter-bail-roller is-fourth"></i>
         </span>
-        <span class="typewriter-carriage-knob is-left"><i></i></span>
-        <span class="typewriter-carriage-knob is-right"><i></i></span>
+        <span class="typewriter-platen-knob is-left"><i></i></span>
+        <span class="typewriter-platen-knob is-right"><i></i></span>
         <span class="typewriter-index-wheel"></span>
         {#if platenDetenting}
           {#key platenDetentSequence}
             <span class="typewriter-detent-pawl"></span>
           {/key}
         {/if}
-        <span class="typewriter-return-lever">
-          <i></i>
-        </span>
       </div>
-      <div class="typewriter-strike-rail">
-        <span class="typewriter-ribbon-band"></span>
-        <span class="typewriter-segment"></span>
-        {#if caretAlignedToStrike && caretLine}
-          <span class="typewriter-strike-caret"></span>
-        {/if}
-        <span class="typewriter-type-guide">
-          {#if caretAlignedToStrike && caretLine && typebarStriking}
-            {#key typebarStrikeId}
-              <span class="typewriter-ribbon-vibrator"></span>
-              <span class="typewriter-live-typebar">
-                <i class="typewriter-type-slug"></i>
+      <span class="typewriter-carrier-track"></span>
+      {#if printCarrierVisible && caretLine}
+        <div class="typewriter-print-carrier">
+          <span class="typewriter-carrier-bearing"></span>
+          <span class="typewriter-carrier-body"></span>
+          {#if printingElementStriking}
+            {#key printingElementStrikeId}
+              <span class="typewriter-ribbon-gate is-striking"></span>
+              <span class="typewriter-element-yoke is-striking">
+                <i class="typewriter-print-element">
+                  <span class="typewriter-element-shell"></span>
+                  <em class="typewriter-strike-face"></em>
+                </i>
               </span>
             {/key}
+          {:else}
+            <span class="typewriter-ribbon-gate"></span>
+            <span class="typewriter-element-yoke">
+              <i class="typewriter-print-element">
+                <span class="typewriter-element-shell"></span>
+                <em class="typewriter-strike-face"></em>
+              </i>
+            </span>
           {/if}
-        </span>
-      </div>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -2422,21 +2764,6 @@
     flex: 0 0 auto;
   }
 
-  .writing-typewriter .paper-window {
-    transform: translate3d(var(--carriage-shift), 0, 0);
-    transition: transform var(--carriage-track-duration) cubic-bezier(0.2, 0.72, 0.28, 1);
-    will-change: transform;
-  }
-
-  .writing-typewriter.carriage-stepping .paper-window {
-    transition: transform var(--carriage-step-duration) cubic-bezier(0.18, 0.78, 0.24, 1);
-  }
-
-  .writing-typewriter.carriage-returning .paper-window {
-    transition-duration: var(--carriage-return-duration);
-    transition-timing-function: cubic-bezier(0.16, 0.92, 0.26, 1.08);
-  }
-
   .paper-window.fit-page { overflow: hidden; }
 
   .paper-stack {
@@ -2511,767 +2838,36 @@
     min-height: 297mm;
   }
 
+  .writing-typewriter .paper-stack > .paper-editor-mount {
+    z-index: 7;
+  }
+
   .writing-flow .paper-editor-mount {
     width: 100%;
     min-height: 100%;
   }
 
   /*
-   * A full-scale portable typewriter cropped by the bottom of the viewport.
-   * The carriage follows the paper while the type guide and chassis stay fixed.
+   * IBM Selectric-inspired stationary paper path. The platen and A4 sheet stay
+   * horizontally fixed while a compact single-element carrier follows the
+   * native editor caret on a powered rail.
    */
   .typewriter-machine {
-    --typewriter-enamel: #294744;
-    --typewriter-enamel-deep: #172824;
-    --typewriter-enamel-light: #466963;
-    --typewriter-rubber: #111413;
-    --typewriter-metal: #b8bcb7;
-    --typewriter-metal-deep: #686f6c;
-    --typewriter-metal-dark: #343a37;
-    --typewriter-ribbon: #171617;
-    --typewriter-grip: #5b2f2a;
-    --typewriter-warning: #d19a53;
-    position: absolute;
-    z-index: 6;
-    inset: 0;
-    right: var(--typewriter-scrollbar-gutter);
-    overflow: hidden;
-    isolation: isolate;
-    pointer-events: none;
-  }
-
-  .typewriter-typebasket {
-    position: absolute;
-    z-index: 3;
-    top: calc(var(--typewriter-strike-y) + var(--line-aperture) / 2 - 4px);
-    left: 50%;
-    width: 120px;
-    height: 36px;
-    transform: translate(-50%, 9px) scale(0.94);
-    clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%);
-    background:
-      repeating-conic-gradient(from 248deg at 50% 118%, transparent 0deg 7deg, rgba(184, 188, 183, 0.42) 7.2deg 8deg),
-      radial-gradient(ellipse at 50% 112%, #0c100f 0 40%, #424a47 42% 52%, transparent 54%);
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.48));
-    opacity: 0;
-    transition: opacity 54ms ease-out, transform 72ms cubic-bezier(0.2, 0.76, 0.28, 1);
-  }
-
-  .typebar-striking .typewriter-typebasket {
-    transform: translate(-50%, 0) scale(1);
-    opacity: 0.42;
-  }
-
-  .typewriter-paper-wrap {
-    position: absolute;
-    z-index: 2;
-    top: calc(var(--line-aperture) / 2 + 3px);
-    right: 44px;
-    left: 44px;
-    height: 22px;
-    transform-origin: top center;
-    border-radius: 0 0 48% 48% / 0 0 15px 15px;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(105, 111, 106, 0.055) 48%, rgba(37, 41, 39, 0.2)),
-      var(--typewriter-sheet);
-    box-shadow:
-      inset 0 -6px 8px rgba(44, 39, 31, 0.16),
-      0 1px 2px rgba(0, 0, 0, 0.2);
-  }
-
-  .typewriter-platen {
-    position: absolute;
-    z-index: 3;
-    top: calc(var(--line-aperture) / 2 + 7px);
-    right: 26px;
-    left: 26px;
-    height: 18px;
-    border: 1px solid #080a0b;
-    border-radius: 999px;
-    background:
-      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 4px),
-      linear-gradient(180deg, #333735 0, #1d211f 27%, var(--typewriter-rubber) 66%, #272c29 100%);
-    background-size: auto 8px, auto;
-    box-shadow:
-      inset 0 2px 2px rgba(255, 255, 255, 0.09),
-      inset 0 -2px 3px rgba(0, 0, 0, 0.9),
-      0 2px 4px rgba(0, 0, 0, 0.32);
-  }
-
-  .typewriter-paper-scale {
-    position: absolute;
-    z-index: 4;
-    top: calc(var(--line-aperture) / 2 + 1px);
-    right: 44px;
-    left: 44px;
-    height: 8px;
-    border-top: 1px solid rgba(207, 211, 207, 0.72);
-    background: repeating-linear-gradient(90deg, rgba(210, 214, 211, 0.55) 0 1px, transparent 1px 18px);
-    mask-image: linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent);
-    opacity: 0.42;
-  }
-
-  .typewriter-paper-bail {
-    position: absolute;
-    z-index: 6;
-    top: calc(var(--line-aperture) / -2 - 13px);
-    right: 44px;
-    left: 44px;
-    height: 2px;
-    border-radius: 999px;
-    background: linear-gradient(180deg, #d4d7d3, #777d79 62%, #424844);
-    box-shadow:
-      0 1px 2px rgba(0, 0, 0, 0.32),
-      inset 0 1px rgba(255, 255, 255, 0.64);
-  }
-
-  .typewriter-bail-roller {
-    position: absolute;
-    top: -4px;
-    width: 31px;
-    height: 10px;
-    transform: translateX(-50%);
-    border: 1px solid #111516;
-    border-radius: 999px;
-    background: linear-gradient(180deg, #424744, #141716 56%, #292e2b);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.11),
-      0 1px 2px rgba(0, 0, 0, 0.28);
-  }
-
-  .typewriter-bail-roller.is-first { left: 12%; }
-  .typewriter-bail-roller.is-second { left: 37%; }
-  .typewriter-bail-roller.is-third { left: 63%; }
-  .typewriter-bail-roller.is-fourth { left: 88%; }
-
-  .typewriter-carriage-knob {
-    position: absolute;
-    z-index: 4;
-    top: calc(var(--line-aperture) / 2 + 8px);
-    width: 29px;
-    height: 22px;
-    border: 1px solid #080a0b;
-    border-radius: 8px;
-    background:
-      repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 4px),
-      linear-gradient(180deg, #303432, var(--typewriter-rubber) 60%, #232825);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.12),
-      0 2px 5px rgba(0, 0, 0, 0.42);
-  }
-
-  .typewriter-carriage-knob::before {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 9px;
-    height: 9px;
-    transform: translate(-50%, -50%);
-    border: 1px solid var(--typewriter-metal-deep);
-    border-radius: 50%;
-    background: linear-gradient(145deg, #c3c7c2, #646b67 54%, #242a27);
-    content: "";
-  }
-
-  .typewriter-carriage-knob.is-left { left: -14px; }
-  .typewriter-carriage-knob.is-right { right: -14px; }
-
-  .typewriter-return-lever {
-    position: absolute;
-    z-index: 9;
-    top: calc(var(--line-aperture) / 2 + 5px);
-    right: calc(100% - 30px);
-    width: 126px;
-    height: 4px;
-    transform: rotate(8deg);
-    transform-origin: right center;
-    border: 1px solid #444b48;
-    border-radius: 999px;
-    background: linear-gradient(180deg, #d9dcd8, #969c98 46%, #5b625f);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.62),
-      0 2px 4px rgba(0, 0, 0, 0.32);
-  }
-
-  .typewriter-return-lever::after {
-    position: absolute;
-    top: 50%;
-    right: -5px;
-    width: 10px;
-    height: 10px;
-    transform: translateY(-50%);
-    border: 1px solid #343a38;
-    border-radius: 50%;
-    background: radial-gradient(circle at 38% 34%, #e2e4df, #747b78 48%, #202624 76%);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.42),
-      0 2px 3px rgba(0, 0, 0, 0.42);
-    content: "";
-  }
-
-  .typewriter-return-lever i {
-    position: absolute;
-    top: -5px;
-    left: -3px;
-    width: 31px;
-    height: 12px;
-    border: 1px solid #0c0f10;
-    border-radius: 9px 5px 5px 9px;
-    background: linear-gradient(180deg, #76443c, var(--typewriter-grip) 58%, #38201d);
-    box-shadow: inset 0 1px rgba(255, 255, 255, 0.12);
-  }
-
-  .carriage-returning .typewriter-return-lever {
-    animation: typewriter-lever-return var(--carriage-return-duration) cubic-bezier(0.2, 0.74, 0.25, 1) both;
-  }
-
-  .typewriter-strike-rail {
-    position: absolute;
-    z-index: 7;
-    top: var(--typewriter-strike-y);
-    left: 50%;
-    width: min(1020px, calc(100% - 34px));
-    height: var(--line-aperture);
-    transform: translate(-50%, -50%);
-    transition:
-      opacity 140ms ease,
-      filter 140ms ease;
-  }
-
-  .typewriter-strike-rail::before {
-    position: absolute;
-    right: 38%;
-    bottom: -8px;
-    left: 38%;
-    height: 9px;
-    background: radial-gradient(ellipse at 50% 0, rgba(8, 12, 11, 0.18), transparent 68%);
-    content: "";
-  }
-
-  .typewriter-strike-rail::after {
-    position: absolute;
-    right: 16%;
-    bottom: -11px;
-    left: 16%;
-    height: 1px;
-    background: linear-gradient(
-      90deg,
-      transparent,
-      rgba(184, 188, 183, 0.14) 12%,
-      rgba(184, 188, 183, 0.32) 50%,
-      rgba(184, 188, 183, 0.14) 88%,
-      transparent
-    );
-    content: "";
-  }
-
-  .typewriter-ribbon-band {
-    position: absolute;
-    z-index: 1;
-    right: 19%;
-    bottom: -11px;
-    left: 19%;
-    height: 5px;
-    border-top: 1px solid rgba(107, 70, 62, 0.38);
-    border-bottom: 1px solid #080a0b;
-    background:
-      linear-gradient(180deg, #282222, var(--typewriter-ribbon) 62%, #0b0c0b);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
-    opacity: 0.82;
-  }
-
-  .typewriter-segment {
-    position: absolute;
-    z-index: 2;
-    bottom: -29px;
-    left: 50%;
-    width: 88px;
-    height: 20px;
-    transform: translateX(-50%);
-    clip-path: polygon(9% 100%, 0 32%, 12% 5%, 35% 0, 65% 0, 88% 5%, 100% 32%, 91% 100%);
-    border-top: 1px solid rgba(207, 211, 206, 0.48);
-    background: linear-gradient(180deg, #777e7a 0, #3e4643 22%, #171d1b 72%, #0e1311 100%);
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.46));
-    opacity: 0.86;
-  }
-
-  .typewriter-machine.active .typewriter-strike-rail { opacity: 1; }
-
-  .typewriter-type-guide {
-    position: absolute;
-    z-index: 4;
-    bottom: -25px;
-    left: 50%;
-    width: 36px;
-    height: 25px;
-    transform: translateX(-50%);
-    clip-path: polygon(0 100%, 10% 25%, 35% 25%, 43% 0, 57% 0, 65% 25%, 90% 25%, 100% 100%);
-    background: linear-gradient(90deg, #202624, #6f7773 25%, #b8bcb7 49%, #686f6c 73%, #191f1d);
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5));
-    transition: filter 120ms ease;
-  }
-
-  .typewriter-live-typebar {
-    position: absolute;
-    z-index: 3;
-    bottom: -24px;
-    left: 50%;
-    box-sizing: border-box;
-    width: 4px;
-    height: 60px;
-    transform-origin: 50% 100%;
-    border: 1px solid #3f4644;
-    border-radius: 2px;
-    background: linear-gradient(90deg, #252a28, #a9ada8 48%, #363c39);
-    box-shadow:
-      inset 1px 0 rgba(255, 255, 255, 0.16),
-      0 2px 3px rgba(0, 0, 0, 0.42);
-    backface-visibility: hidden;
-    pointer-events: none;
-    animation: typewriter-typebar-strike var(--typewriter-strike-duration) linear both;
-  }
-
-  .typewriter-type-slug {
-    position: absolute;
-    top: -6px;
-    left: 50%;
-    box-sizing: border-box;
-    width: 13px;
-    height: 7px;
-    transform: translateX(-50%);
-    border: 1px solid #292e2c;
-    border-radius: 2px;
-    background: linear-gradient(180deg, #b8bbb6, #555b58 58%, #1f2422);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.28),
-      0 1px 2px rgba(0, 0, 0, 0.45);
-  }
-
-  .typewriter-ribbon-vibrator {
-    position: absolute;
-    z-index: 2;
-    top: 7px;
-    left: 50%;
-    box-sizing: border-box;
-    width: 18px;
-    height: 9px;
-    border-top: 2px solid #171314;
-    border-right: 2px solid #929793;
-    border-left: 2px solid #929793;
-    border-radius: 5px 5px 1px 1px;
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.46));
-    pointer-events: none;
-    animation: typewriter-ribbon-lift var(--typewriter-strike-duration) linear both;
-  }
-
-  .margin-warning .typewriter-type-guide {
-    border-bottom-color: #8d6030;
-  }
-
-  .line-feeding .typewriter-platen {
-    animation: typewriter-platen-feed 160ms linear both;
-  }
-
-  .line-feeding .typewriter-paper-wrap {
-    animation: typewriter-paper-feed 160ms cubic-bezier(0.2, 0.72, 0.26, 1) both;
-  }
-
-  .line-feeding .typewriter-carriage-knob::before {
-    animation: typewriter-knob-feed 160ms linear both;
-  }
-
-  @keyframes typewriter-typebar-strike {
-    0% {
-      transform: translateX(-50%) translateY(20px) rotateX(62deg);
-      opacity: 0;
-    }
-    12% {
-      transform: translateX(-50%) translateY(14px) rotateX(48deg);
-      opacity: 0.38;
-    }
-    30% {
-      transform: translateX(-50%) translateY(1px) rotateX(8deg);
-      opacity: 1;
-      animation-timing-function: cubic-bezier(0.1, 0.72, 0.2, 1);
-    }
-    32%, 39% {
-      transform: translateX(-50%) translateY(-2px) rotateX(0deg);
-      opacity: 1;
-    }
-    46% {
-      transform: translateX(-50%) translateY(2px) rotateX(12deg);
-      opacity: 0.86;
-      animation-timing-function: cubic-bezier(0.22, 0.05, 0.36, 1);
-    }
-    100% {
-      transform: translateX(-50%) translateY(20px) rotateX(62deg);
-      opacity: 0;
-    }
-  }
-
-  @keyframes typewriter-ribbon-lift {
-    0%, 16%, 100% {
-      transform: translateX(-50%) translateY(7px);
-      opacity: 0;
-    }
-    24% {
-      transform: translateX(-50%) translateY(2px);
-      opacity: 0.72;
-    }
-    30%, 42% {
-      transform: translateX(-50%) translateY(0);
-      opacity: 1;
-    }
-    55% {
-      transform: translateX(-50%) translateY(7px);
-      opacity: 0;
-    }
-  }
-
-  @keyframes typewriter-lever-return {
-    0% { transform: rotate(8deg); }
-    44% { transform: rotate(2deg); }
-    100% { transform: rotate(8deg); }
-  }
-
-  @keyframes typewriter-platen-feed {
-    from { background-position: 0 0, 0 0; }
-    to { background-position: 0 8px, 0 0; }
-  }
-
-  @keyframes typewriter-paper-feed {
-    0% { transform: translateY(4px) scaleY(0.92); filter: brightness(0.94); }
-    100% { transform: translateY(0) scaleY(1); filter: brightness(1); }
-  }
-
-  @keyframes typewriter-knob-feed {
-    from { transform: translate(-50%, -50%) rotate(0deg); }
-    to { transform: translate(-50%, -50%) rotate(24deg); }
-  }
-
-  /*
-   * Contemporary precision-instrument skin. The paper and carriage mechanics
-   * stay legible, while colored enamel and decorative vintage hardware are
-   * deliberately removed from the visible machine edge.
-   */
-  .typewriter-machine {
-    --typewriter-enamel: var(--typewriter-body);
-    --typewriter-enamel-deep: var(--typewriter-body-deep);
-    --typewriter-enamel-light: var(--typewriter-body-light);
     --typewriter-rubber: #080a0b;
     --typewriter-metal: #d8d8d3;
     --typewriter-metal-deep: #808583;
-    --typewriter-metal-dark: #3e4445;
-    --typewriter-ribbon: #090a0b;
-    --typewriter-grip: #121516;
     --typewriter-warning: #c79a54;
-  }
-
-  .typewriter-typebasket {
-    top: calc(var(--typewriter-strike-y) + var(--line-aperture) / 2 - 3px);
-    width: 104px;
-    height: 31px;
-    transform: translate(-50%, 10px) scale(0.92);
-    background:
-      repeating-conic-gradient(
-        from 250deg at 50% 118%,
-        transparent 0deg 8.5deg,
-        rgba(192, 194, 190, 0.48) 8.8deg 9.6deg
-      ),
-      radial-gradient(ellipse at 50% 114%, #080a0b 0 42%, #343a3b 44% 51%, transparent 53%);
-    opacity: 0;
-  }
-
-  .typebar-striking .typewriter-typebasket {
-    transform: translate(-50%, 10px) scale(0.92);
-    opacity: 0.18;
-  }
-
-  .typewriter-paper-wrap {
-    top: calc(var(--line-aperture) / 2 + 3px);
-    right: 43px;
-    left: 43px;
-    height: 23px;
-    transform: translateY(var(--typewriter-paper-tension));
-    border-radius: 0 0 50% 50% / 0 0 13px 13px;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(91, 98, 94, 0.045) 50%, rgba(24, 28, 26, 0.2)),
-      var(--typewriter-sheet);
-    box-shadow:
-      inset 0 -7px 8px rgba(35, 32, 27, 0.17),
-      0 1px 2px rgba(0, 0, 0, 0.24);
-    transition: transform 72ms cubic-bezier(0.2, 0.72, 0.28, 1);
-  }
-
-  .typewriter-platen {
-    top: calc(var(--line-aperture) / 2 + 6px);
-    right: 25px;
-    left: 25px;
-    height: 20px;
-    border-color: #020303;
-    background:
-      repeating-linear-gradient(
-        0deg,
-        rgba(255, 255, 255, 0.026) 0 1px,
-        transparent 1px 5px
-      ),
-      linear-gradient(180deg, #323638 0, #171a1b 25%, #070809 62%, #202425 100%);
-    background-position:
-      0 calc(0px - var(--typewriter-platen-surface)),
-      0 0;
-    background-size: auto 10px, auto;
-    box-shadow:
-      inset 0 2px 2px rgba(255, 255, 255, 0.1),
-      inset 0 -3px 4px rgba(0, 0, 0, 0.94),
-      0 2px 5px rgba(0, 0, 0, 0.44);
-  }
-
-  .typewriter-platen::after {
-    position: absolute;
-    top: 3px;
-    right: 14px;
-    left: 14px;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(231, 232, 227, 0.12), transparent);
-    content: "";
-  }
-
-  .typewriter-paper-scale {
-    top: calc(var(--line-aperture) / 2);
-    right: 43px;
-    left: 43px;
-    height: 7px;
-    border-color: rgba(219, 220, 216, 0.62);
-    background: repeating-linear-gradient(
-      90deg,
-      rgba(218, 219, 214, 0.5) 0 1px,
-      transparent 1px 12px,
-      rgba(218, 219, 214, 0.3) 12px 13px,
-      transparent 13px 24px
-    );
-    opacity: 0.46;
-  }
-
-  .typewriter-paper-bail {
-    top: calc(var(--line-aperture) / -2 - 12px);
-    right: 42px;
-    left: 42px;
-    height: 2px;
-    background: linear-gradient(180deg, #eeeeea, #9a9e9b 58%, #4f5555);
-    box-shadow:
-      0 1px 2px rgba(0, 0, 0, 0.36),
-      inset 0 1px rgba(255, 255, 255, 0.7);
-  }
-
-  .typewriter-bail-roller {
-    top: -3px;
-    width: 27px;
-    height: 8px;
-    border-color: #050607;
-    background:
-      repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px),
-      linear-gradient(180deg, #303435, #090b0c 58%, #1d2021);
-    background-position:
-      0 calc(0px - var(--typewriter-platen-surface)),
-      0 0;
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.1),
-      0 1px 2px rgba(0, 0, 0, 0.36);
-  }
-
-  .typewriter-carriage-knob {
-    top: calc(var(--line-aperture) / 2 + 3px);
-    width: 30px;
-    height: 30px;
-    border-color: #040506;
-    border-radius: 50%;
-    background: radial-gradient(circle at 38% 30%, #34393a, #151819 46%, #080a0b 78%);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.12),
-      inset 0 -2px 3px rgba(0, 0, 0, 0.72),
-      0 2px 6px rgba(0, 0, 0, 0.5);
-  }
-
-  .typewriter-carriage-knob::before { display: none; }
-
-  .typewriter-carriage-knob.is-left { left: -13px; }
-  .typewriter-carriage-knob.is-right { right: -13px; }
-
-  .typewriter-carriage-knob > i {
-    position: absolute;
-    inset: 4px;
-    transform: rotate(var(--typewriter-platen-angle));
-    border: 1px solid #666c6b;
-    border-radius: 50%;
-    background:
-      radial-gradient(circle, #232728 0 31%, transparent 34%),
-      conic-gradient(from -2deg, #d9d9d4 0 4deg, #363b3c 4deg 356deg, #d9d9d4 356deg);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.1),
-      0 0 0 1px rgba(0, 0, 0, 0.35);
-  }
-
-  .typewriter-index-wheel {
-    position: absolute;
-    z-index: 5;
-    top: calc(var(--line-aperture) / 2 + 9px);
-    left: 20px;
-    width: 16px;
-    height: 16px;
-    transform: rotate(var(--typewriter-platen-angle));
-    border: 1px solid #585e5d;
-    border-radius: 50%;
-    background: repeating-conic-gradient(#8c918e 0 3deg, #252a2b 3deg 15deg);
-    box-shadow:
-      inset 0 0 0 4px #111415,
-      0 1px 2px rgba(0, 0, 0, 0.5);
-    opacity: 0.22;
-    transition: opacity 72ms ease;
-  }
-
-  .typewriter-detent-pawl {
-    position: absolute;
-    z-index: 7;
-    top: calc(var(--line-aperture) / 2 + 3px);
-    left: 29px;
-    width: 20px;
-    height: 3px;
-    transform-origin: left center;
-    border-radius: 999px;
-    background: linear-gradient(180deg, #deded9, #777d7b 64%, #393e3f);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
-    animation: typewriter-detent-release 88ms cubic-bezier(0.2, 0.76, 0.22, 1) both;
-  }
-
-  .platen-rolling .typewriter-index-wheel { opacity: 0.58; }
-
-  .platen-detenting .typewriter-index-wheel {
-    opacity: 0.88;
-    animation: typewriter-index-seat 88ms cubic-bezier(0.18, 0.8, 0.24, 1) both;
-  }
-
-  .typewriter-return-lever {
-    height: 3px;
-    border: 0;
-    background: linear-gradient(180deg, #e2e2dd, #989d9a 48%, #555b5a);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.72),
-      0 2px 3px rgba(0, 0, 0, 0.36);
-  }
-
-  .typewriter-return-lever i {
-    top: -4px;
-    left: -2px;
-    width: 29px;
-    height: 10px;
-    border-color: #050607;
-    border-radius: 8px 3px 3px 8px;
-    background: linear-gradient(180deg, #292d2f, #111415 62%, #090b0c);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.1),
-      0 1px 2px rgba(0, 0, 0, 0.44);
-  }
-
-  .typewriter-strike-rail::before {
-    right: 44%;
-    bottom: -8px;
-    left: 44%;
-    height: 8px;
-    background: radial-gradient(ellipse at 50% 0, rgba(0, 0, 0, 0.28), transparent 72%);
-  }
-
-  .typewriter-strike-rail::after { display: none; }
-
-  .typewriter-ribbon-band {
-    right: 24%;
-    bottom: -9px;
-    left: 24%;
-    height: 3px;
-    border-color: #020303;
-    background: linear-gradient(180deg, #202324, #070809 68%);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.46);
-    opacity: 0.9;
-  }
-
-  .typewriter-segment {
-    bottom: -25px;
-    width: 74px;
-    height: 16px;
-    border-color: rgba(222, 223, 218, 0.52);
-    background: linear-gradient(180deg, #858b88 0, #444a4a 26%, #171b1c 72%, #090b0c 100%);
-    opacity: 0.78;
-  }
-
-  .typewriter-type-guide {
-    bottom: -29px;
-    width: 24px;
-    height: 28px;
-    clip-path: none;
-    border: 0;
-    border-bottom: 4px solid #696f6d;
-    border-radius: 0 0 4px 4px;
-    background: transparent;
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
-    perspective: 90px;
-    perspective-origin: 50% 100%;
-    overflow: visible;
-  }
-
-  .typewriter-type-guide::before {
-    position: absolute;
-    top: 1px;
-    bottom: 0;
-    left: 2px;
-    width: 4px;
-    clip-path: polygon(38% 0, 100% 0, 100% 100%, 0 100%, 0 22%);
-    background: linear-gradient(90deg, #777d7b, #deded9 56%, #767c7a);
-    content: "";
-  }
-
-  .typewriter-type-guide::after {
-    position: absolute;
-    top: 1px;
-    right: 2px;
-    bottom: 0;
-    width: 4px;
-    clip-path: polygon(0 0, 62% 0, 100% 22%, 100% 100%, 0 100%);
-    background: linear-gradient(90deg, #6b716f, #d1d1cc 48%, #686e6c);
-    content: "";
-  }
-
-  .line-feeding .typewriter-platen,
-  .line-feeding .typewriter-paper-wrap,
-  .line-feeding .typewriter-carriage-knob::before {
-    animation: none;
-  }
-
-  @keyframes typewriter-detent-release {
-    0% { transform: rotate(-7deg) translateY(2px); opacity: 0.48; }
-    42% { transform: rotate(8deg) translateY(-1px); opacity: 1; }
-    72% { transform: rotate(-2deg); opacity: 0.9; }
-    100% { transform: rotate(0); opacity: 0; }
-  }
-
-  @keyframes typewriter-index-seat {
-    0% { filter: brightness(0.86); }
-    48% { filter: brightness(1.2); }
-    100% { filter: brightness(1); }
-  }
-
-  /* A cropped precision rail supports the moving carriage without exposing a body shell. */
-  .typewriter-machine {
     --typewriter-frame-width: min(940px, calc(100% - 18px));
-    --typewriter-carriage-width: calc(var(--typewriter-paper-width) + 104px);
+    --typewriter-platen-width: calc(var(--typewriter-paper-width) + 104px);
     --typewriter-frame-top: calc(
       var(--typewriter-strike-y) + var(--line-aperture) / 2 + 13px
     );
-    --typewriter-platen-center: calc(var(--line-aperture) / 2 + 16px);
-    --typewriter-frame-surface: var(--typewriter-chassis-surface);
-    --typewriter-frame-facet: var(--typewriter-chassis-deck-overlay);
-    --typewriter-frame-face: var(--typewriter-chassis-front-overlay);
-    --typewriter-carriage-surface: var(--typewriter-endcap-surface);
-    --typewriter-bearing-surface: var(--typewriter-race-surface);
-    --typewriter-channel-surface: var(--typewriter-support-surface);
+    position: absolute;
+    z-index: 6;
+    inset: 0 var(--typewriter-scrollbar-gutter) 0 0;
+    overflow: hidden;
+    isolation: isolate;
+    pointer-events: none;
   }
 
   .typewriter-frame-rear,
@@ -3289,7 +2885,7 @@
     background: linear-gradient(
       180deg,
       color-mix(in srgb, var(--typewriter-body-deep) 78%, #000) 0 24%,
-      var(--typewriter-frame-surface) 25% 100%
+      var(--typewriter-chassis-surface) 25% 100%
     );
     box-shadow:
       inset 0 1px var(--typewriter-body-inset-highlight),
@@ -3324,104 +2920,11 @@
     left: 4.6%;
     height: 6px;
     border-radius: 2px;
-    background: var(--typewriter-bearing-surface);
+    background: var(--typewriter-race-surface);
     box-shadow:
       inset 0 1px rgba(255, 255, 255, 0.36),
       inset 0 -2px 2px rgba(0, 0, 0, 0.8),
       0 3px 5px rgba(0, 0, 0, 0.54);
-  }
-
-  .typewriter-carriage-layer {
-    position: absolute;
-    top: var(--typewriter-strike-y);
-    left: calc(50% + var(--carriage-origin));
-    width: var(--typewriter-carriage-width);
-    height: 1px;
-    transform: translate3d(calc(-50% + var(--carriage-shift)), 0, 0);
-    transition: transform var(--carriage-track-duration) cubic-bezier(0.2, 0.72, 0.28, 1);
-    will-change: transform;
-  }
-
-  .typewriter-carriage-underlay { z-index: 3; }
-  .typewriter-carriage-upper { z-index: 5; }
-
-  .writing-typewriter.carriage-stepping .typewriter-carriage-layer {
-    transition: transform var(--carriage-step-duration) cubic-bezier(0.18, 0.78, 0.24, 1);
-  }
-
-  .writing-typewriter.carriage-returning .typewriter-carriage-layer {
-    transition-duration: var(--carriage-return-duration);
-    transition-timing-function: cubic-bezier(0.16, 0.92, 0.26, 1.08);
-  }
-
-  .writing-typewriter.pointer-selecting .paper-window,
-  .writing-typewriter.pointer-selecting .typewriter-carriage-layer {
-    transition: none;
-  }
-
-  .typewriter-moving-channel {
-    position: absolute;
-    top: calc(var(--line-aperture) / 2 + 17px);
-    right: 17px;
-    left: 17px;
-    height: 9px;
-    clip-path: polygon(0 18%, 1.2% 0, 98.8% 0, 100% 18%, 99.2% 100%, 0.8% 100%);
-    background: var(--typewriter-channel-surface);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.24),
-      inset 0 -4px 5px rgba(0, 0, 0, 0.68),
-      0 4px 7px var(--typewriter-contact-shadow);
-  }
-
-  .typewriter-moving-channel::before {
-    position: absolute;
-    top: 2px;
-    right: 12px;
-    left: 12px;
-    height: 2px;
-    background: linear-gradient(
-      90deg,
-      transparent,
-      rgba(232, 233, 228, 0.42) 8%,
-      rgba(232, 233, 228, 0.18) 50%,
-      rgba(232, 233, 228, 0.42) 92%,
-      transparent
-    );
-    content: "";
-  }
-
-  .typewriter-bearing-shoe {
-    position: absolute;
-    z-index: 2;
-    top: calc(var(--line-aperture) / 2 + 19px);
-    width: 76px;
-    height: 11px;
-    clip-path: polygon(7% 0, 93% 0, 100% 38%, 86% 100%, 14% 100%, 0 38%);
-    background: linear-gradient(
-      180deg,
-      #747a78 0,
-      #343a3a 30%,
-      #111516 72%,
-      #060809 100%
-    );
-    filter: drop-shadow(0 3px 3px var(--typewriter-contact-shadow));
-  }
-
-  .typewriter-bearing-shoe.is-left { left: 18%; }
-  .typewriter-bearing-shoe.is-right { right: 18%; }
-
-  .typewriter-bearing-shoe > i {
-    position: absolute;
-    top: 2px;
-    right: 8px;
-    left: 8px;
-    height: 5px;
-    border-radius: 999px;
-    background: var(--typewriter-bearing-surface);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.42),
-      inset 0 -2px 2px rgba(0, 0, 0, 0.76),
-      0 2px 3px rgba(0, 0, 0, 0.62);
   }
 
   .typewriter-frame-front {
@@ -3430,8 +2933,8 @@
     height: 7px;
     clip-path: polygon(0.8% 0, 99.2% 0, 100% 100%, 0 100%);
     background:
-      var(--typewriter-frame-face),
-      var(--typewriter-frame-surface);
+      var(--typewriter-chassis-front-overlay),
+      var(--typewriter-chassis-surface);
     box-shadow:
       inset 0 2px 3px -2px var(--typewriter-body-inset-highlight),
       inset 0 -4px 5px -3px var(--typewriter-body-inset-shadow);
@@ -3443,7 +2946,7 @@
     right: 1.5%;
     left: 1.5%;
     height: 2px;
-    background: var(--typewriter-frame-facet);
+    background: var(--typewriter-chassis-deck-overlay);
     box-shadow:
       inset 0 1px var(--typewriter-body-inset-highlight),
       inset 0 -2px 3px var(--typewriter-depth-edge);
@@ -3475,30 +2978,40 @@
     opacity: 0.54;
   }
 
-  .typewriter-carriage-side-plate {
+  .typewriter-platen-assembly {
+    position: absolute;
+    z-index: 5;
+    top: var(--typewriter-strike-y);
+    left: calc(50% + var(--paper-machine-origin));
+    width: var(--typewriter-platen-width);
+    height: 1px;
+    transform: translateX(-50%);
+  }
+
+  .typewriter-platen-endcap {
     position: absolute;
     z-index: 6;
     top: calc(var(--line-aperture) / 2 + 1px);
     width: 44px;
     height: 48px;
-    background: var(--typewriter-carriage-surface);
+    background: var(--typewriter-endcap-surface);
     box-shadow:
       inset 0 1px var(--typewriter-endcap-inset-highlight),
       inset 0 -8px 10px -9px var(--typewriter-endcap-inset-shadow);
     filter: drop-shadow(0 4px 5px var(--typewriter-endcap-cast-shadow));
   }
 
-  .typewriter-carriage-side-plate.is-left {
+  .typewriter-platen-endcap.is-left {
     left: 0;
     clip-path: polygon(0 14%, 20% 0, 100% 0, 100% 72%, 78% 100%, 18% 100%, 0 82%);
   }
 
-  .typewriter-carriage-side-plate.is-right {
+  .typewriter-platen-endcap.is-right {
     right: 0;
     clip-path: polygon(0 0, 80% 0, 100% 14%, 100% 82%, 82% 100%, 22% 100%, 0 72%);
   }
 
-  .typewriter-carriage-side-plate::before {
+  .typewriter-platen-endcap::before {
     position: absolute;
     top: 1px;
     right: 5px;
@@ -3509,19 +3022,19 @@
     opacity: 0.72;
   }
 
-  .typewriter-carriage-side-plate::after {
+  .typewriter-platen-endcap::after {
     position: absolute;
     bottom: -1px;
     width: 18px;
     height: 14px;
     clip-path: polygon(14% 0, 86% 0, 100% 100%, 0 100%);
-    background: var(--typewriter-channel-surface);
+    background: var(--typewriter-support-surface);
     box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.48);
     content: "";
   }
 
-  .typewriter-carriage-side-plate.is-left::after { right: 4px; }
-  .typewriter-carriage-side-plate.is-right::after { left: 4px; }
+  .typewriter-platen-endcap.is-left::after { right: 4px; }
+  .typewriter-platen-endcap.is-right::after { left: 4px; }
 
   .typewriter-platen-bearing {
     position: absolute;
@@ -3538,8 +3051,8 @@
       0 2px 3px rgba(0, 0, 0, 0.58);
   }
 
-  .typewriter-carriage-side-plate.is-left .typewriter-platen-bearing { right: 10px; }
-  .typewriter-carriage-side-plate.is-right .typewriter-platen-bearing { left: 10px; }
+  .typewriter-platen-endcap.is-left .typewriter-platen-bearing { right: 10px; }
+  .typewriter-platen-endcap.is-right .typewriter-platen-bearing { left: 10px; }
 
   .typewriter-bail-pivot {
     position: absolute;
@@ -3555,17 +3068,18 @@
       0 2px 2px rgba(0, 0, 0, 0.46);
   }
 
-  .typewriter-carriage-side-plate.is-left .typewriter-bail-pivot { left: 5px; }
-  .typewriter-carriage-side-plate.is-right .typewriter-bail-pivot { right: 5px; }
+  .typewriter-platen-endcap.is-left .typewriter-bail-pivot { left: 5px; }
+  .typewriter-platen-endcap.is-right .typewriter-bail-pivot { right: 5px; }
 
   .typewriter-paper-wrap {
+    position: absolute;
     z-index: 5;
     top: calc(var(--line-aperture) / 2 + 3px);
-    right: auto;
     left: 50%;
     width: var(--typewriter-paper-width);
     height: 24px;
     transform: translate3d(-50%, var(--typewriter-paper-tension), 0);
+    transform-origin: top center;
     border-radius: 0 0 50% 50% / 0 0 14px 14px;
     background:
       linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(91, 98, 94, 0.045) 50%, rgba(24, 28, 26, 0.2)),
@@ -3577,12 +3091,14 @@
   }
 
   .typewriter-platen {
+    position: absolute;
     z-index: 4;
     top: calc(var(--line-aperture) / 2 + 5px);
     right: 24px;
     left: 24px;
     height: 22px;
     border: 1px solid #020303;
+    border-radius: 999px;
     background:
       repeating-linear-gradient(
         0deg,
@@ -3616,12 +3132,13 @@
   .typewriter-platen::after { right: 5px; }
 
   .typewriter-paper-scale {
+    position: absolute;
     z-index: 7;
     top: calc(var(--line-aperture) / 2 - 1px);
     right: 52px;
     left: 52px;
     height: 8px;
-    border-color: rgba(219, 220, 216, 0.58);
+    border-top: 1px solid rgba(219, 220, 216, 0.58);
     background: repeating-linear-gradient(
       90deg,
       rgba(218, 219, 214, 0.5) 0 1px,
@@ -3670,12 +3187,12 @@
   .typewriter-bail-arm.is-right > i { left: -1px; }
 
   .typewriter-paper-bail {
+    position: absolute;
     z-index: 9;
     top: calc(var(--line-aperture) / -2 - 12px);
     right: 52px;
     left: 52px;
     height: 3px;
-    border: 0;
     border-radius: 999px;
     background: linear-gradient(180deg, #f0f1ec 0, #9da29f 48%, #4b5150 76%, #24292a);
     box-shadow:
@@ -3699,10 +3216,13 @@
   .typewriter-paper-bail::after { right: -3px; }
 
   .typewriter-bail-roller {
+    position: absolute;
     top: -3px;
     width: 28px;
     height: 9px;
-    border-color: #040506;
+    transform: translateX(-50%);
+    border: 1px solid #040506;
+    border-radius: 999px;
     background:
       repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px),
       linear-gradient(180deg, #343839, #090b0c 58%, #1d2122);
@@ -3715,12 +3235,18 @@
     transition: background-position 56ms linear;
   }
 
-  .typewriter-carriage-knob {
+  .typewriter-bail-roller.is-first { left: 12%; }
+  .typewriter-bail-roller.is-second { left: 37%; }
+  .typewriter-bail-roller.is-third { left: 63%; }
+  .typewriter-bail-roller.is-fourth { left: 88%; }
+
+  .typewriter-platen-knob {
+    position: absolute;
     z-index: 7;
     top: calc(var(--line-aperture) / 2 + 1px);
     width: 30px;
     height: 30px;
-    border-color: #040506;
+    border: 1px solid #040506;
     border-radius: 50%;
     background: radial-gradient(circle at 38% 30%, #3b4041, #171a1b 46%, #07090a 78%);
     box-shadow:
@@ -3729,10 +3255,10 @@
       0 3px 6px rgba(0, 0, 0, 0.56);
   }
 
-  .typewriter-carriage-knob.is-left { left: -15px; }
-  .typewriter-carriage-knob.is-right { right: -15px; }
+  .typewriter-platen-knob.is-left { left: -15px; }
+  .typewriter-platen-knob.is-right { right: -15px; }
 
-  .typewriter-carriage-knob > i {
+  .typewriter-platen-knob > i {
     position: absolute;
     inset: 4px;
     transform: rotate(var(--typewriter-platen-angle));
@@ -3748,155 +3274,352 @@
   }
 
   .typewriter-index-wheel {
+    position: absolute;
     z-index: 8;
     top: calc(var(--line-aperture) / 2 + 8px);
     left: 17px;
     width: 16px;
     height: 16px;
+    transform: rotate(var(--typewriter-platen-angle));
+    border: 1px solid #585e5d;
+    border-radius: 50%;
+    background: repeating-conic-gradient(#8c918e 0 3deg, #252a2b 3deg 15deg);
+    box-shadow:
+      inset 0 0 0 4px #111415,
+      0 1px 2px rgba(0, 0, 0, 0.5);
+    opacity: 0.22;
+    transition: opacity 72ms ease, transform 56ms linear;
   }
 
   .typewriter-detent-pawl {
+    position: absolute;
     z-index: 10;
     top: calc(var(--line-aperture) / 2 + 2px);
     left: 27px;
+    width: 20px;
+    height: 3px;
+    transform-origin: left center;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #deded9, #777d7b 64%, #393e3f);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    animation: typewriter-detent-release 88ms cubic-bezier(0.2, 0.76, 0.22, 1) both;
   }
 
-  .typewriter-return-lever {
-    z-index: 4;
-    top: calc(var(--line-aperture) / 2 + 5px);
-    right: calc(100% - 30px);
-    left: auto;
-    width: 126px;
-    height: 4px;
-    transform: rotate(8deg);
-    transform-origin: right center;
-    border: 0;
-    background: linear-gradient(180deg, #e4e5e0, #969c99 48%, #4b5150);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.72),
-      0 3px 4px rgba(0, 0, 0, 0.4);
+  .platen-rolling .typewriter-index-wheel { opacity: 0.58; }
+
+  .platen-detenting .typewriter-index-wheel {
+    opacity: 0.88;
+    animation: typewriter-index-seat 88ms cubic-bezier(0.18, 0.8, 0.24, 1) both;
   }
 
-  .typewriter-return-lever i {
-    top: -4px;
-    left: -2px;
-    width: 30px;
-    height: 11px;
-    border-color: #050607;
-    border-radius: 8px 3px 3px 8px;
-    background: linear-gradient(180deg, #313536, #111415 62%, #080a0b);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.11),
-      0 2px 3px rgba(0, 0, 0, 0.48);
-  }
-
-  .typewriter-typebasket {
-    z-index: 4;
-    top: calc(var(--typewriter-strike-y) + var(--line-aperture) / 2 - 2px);
-    width: 108px;
-    height: 34px;
-    transform: translate(-50%, 11px) scale(0.92);
-    background:
-      repeating-conic-gradient(
-        from 250deg at 50% 118%,
-        transparent 0deg 8.5deg,
-        rgba(192, 194, 190, 0.5) 8.8deg 9.6deg
-      ),
-      radial-gradient(ellipse at 50% 114%, #080a0b 0 42%, #3a4040 44% 51%, transparent 53%);
-  }
-
-  .typebar-striking .typewriter-typebasket {
-    transform: translate(-50%, 11px) scale(0.92);
-    opacity: 0.18;
-  }
-
-  .typewriter-segment {
-    bottom: -31px;
-    width: 80px;
-    height: 20px;
-    clip-path: polygon(8% 100%, 0 35%, 12% 5%, 34% 0, 66% 0, 88% 5%, 100% 35%, 92% 100%);
-    background: linear-gradient(180deg, #888e8b 0, #454b4a 24%, #171b1c 70%, #080a0b 100%);
-    filter: drop-shadow(0 3px 3px rgba(0, 0, 0, 0.62));
-    opacity: 0.84;
-  }
-
-  .typewriter-ribbon-band {
-    right: auto;
-    bottom: -10px;
-    left: 50%;
-    width: 196px;
-    height: 4px;
-    transform: translateX(-50%);
-    border: 0;
-    border-radius: 1px;
-    background: linear-gradient(180deg, #252829, #050607 72%);
-    box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.06),
-      0 2px 3px rgba(0, 0, 0, 0.52);
-    opacity: 0.94;
-  }
-
-  .typewriter-ribbon-band::before,
-  .typewriter-ribbon-band::after {
+  .typewriter-carrier-track {
     position: absolute;
-    top: -3px;
-    width: 13px;
-    height: 10px;
-    border: 1px solid #080a0b;
-    border-radius: 50%;
-    background: radial-gradient(circle at 42% 35%, #666c6a, #171b1c 48%, #050708 74%);
+    z-index: 6;
+    top: calc(var(--typewriter-strike-y) + var(--line-aperture) / 2 + 18px);
+    left: 50%;
+    width: min(880px, calc(100% - 58px));
+    height: 5px;
+    transform: translateX(-50%);
+    border-radius: 2px;
+    background: linear-gradient(180deg, #8f9491, #333938 42%, #090b0c 78%);
     box-shadow:
-      inset 0 1px rgba(255, 255, 255, 0.12),
-      0 2px 3px rgba(0, 0, 0, 0.52);
+      inset 0 1px rgba(255, 255, 255, 0.3),
+      0 3px 5px rgba(0, 0, 0, 0.62);
+  }
+
+  .typewriter-print-carrier {
+    position: absolute;
+    z-index: 12;
+    top: var(--typewriter-strike-y);
+    left: calc(50% + var(--paper-machine-origin));
+    width: 46px;
+    height: calc(var(--line-aperture) + 50px);
+    transform: translate3d(calc(-50% + var(--print-carrier-offset)), 0, 0);
+    transition: transform var(--print-carrier-track-duration) cubic-bezier(0.2, 0.72, 0.28, 1);
+    will-change: transform;
+  }
+
+  .print-carrier-stepping .typewriter-print-carrier {
+    transition-duration: var(--print-carrier-step-duration);
+    transition-timing-function: cubic-bezier(0.18, 0.78, 0.24, 1);
+  }
+
+  .print-carrier-returning .typewriter-print-carrier {
+    transition-duration: var(--print-carrier-return-duration);
+    transition-timing-function: cubic-bezier(0.16, 0.92, 0.26, 1.04);
+  }
+
+  .typewriter-carrier-bearing {
+    position: absolute;
+    z-index: 1;
+    top: calc(var(--line-aperture) / 2 + 15px);
+    left: 50%;
+    width: 38px;
+    height: 11px;
+    transform: translateX(-50%);
+    clip-path: polygon(8% 0, 92% 0, 100% 34%, 86% 100%, 14% 100%, 0 34%);
+    background: linear-gradient(180deg, #7c817e, #303635 34%, #090c0c 80%);
+    filter: drop-shadow(0 2px 2px var(--typewriter-contact-shadow));
+  }
+
+  .typewriter-carrier-bearing::after {
+    position: absolute;
+    top: 2px;
+    right: 7px;
+    left: 7px;
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #b5b8b4, #545a58 54%, #151919);
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.34);
     content: "";
   }
 
-  .typewriter-ribbon-band::before { left: -5px; }
-  .typewriter-ribbon-band::after { right: -5px; }
-
-  .typewriter-type-guide {
-    bottom: -29px;
-    width: 24px;
-    height: 28px;
-    border-bottom: 4px solid #555b59;
-    border-radius: 0 0 4px 4px;
-    filter: drop-shadow(0 3px 2px rgba(0, 0, 0, 0.66));
-    perspective: 90px;
-    perspective-origin: 50% 100%;
-    overflow: visible;
-  }
-
-  .typewriter-type-guide::before,
-  .typewriter-type-guide::after {
-    top: 1px;
-    bottom: 1px;
-    width: 4px;
-  }
-
-  .typewriter-type-guide::before {
-    left: 2px;
-    background: linear-gradient(90deg, #626866, #e1e2dd 58%, #707674);
-  }
-
-  .typewriter-type-guide::after {
-    right: 2px;
-    background: linear-gradient(90deg, #666c6a, #d4d5d0 48%, #5e6462);
-  }
-
-  .typewriter-strike-caret {
+  .typewriter-carrier-body {
     position: absolute;
-    z-index: 5;
-    top: 50%;
+    z-index: 3;
+    top: calc(var(--line-aperture) / 2 + 22px);
     left: 50%;
-    width: 1px;
-    height: var(--strike-caret-height);
-    transform: translate(-50%, -50%);
-    border-radius: 1px;
-    background: #555b5a;
-    box-shadow: 0 0 0 1px rgba(232, 232, 227, 0.12);
-    pointer-events: none;
+    width: 44px;
+    height: 19px;
+    transform: translateX(-50%);
+    clip-path: polygon(10% 0, 90% 0, 100% 42%, 88% 100%, 12% 100%, 0 42%);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 27%),
+      linear-gradient(180deg, var(--typewriter-body-light), var(--typewriter-body) 44%, var(--typewriter-body-deep));
+    box-shadow:
+      inset 0 1px var(--typewriter-body-inset-highlight),
+      0 4px 6px rgba(0, 0, 0, 0.56);
   }
 
+  .typewriter-ribbon-gate {
+    position: absolute;
+    z-index: 7;
+    top: calc(
+      var(--type-strike-top-offset) + var(--type-strike-height) + 3.5px
+    );
+    left: 50%;
+    box-sizing: border-box;
+    width: calc(var(--type-strike-width) + 8px);
+    height: 6px;
+    transform: translateX(-50%);
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.54));
+  }
+
+  .typewriter-ribbon-gate::before,
+  .typewriter-ribbon-gate::after {
+    position: absolute;
+    top: 0;
+    width: 1px;
+    height: 6px;
+    border-radius: 0 0 1px 1px;
+    background: linear-gradient(180deg, #777d78, #252927);
+    content: "";
+  }
+
+  .typewriter-ribbon-gate::before { left: 0; }
+  .typewriter-ribbon-gate::after { right: 0; }
+
+  .typewriter-element-yoke {
+    position: absolute;
+    z-index: 6;
+    top: calc(
+      var(--type-strike-top-offset) + var(--type-strike-height) + 3px
+    );
+    left: 50%;
+    width: var(--type-element-width);
+    height: calc(var(--type-element-height) + 18px);
+    transform: translateX(-50%);
+    transform-origin: 50% 100%;
+    perspective: 110px;
+  }
+
+  .typewriter-element-yoke::after {
+    position: absolute;
+    z-index: -1;
+    top: calc(var(--type-element-height) - 3px);
+    left: 50%;
+    width: 3px;
+    height: max(
+      4px,
+      calc(
+        var(--line-aperture) / 2 + 17px - var(--type-strike-top-offset) -
+          var(--type-strike-height) - var(--type-element-height)
+      )
+    );
+    transform: translateX(-50%);
+    border-radius: 1px 1px 3px 3px;
+    background: linear-gradient(90deg, #242927, #747b76 48%, #292f2c);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.52);
+    content: "";
+  }
+
+  .typewriter-print-element {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    display: block;
+    width: var(--type-element-width);
+    height: var(--type-element-height);
+    transform: translateX(-50%);
+    transition: filter 60ms ease;
+  }
+
+  .typewriter-print-element::after {
+    position: absolute;
+    z-index: 3;
+    right: -2px;
+    bottom: -2px;
+    left: -2px;
+    height: 46%;
+    clip-path: polygon(0 30%, 100% 30%, 84% 100%, 16% 100%);
+    border-top: 1px solid rgba(188, 193, 184, 0.2);
+    background: linear-gradient(180deg, #303633, #111615 62%, #080b0a);
+    box-shadow: 0 2px 2px rgba(0, 0, 0, 0.46);
+    content: "";
+  }
+
+  .typewriter-element-shell {
+    position: absolute;
+    z-index: 1;
+    box-sizing: border-box;
+    display: block;
+    width: 100%;
+    height: 100%;
+    transform: rotateY(var(--printing-element-rotate)) rotateX(var(--printing-element-tilt));
+    transform-style: preserve-3d;
+    border: 1px solid var(--typewriter-element-border);
+    border-radius: 48% 48% 46% 46% / 44% 44% 52% 52%;
+    background:
+      radial-gradient(ellipse at 50% 20%, var(--typewriter-element-highlight), transparent 40%),
+      linear-gradient(
+        180deg,
+        var(--typewriter-element-top) 0,
+        var(--typewriter-element-mid) 58%,
+        var(--typewriter-element-deep) 100%
+      );
+    box-shadow:
+      inset 0 1px var(--typewriter-element-highlight),
+      inset 0 -3px 4px rgba(0, 0, 0, 0.42),
+      0 2px 2px rgba(0, 0, 0, 0.5);
+    transition:
+      transform var(--print-carrier-step-duration) cubic-bezier(0.18, 0.78, 0.24, 1),
+      filter 60ms ease;
+  }
+
+  .typewriter-strike-face {
+    position: absolute;
+    z-index: 4;
+    top: calc((var(--type-strike-height) + 0.5px) * -1);
+    left: 50%;
+    box-sizing: border-box;
+    width: var(--type-strike-width);
+    height: var(--type-strike-height);
+    transform: translateX(-50%);
+    border: 1px solid #050706;
+    border-radius: 999px;
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0.05), transparent 34% 66%, rgba(255, 255, 255, 0.05)),
+      linear-gradient(180deg, #292e2b, #0c0f0e 58%, #030504);
+    box-shadow:
+      0 0 0 1px rgba(213, 215, 205, 0.24),
+      0 1px 2px rgba(0, 0, 0, 0.66);
+    font-style: normal;
+    transform-origin: 50% 100%;
+  }
+
+  .typewriter-strike-face::after {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    width: 3px;
+    height: 4px;
+    transform: translateX(-50%);
+    border-radius: 0 0 1px 1px;
+    background: linear-gradient(
+      90deg,
+      var(--typewriter-element-deep),
+      var(--typewriter-element-top) 48%,
+      var(--typewriter-element-deep)
+    );
+    content: "";
+  }
+
+  .typewriter-element-yoke.is-striking {
+    animation: selectric-element-strike var(--typewriter-strike-duration) ease-in-out both;
+  }
+
+  .printing-element-striking .typewriter-ribbon-gate {
+    animation: selectric-ribbon-lift var(--typewriter-strike-duration) linear both;
+  }
+
+  .typewriter-element-yoke.is-striking .typewriter-strike-face {
+    animation: typewriter-strike-face-press var(--typewriter-strike-duration) linear both;
+  }
+
+  .margin-warning .typewriter-carrier-body {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.11), transparent 27%),
+      linear-gradient(180deg, #6b573d, #443725 46%, #211b13);
+  }
+
+  .margin-warning .typewriter-print-element {
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--typewriter-warning) 62%, transparent));
+  }
+
+  @keyframes selectric-element-strike {
+    0% {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+    12% {
+      transform: translateX(-50%) translateY(1.5px);
+      opacity: 1;
+    }
+    40%, 55% {
+      transform: translateX(-50%) translateY(-6px);
+      opacity: 1;
+    }
+    70% { transform: translateX(-50%) translateY(1.2px); }
+    86% { transform: translateX(-50%) translateY(-0.6px); }
+    100% {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes selectric-ribbon-lift {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    38%, 56% { transform: translateX(-50%) translateY(-4px); }
+    72% { transform: translateX(-50%) translateY(0.75px); }
+  }
+
+  @keyframes typewriter-strike-face-press {
+    0%, 100% {
+      transform: translateX(-50%) scale(1);
+      filter: brightness(1);
+    }
+    40%, 55% {
+      transform: translateX(-50%) scaleX(1.08) scaleY(0.72);
+      filter: brightness(0.72);
+    }
+    70% {
+      transform: translateX(-50%) scaleX(0.96) scaleY(1.08);
+      filter: brightness(1.12);
+    }
+  }
+
+  @keyframes typewriter-detent-release {
+    0% { transform: rotate(-7deg) translateY(2px); opacity: 0.48; }
+    42% { transform: rotate(8deg) translateY(-1px); opacity: 1; }
+    72% { transform: rotate(-2deg); opacity: 0.9; }
+    100% { transform: rotate(0); opacity: 0; }
+  }
+
+  @keyframes typewriter-index-seat {
+    0% { filter: brightness(0.86); }
+    48% { filter: brightness(1.2); }
+    100% { filter: brightness(1); }
+  }
   .literary-caret-mark,
   .literary-completion-mark,
   .literary-folio-trail {
@@ -3986,7 +3709,7 @@
     line-height: 1.85;
   }
 
-  .typewriter-strike-point-visible .paper-editor-mount :global(.ProseMirror) {
+  .writing-typewriter .paper-editor-mount :global(.ProseMirror) {
     caret-color: transparent;
   }
 
@@ -4463,10 +4186,8 @@
   }
 
   @media (max-width: 760px) {
-    .typewriter-strike-rail {
-      width: calc(100% - 18px);
-    }
     .typewriter-machine { --typewriter-frame-width: calc(100% - 14px); }
+    .typewriter-carrier-track { width: calc(100% - 34px); }
     .writing-flow .paper-viewport {
       padding-right: 20px;
       padding-bottom: var(--flow-bottom-runway);
@@ -4485,28 +4206,22 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .writing-typewriter .paper-window,
-    .typewriter-carriage-layer,
-    .typewriter-strike-rail,
-    .typewriter-typebasket,
-    .typewriter-type-guide,
-    .typewriter-live-typebar,
-    .typewriter-type-slug,
-    .typewriter-ribbon-vibrator,
+    .typewriter-print-carrier,
+    .typewriter-element-yoke,
+    .typewriter-print-element,
+    .typewriter-element-shell,
+    .typewriter-strike-face,
+    .typewriter-ribbon-gate,
     .typewriter-paper-wrap,
     .typewriter-platen,
     .typewriter-bail-roller,
-    .typewriter-carriage-knob > i,
+    .typewriter-platen-knob > i,
     .typewriter-index-wheel,
     .typewriter-detent-pawl,
-    .typewriter-return-lever,
     .writing-flow .paper-editor-mount :global(.ProseMirror > *) {
       transition-duration: 0.001ms !important;
       animation-duration: 0.001ms !important;
     }
-    .typewriter-live-typebar,
-    .typewriter-ribbon-vibrator { display: none !important; }
-    .typebar-striking .typewriter-typebasket { opacity: 0; }
     .writing-literary .paper-editor-mount :global(.is-settling-ink),
     .writing-typewriter .paper-editor-mount :global(.is-typewriter-imprint),
     .literary-completion-mark {
@@ -4515,27 +4230,20 @@
   }
 
   @media (forced-colors: active) {
-    .typewriter-strike-point-visible .paper-editor-mount :global(.ProseMirror) {
-      caret-color: CanvasText;
+    .writing-typewriter .paper-editor-mount :global(.ProseMirror) {
+      caret-color: CanvasText !important;
     }
-    .typewriter-strike-caret,
-    .typewriter-type-guide { display: none; }
+    .typewriter-print-carrier { display: none; }
     .typewriter-frame-rear,
     .typewriter-frame-front,
     .typewriter-rail-recess,
     .typewriter-fixed-guide-rail,
-    .typewriter-moving-channel,
-    .typewriter-moving-channel::before,
-    .typewriter-bearing-shoe,
-    .typewriter-bearing-shoe > i,
     .typewriter-front-bevel,
     .typewriter-typing-well,
     .typewriter-typing-well::after,
-    .typewriter-typebasket,
-    .typewriter-segment,
-    .typewriter-carriage-side-plate,
-    .typewriter-carriage-side-plate::before,
-    .typewriter-carriage-side-plate::after,
+    .typewriter-platen-endcap,
+    .typewriter-platen-endcap::before,
+    .typewriter-platen-endcap::after,
     .typewriter-platen-bearing,
     .typewriter-bail-pivot,
     .typewriter-paper-wrap,
@@ -4548,26 +4256,18 @@
     .typewriter-paper-bail::before,
     .typewriter-paper-bail::after,
     .typewriter-bail-roller,
-    .typewriter-carriage-knob,
-    .typewriter-carriage-knob > i,
+    .typewriter-platen-knob,
+    .typewriter-platen-knob > i,
     .typewriter-index-wheel,
     .typewriter-detent-pawl,
-    .typewriter-return-lever,
-    .typewriter-return-lever::after,
-    .typewriter-return-lever i,
-    .typewriter-type-guide {
+    .typewriter-carrier-track {
       border-color: CanvasText;
       background: Canvas;
       box-shadow: none;
       filter: none;
       forced-color-adjust: none;
     }
-    .typewriter-strike-rail::before { background: transparent; }
-    .typewriter-strike-rail::after,
-    .typewriter-paper-scale,
-    .typewriter-ribbon-band,
-    .typewriter-ribbon-band::before,
-    .typewriter-ribbon-band::after {
+    .typewriter-paper-scale {
       border-color: CanvasText;
       background: CanvasText;
       box-shadow: none;
